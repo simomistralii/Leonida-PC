@@ -19,7 +19,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ("build_runtime.ps1", "build_llvm_mc.ps1")
-LAUNCH = re.compile(r"^\$p = Start-Process cmd\.exe -ArgumentList (.+?) -NoNewWindow -PassThru\s*$", re.M)
+LAUNCH = re.compile(r"^\$p = Start-Process (?:-FilePath )?cmd\.exe -ArgumentList (.+?)(?: -NoNewWindow)? -PassThru\b", re.M)
 FOLDERS = ("plain", "a & b", "a&b", "x^y", "sp (x)", "東京 & co")
 
 
