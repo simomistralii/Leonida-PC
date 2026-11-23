@@ -18,11 +18,14 @@ class FirstLookPathTests(unittest.TestCase):
     def test_literal_image_loader_and_report_paths(self):
         source = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as tmp:
+            # first_look.ps1 reports the long form of a short temp name (RUNNER~1 -> runneradmin), like realpath.
+            tmp = os.path.realpath(tmp)
             repo = Path(tmp, "checkout [1]")
             for folder in ("scripts", "tools", "runtime/build/Release"):
                 (repo / folder).mkdir(parents=True)
             for relative in ("scripts/first_look.ps1", "tools/pe_inspect.py", "tools/gdk_runtime_calls.py",
-                             "tools/gdk_runtime_classes.json", "tools/find_hash_lookup.py", "tools/exe_checklist.py"):
+                             "tools/gdk_runtime_classes.json", "tools/find_hash_lookup.py", "tools/exe_checklist.py",
+                             "tools/report_paths.py"):
                 shutil.copyfile(source / relative, repo / relative)
             game = Path(tmp, "package [1]")
             game.mkdir()

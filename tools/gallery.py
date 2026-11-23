@@ -303,18 +303,35 @@ class StudioHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def _send_file(self, file_path: str, content_type: str) -> None:
+        # Open the file and take its size before the status line goes out. Once 200 and Content-Length are sent,
+        # an error can no longer become a 500: send_error would write a second response into this one's body.
         try:
-            size = os.path.getsize(file_path)
+            f = open(file_path, "rb")
+        except OSError as exc:
+            self.send_error(500, f"Could not open the file: {exc.strerror or exc}")
+            return
+        with f:
+            try:
+                size = os.fstat(f.fileno()).st_size
+            except OSError as exc:
+                self.send_error(500, f"Could not read the file: {exc.strerror or exc}")
+                return
             self.send_response(200)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(size))
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
-            with open(file_path, "rb") as f:
-                while chunk := f.read(65536):
+            remaining = size
+            try:
+                while remaining > 0 and (chunk := f.read(min(65536, remaining))):
                     self.wfile.write(chunk)
-        except Exception as exc:
-            self.send_error(500, str(exc))
+                    remaining -= len(chunk)
+            except OSError:
+                # A read error, or the client went away: the headers are out, so end the connection with a short
+                # body instead of appending an error page to it.
+                remaining = -1
+            if remaining:
+                self.close_connection = True
 
     def _serve_models_json(self) -> None:
         items = []

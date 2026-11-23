@@ -357,6 +357,73 @@ class TestGalleryServer(unittest.TestCase):
             self.assertEqual(r.status, 200)
             self.assertIn(b"console.log", r.read())
 
+    def _raw_get(self, path: str) -> bytes:
+        """The whole response, status line and headers included, as the socket delivered it."""
+        with socket.create_connection(("127.0.0.1", self.port), timeout=3) as sock:
+            sock.sendall(f"GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n".encode())
+            data = b""
+            while chunk := sock.recv(65536):
+                data += chunk
+        return data
+
+    def test_a_file_that_cannot_be_opened_is_one_500_response(self) -> None:
+        # _send_file used to send 200 and Content-Length before opening the file, then wrote a second status line
+        # (send_error's 500) into the body of the first.
+        def refuse(path, *args, **kwargs):
+            raise PermissionError(13, "Permission denied", path)
+
+        gallery.open = refuse
+        self.addCleanup(delattr, gallery, "open")
+        response = self._raw_get("/textures/test_tex.png")
+        self.assertEqual(response.count(b"HTTP/1."), 1, response)
+        self.assertTrue(response.startswith(b"HTTP/1.0 500 "), response)
+        self.assertNotIn(b"LOOT", response)
+
+    def test_a_read_error_after_the_headers_ends_the_response_short(self) -> None:
+        # Once 200 is out the status can't change: the body stops short and the connection closes, with no error
+        # page appended to it.
+        real_open = open
+
+        class FailingRead(io.BufferedReader):
+            def read(self, *args):
+                raise OSError(5, "Input/output error")
+
+        def failing(path, *args, **kwargs):
+            return FailingRead(real_open(path, "rb", buffering=0))
+
+        gallery.open = failing
+        self.addCleanup(delattr, gallery, "open")
+        response = self._raw_get("/textures/test_tex.png")
+        head, _, body = response.partition(b"\r\n\r\n")
+        self.assertEqual(response.count(b"HTTP/1."), 1, response)
+        self.assertTrue(head.startswith(b"HTTP/1.0 200 "), head)
+        size = os.path.getsize(os.path.join(self.textures_dir, "test_tex.png"))
+        self.assertIn(f"Content-Length: {size}".encode(), head)
+        self.assertEqual(body, b"")
+
+    def test_a_read_error_after_the_headers_closes_a_keep_alive_connection(self) -> None:
+        # The gallery answers HTTP/1.0, which closes after every response anyway. Under HTTP/1.1 the connection
+        # would stay open, so a short body must close it, or the client would wait for the missing bytes.
+        real_open = open
+
+        class FailingRead(io.BufferedReader):
+            def read(self, *args):
+                raise OSError(5, "Input/output error")
+
+        gallery.open = lambda path, *a, **k: FailingRead(real_open(path, "rb", buffering=0))
+        self.addCleanup(delattr, gallery, "open")
+        self.addCleanup(setattr, gallery.StudioHandler, "protocol_version", gallery.StudioHandler.protocol_version)
+        gallery.StudioHandler.protocol_version = "HTTP/1.1"
+        with socket.create_connection(("127.0.0.1", self.port), timeout=3) as sock:
+            sock.sendall(b"GET /textures/test_tex.png HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n")
+            data = b""
+            while chunk := sock.recv(65536):   # a socket.timeout here means the connection was left open
+                data += chunk
+        head, _, body = data.partition(b"\r\n\r\n")
+        self.assertTrue(head.startswith(b"HTTP/1.1 200 "), head)
+        self.assertEqual(data.count(b"HTTP/1."), 1, data)
+        self.assertEqual(body, b"")
+
     def test_traversal_and_sibling_prefix_escapes_are_forbidden(self) -> None:
         host = f"127.0.0.1:{self.port}"
         cases = (

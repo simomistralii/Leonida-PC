@@ -904,6 +904,15 @@ const shims::BundledModuleOps kBundledOps{
     &bundled_get_proc,
     &bundled_owns_handle,
 };
+
+// Marks what a run-time load maps as a dynamic load for as long as it is in scope (the caller holds the mutex).
+struct RuntimeLoadScope {
+    explicit RuntimeLoadScope(int& depth) : depth_(depth) { ++depth_; }
+    ~RuntimeLoadScope() { --depth_; }
+    RuntimeLoadScope(const RuntimeLoadScope&) = delete;
+    RuntimeLoadScope& operator=(const RuntimeLoadScope&) = delete;
+    int& depth_;
+};
 }  // namespace
 
 Loader::Loader(std::filesystem::path game_dir) : game_dir_(std::move(game_dir)) {
@@ -965,6 +974,7 @@ Module& Loader::load(const std::filesystem::path& image) {
     Module* mapped = nullptr;
     try {
         mapped = &map_image(image, narrow_key);
+        mapped->dynamic_load = runtime_loads_ > 0;  // before bind_imports: its dependencies are marked the same way
         bind_imports(*mapped);  // loads every bundled module m imports first, so they land in init_order_ before m
         protect_sections(*mapped);
         register_unwind(*mapped);
@@ -1004,6 +1014,7 @@ void* Loader::load_runtime_module(const std::string& dll_lower, uint32_t flags, 
     if (dll_lower.empty() || prefer_host_copy(dll_lower)) return nullptr;
 
     std::lock_guard lock(mutex_);
+    const RuntimeLoadScope dynamic(runtime_loads_);
     Module* existing = find_narrow_module(dll_lower);
     const std::filesystem::path candidate = game_dir_ / dll_lower;
     std::error_code ec;
@@ -1065,6 +1076,7 @@ void* Loader::resolve_module_export(void* module_handle, const std::string& sym,
     if (auto it = target->exports.find(sym); it != target->exports.end()) return it->second;
     if (auto it = target->forwarders.find(sym); it != target->forwarders.end()) {
         try {
+            const RuntimeLoadScope dynamic(runtime_loads_);
             Binding binding = Binding::Unimplemented;
             void* fn = resolve_forwarder(it->second, binding, 0);
             if (binding == Binding::Module) initialise();
@@ -1151,7 +1163,11 @@ void Loader::initialise(Module& m) {
     auto* nt = at<IMAGE_NT_HEADERS64>(m.base, reinterpret_cast<IMAGE_DOS_HEADER*>(m.base)->e_lfanew);
     if ((nt->FileHeader.Characteristics & IMAGE_FILE_DLL) && m.entry_rva) {
         auto entry = reinterpret_cast<BOOL(NTAPI*)(void*, DWORD, void*)>(m.base + m.entry_rva);
-        const BOOL ok = entry(m.base, DLL_PROCESS_ATTACH, nullptr);
+        // lpvReserved "is NULL for dynamic loads and non-NULL for static loads" (DllMain docs). What Windows points
+        // it at is its own; a static load gets a CONTEXT captured here, so a DLL that reads through it reads memory.
+        CONTEXT context{};
+        if (!m.dynamic_load) RtlCaptureContext(&context);
+        const BOOL ok = entry(m.base, DLL_PROCESS_ATTACH, m.dynamic_load ? nullptr : &context);
         if (startup_trace::enabled())
             startup_trace::event("dllmain", "\"module\":" + startup_trace::quote(m.name) +
                                                 ",\"result\":" + std::to_string(ok));

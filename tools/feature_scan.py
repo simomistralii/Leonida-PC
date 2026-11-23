@@ -503,7 +503,7 @@ def scan_typed_buffers(disasm_dir: str, stage_of: dict) -> dict:
 
 
 def scan_spirv(spirv_index: str) -> dict:
-    with open(spirv_index, encoding="utf-8") as f:
+    with open(spirv_index, encoding="utf-8-sig") as f:
         idx = json.load(f)
     # An object maps shader names to rows; a list is the other accepted shape. A scalar is a
     # broken index, not something to iterate -- report no translated shaders for it.
@@ -572,7 +572,7 @@ def main() -> int:
         print(f"ERROR: {index_path} is missing. Run the shaders stage of make_game.py first.", file=sys.stderr)
         return 2
     try:
-        with open(index_path, encoding="utf-8") as f:
+        with open(index_path, encoding="utf-8-sig") as f:
             index = json.load(f)
     except (OSError, ValueError) as e:
         print(f"ERROR: cannot read {index_path}: {getattr(e, 'strerror', None) or e}", file=sys.stderr)

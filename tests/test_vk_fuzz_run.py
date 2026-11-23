@@ -67,6 +67,27 @@ class ProgramText(unittest.TestCase):
         klass, why = R.exact_verdict(lines, [1, 2, 3, 4], [1, 9, 3, 4])
         self.assertEqual(klass, "mismatch")
         self.assertIn("word 1 (v2)", why)
+        klass, why = R.exact_verdict(["s_nop 0"], [1, 2], [1, 3])
+        self.assertEqual(klass, "mismatch")
+        self.assertIn("word 1 (word 1)", why)
+        klass, why = R.exact_verdict(lines, [1, 2], [1])
+        self.assertEqual(klass, "mismatch")
+        self.assertIn("word count differs", why)
+
+    def test_run_programs_rejects_invalid_wave_and_cleans_up_on_error(self):
+        import os
+        import tempfile
+        import unittest.mock as mock
+        with self.assertRaises(ValueError):
+            R.run_programs([], words=4, wave=16)
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_exe = Path(tmp) / ("vk_compute_test.exe" if os.name == "nt" else "vk_compute_test")
+            fake_exe.write_bytes(b"")
+            with mock.patch("mc_command.mc_command", side_effect=RuntimeError("boom")):
+                with self.assertRaises(RuntimeError):
+                    R.run_programs([["s_nop 0"]], words=4, wave=32, build=tmp, work_parent=tmp)
+            leftovers = [p for p in Path(tmp).iterdir() if p.name.startswith("vk_fuzz_")]
+            self.assertEqual(leftovers, [])
 
     def test_judge_counts_skips_and_mismatches(self):
         import unittest.mock as mock

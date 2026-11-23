@@ -12,6 +12,7 @@ method, scope and caveats. No game data is included.
 | [related_projects.md](related_projects.md) | Prior art we may read and the licence boundaries on it. |
 | [rpf.md](rpf.md) | RPF9 archive layout, the carve tools and the unreadable encrypted TOC. |
 | [testing.md](testing.md) | Running the GPU tests on your own GPU: setup per OS, wave64 emulation, running without a GPU on Mesa llvmpipe, and known problems. |
+| [modding.md](modding.md) | The mod format: `mods/<folder>/mod.json`, checked and loaded in name order by `gta6rt`; a swap takes effect once the game's archetype lookup is hooked (needs the executable, RT-5). A mod names game models and holds no game data. |
 | [progress_dashboard.md](progress_dashboard.md) | A local page of what works, what changed since it last passed and what blocks next: unit and runtime tests, the translator contract by confirmation method, measured imports, corpus counts and, with `--github`, CI and the D3D- items (`tools/progress_dashboard.py`). |
 
 ## Archives and assets
@@ -19,6 +20,7 @@ method, scope and caveats. No game data is included.
 | Document | Measured content |
 |---|---|
 | [models.md](models.md) | 382,781 models (0 decode failures) at the `e293917` pin, including 159,511 drawable-dictionary children; 55,417 fragments, 89,887 bone-bound and 2,636,248,990 triangles over all ten archives (`levels.rpf` from a full export); the re-count table is in models.md. |
+| [strand_grooms.md](strand_grooms.md) | GPU strand grooms (`smh`): hair, beards, brows and fur are groom LOD resources consumed by the `smh_*` compute passes, not triangle drawables (each is a one-triangle stub); the measured resource layout, the Class 0 strand scattering RNG and barycentric strand interpolation, decoded by `tools/smh_groom.py`. |
 | [character_models.md](character_models.md) | `packs.rpf` character parts at `e293917`: 26,585 rows / 11,335 unique names, 2,865 fragments (all a flat 25-vertex / 32-triangle 5x5 bounds grid at z=0), Lucia's 22 named records and the decoded 13-part export, the `player_story000_00` drawable set, slot-name token counts, texture coverage (184/215), and what is not decoded (fragment children, ped variation, hair, bind pose). |
 | [character_skeleton.md](character_skeleton.md) | Character `.#ft` fragments: the 597-name shared skeleton table (596 `joaat32` hashes), the 597-record instance tree with 580 measured parents, the model-side bone-hash mapping, and the measured vertex joint-index/skin-weight layouts (`tools/skin_streams.py`); the default bone transforms compose to the stored inverse bind matrices, and `tools/anim_glb.py` exports a skinned part with clips as an animated GLB. |
 | [resource_names.md](resource_names.md) | RPF9 named-resource index: bounded-inflate lookup for `name.#dr`/`#ft`/`#dd` without the TOC. |
@@ -39,6 +41,7 @@ method, scope and caveats. No game data is included.
 | [page_directory.md](page_directory.md) | RPF9 `0DRP`: 0x60-byte header, `q38` 16-byte records; 15,768 pages / 60,880 records in `data.rpf`; targets and sizes, names still TOC-only. |
 | [text.md](text.md) | 30,511 localized string tables (hash table, index, UTF-8 blob in `0DRP` resources) and the dialogue table: 138,104 lines joined to their subtitles in every language; language guessed per table. |
 | [psin.md](psin.md) | PSIN metadata container: header, section walk, `LSCH`/`LENM` schema, and the instance data (block table, pointers, arrays, maps) read through it on 17,507 containers, 99.986% of block bytes reached; hash-typed members resolved to resource names. |
+| [ped_catalogues.md](ped_catalogues.md) | Ped and wardrobe appearance catalogues: one schema rooted at struct `0x8dcb4cf5`, in `0DRP` v122 resources in `packs.rpf` and in the standalone `PSIN` player/wardrobe catalogue; both framings' 1-based block table and 64-bit pointer encoding (`block = ptr & 0xfffff`, `offset = ptr >> 20`). |
 | [story.md](story.md) | `story000.rpf` 18.65 GiB mixed: 264 Bink 2 streams / 3.33 GB, 225,281 `RSC8` headers, 442 nested RPF9; `story000_script` PSIN, `shared_minigame` mixed content. |
 | [restofworld.md](restofworld.md) | Six rest-of-world/script archives, 1.57 GB total: `core_restofworld` 1.21 GB (11 Bink 2, 37 models, 958 graphics pages), `story000_script` PSIN, small `appdata0`/licences. |
 | [movies.md](movies.md) | Bink 2 streams and audio tracks; decode through the real loader and `Bink2Scarlett.dll`; stream names from the mount lists. |

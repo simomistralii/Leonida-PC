@@ -836,6 +836,10 @@ void run_checks(const std::filesystem::path& root) {
                           HRESULT_FROM_WIN32(ERROR_REQUEST_ABORTED) &&
                       !std::filesystem::exists(out / "cancelled.txt"),
                   ("a cancel flag set before the copy cancels it" + mode).c_str());
+            cancel = FALSE;
+            check(copy2(L"GAME:\\misc\\keep.txt", to(L"cancelled.txt").c_str(), &block) == S_OK &&
+                      read_path(out / "cancelled.txt") == "keep",
+                  ("clearing the cancel flag allows a retry" + mode).c_str());
             block.pfCancel = nullptr;
             if (fallback) {
                 // A flag that changes what the copy produces, and which CopyFileExW can't do, is refused before

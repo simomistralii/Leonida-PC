@@ -858,3 +858,16 @@ identity elsewhere. The coverage flag independently records whether the predicte
 falls in a supplied scan (start inclusive, end exclusive). A full scan covers all offsets.
 A covered prediction with no named evidence remains missing. Geometry loadability is
 checked separately by running the normal world builder on confirmed placement rows.
+
+Add `--window-bytes BYTES` to recommend one scan in the name index's archive.
+The optional `export_window` field gives the decimal `start` and `length` for
+`rpf9dump models`. It maximizes the sum of unmatched placement rows with a
+single predicted offset in that index. Each identity contributes its placement
+count once. Ambiguous identities contribute zero. For a tie it takes the earliest
+last offset, then trims the interval to its first and last included bytes.
+An empty selection yields JSON null. Run the lookup separately for each archive.
+
+The budget bounds the half-open range of candidate **starts**. The exporter can
+inspect prefix bytes and read model segments beyond the range. The report
+predicts coverage. Confirm identities and offsets in the exported manifest and
+check the resulting placement count with `world_build.py`.

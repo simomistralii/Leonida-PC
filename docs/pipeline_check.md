@@ -225,8 +225,11 @@ modules and pipelines with **0 failures** and a 3.81 GB cache; see the "Full-cor
 compile-time stall, not a project-wide limit.
 
 The recurring slow family at every shard tail was a set of 6.7-7.2 MB ray-tracing resolve compute
-shaders. One observed single-module stall exceeded 27 minutes. The tool has no per-shader timer, so
-these are lower bounds, not exact compile times.
+shaders. One observed single-module stall exceeded 27 minutes, read from the run's progress output.
+The tool times each pipeline: `--slow SEC` prints `SLOW <stage> <name> (w<N>, <sec>s)` for a pipeline
+that takes longer than SEC, and each stage's summary ends with
+`compile time: <total>s total, <mean>s mean, slowest <name> (<sec>s)`. A run with `--slow 0` therefore
+reports such a stall with its duration, not as a lower bound.
 
 ## Bounded guaranteed-finish sample
 

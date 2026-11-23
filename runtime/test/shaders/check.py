@@ -32,6 +32,29 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 EXE = ".exe" if os.name == "nt" else ""
 UNSUPPORTED = 77                                       # a test tool exits with this when the device lacks a feature
 
+
+def barycentric_fallback_override():
+    v = (os.environ.get("LEONIDA_BARY_FALLBACK") or "").strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return None
+
+
+def barycentric_fallback():
+    override = barycentric_fallback_override()
+    if override is not None:
+        return override
+    try:
+        tools = os.path.abspath(os.path.join(HERE, "..", "..", "..", "tools"))
+        r = subprocess.run([sys.executable, "-I", os.path.join(tools, "vk_subgroup_info.py")],
+                           capture_output=True, text=True, timeout=60)
+        answer = json.loads(r.stdout.strip().splitlines()[-1])
+        return answer.get("barycentric_fallback") is True
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return False
+
 # The programs every run needs. Multi-config CMake generators (Visual Studio, Xcode, Ninja Multi-Config) put each of
 # them in build/<Config> instead of build/ (TEST-38).
 TEST_PROGRAMS = ("vk_compute_test", "vk_store_test", "vk_harness")
@@ -348,9 +371,8 @@ PK_MUL_LO_WORDS = [0x00009E88, 0x03675433, 0x00230000, 0x00077F6C] * 2
 # Wave64-only dump tests (mostly the x = cross-half checks): exact results need 64 lanes, or an emulation of them
 # on narrower subgroups. cs_dpp_w64 is not cross-half, but its lane id needs both halves.
 W64_EMULATED = os.environ.get("LEONIDA_W64_EMULATE") == "1"
-# LEONIDA_BARY_FALLBACK=1 (set for build.py too): a pixel shader that reads raw barycentrics was translated with
-# --bary-fallback and is drawn through its pass-through geometry shader, <name>.bary_gs.spv.
-BARY_FALLBACK = os.environ.get("LEONIDA_BARY_FALLBACK") == "1"
+# LEONIDA_BARY_FALLBACK=1/0 overrides the device probe for raw barycentrics. Unset, Mesa ANV selects the fallback.
+BARY_FALLBACK = barycentric_fallback()
 # LEONIDA_F16_INTERP_FALLBACK=1 (as build.py reads it): *_f16 interps were translated from decoded-half inputs, with no
 # PerVertexKHR inputs at all, so the translator refuses a computed I/J pair (ps_ij_computed) there.
 F16_HALVES = os.environ.get("LEONIDA_F16_INTERP_FALLBACK") == "1"
@@ -512,6 +534,7 @@ PIXEL_ENV = {"ps_vcc_x2": {"VKH_SGPRS": "0x1000,0,16,0", "VKH_HEAP": "0x1000=0x1
 TEXTURE_CONSTANTS = {
     "ps_gather_wrap": (5090733.0, 14942181.0, 258623.0, 9702309.0),
     "ps_gather_border": (32776.0, 34935.0, 34680.0, 28679.0),  # SHADER-348: border modes 6 and 7, derived in the .asm
+    "ps_gather4_c_l": (6.0, 9.0, 17459.0, 9.0),  # image_gather4_c_l / _c_l_o / _cl / _c_b_cl_o d16
     "ps_array_resinfo": (8.0, 8.0, 12.0, 1.0),  # binding 3, index 1: two 6-face cubes, one mip
 }
 CLIP_TESTS = ("vs_clip", "vs_clip_param4", "vs_clip_undeclared")

@@ -122,6 +122,46 @@ class MergeCheckTest(unittest.TestCase):
         self.assertEqual(r["merges"], [])  # another number: only the text check can see it
         self.assertEqual(r["duplicates"], {"docs/notes.md": 3})
 
+    def test_patch_paths_and_added_header_like_lines_still_count_duplicates(self):
+        paths = ("docs/quoted \u65e5\u672c\u8a9e.md", "docs/notes with spaces.md", "docs/header-like.md")
+        header_like = "++ " + PARAGRAPH
+        introduction = "A separator between copies keeps Git's added hunk easy to identify.\n"
+        self.git("config", "core.quotePath", "true")
+        for path in paths:
+            self.write(path, PARAGRAPH + header_like + introduction)
+        self.commit("Existing translated documents")
+        self.git("checkout", "-q", "-b", "duplicated")
+        for path in paths:
+            self.append(path, "\n" + (header_like if path.endswith("header-like.md") else PARAGRAPH))
+        self.commit("Duplicate docs")
+        self.git("checkout", "-q", "main")
+
+        code, [result] = self.run_check("18=duplicated")
+        self.assertEqual((code, result["verdict"]), (1, "duplicates"))
+        self.assertEqual(result["duplicates"], dict.fromkeys(paths, 3))
+
+        self.git("config", "diff.noprefix", "true")
+        self.git("config", "core.quotePath", "false")
+        self.assertEqual(self.run_check("18=duplicated"), (code, [result]))
+
+    def test_duplicate_blocks_use_git_line_boundaries(self):
+        unicode_lines = "".join(f"Paragraph {i} begins with enough text to count as a line.\u2028"
+                                "Its continuation is also longer than forty characters.\n" for i in range(3))
+        bare_cr_lines = unicode_lines.replace("\u2028", "\r")
+        paths = {"docs/notes.md": unicode_lines, "docs/cr.md": bare_cr_lines}
+        for path, text in paths.items():
+            self.write(path, text + "An unrelated line separates the two copies.\n")
+        self.commit("Add paragraphs with embedded line separators")
+        self.git("checkout", "-q", "-b", "duplicate-separators")
+        for path, text in paths.items():
+            # Read bytes here because normal text reads turn a bare CR into an LF.
+            with open(os.path.join(self.repo, path), "ab") as f:
+                f.write(text.encode("utf-8"))
+        self.commit("Duplicate both paragraphs")
+        self.git("checkout", "-q", "main")
+        code, [result] = self.run_check("19=duplicate-separators")
+        self.assertEqual((code, result["duplicates"]), (1, dict.fromkeys(paths, 3)))
+
     def test_a_block_the_pr_moves_is_not_a_duplicate(self):
         base = self.git("rev-parse", "main")
         self.pr_branch("first", base, "\n" + PARAGRAPH)

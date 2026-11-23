@@ -65,6 +65,9 @@ CAUGHT = [
     ("texcontainer.dat", b"RDS5" + bytes(12), "RDS5 texture container"),
     ("bank2.json", b"AWC\x00" + bytes(12), "AWC audio bank"),
     ("script.lol", b"YSC\x00" + bytes(12), "YSC compiled script"),
+    ("anim.bin", b"MoVE" + (19).to_bytes(4, "little") + bytes(8), "MoVE animation container"),
+    ("bones.dat", b"SKEL_" + b"SKEL_Head\x00" + bytes(8), "SKEL_ bone table"),
+    ("script2.lol", b"SCRP" + bytes(12), "SCRP compiled script"),
 ]
 
 PASSED = [
@@ -72,6 +75,7 @@ PASSED = [
     ("logo.png", b"\x89PNG\r\n\x1a\n" + bytes(16)),
     ("mz.txt", b"MZ is not enough on its own\n"),
     ("metadata.txt", b"METADATA ADAT later in the line\n"),
+    ("bones.md", b"# SKEL_HEAD, MoVE and SCRP name formats; none of them starts this file\n"),
     ("riff.bin", b"RIFF" + bytes(4) + b"AVI LIST"),
     ("empty.txt", b""),
     ("mz_past_end.txt", pe_header(0x80)[:0x40]),  # e_lfanew points past the end of the file

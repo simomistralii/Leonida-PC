@@ -4,7 +4,9 @@
 
 Every byte is synthesized by the test. No game file, game audio, or game asset name is used.
 """
+import contextlib
 import csv
+import io
 import json
 import os
 import struct
@@ -12,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOL = os.path.join(ROOT, "tools", "rsc8_audio.py")
@@ -518,6 +521,21 @@ class AwcAndArchiveScanTest(unittest.TestCase):
         self.assertTrue(all(r["valid"] for r in res["records"]))
         self.assertEqual(res["records"][0]["audio_codec"], 0x0B)
         self.assertAlmostEqual(res["records"][0]["audio_duration"], 89600 / 48000.0, places=5)
+
+    def test_progress_does_not_interrupt_the_json_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = os.path.join(tmp, "empty.rpf")
+            with open(archive, "wb") as f:
+                f.write(bytes(64))
+            for quiet in (False, True):
+                with self.subTest(quiet=quiet), mock.patch.object(rsc8_audio, "PROGRESS_BYTES", 64), \
+                        contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+                    self.assertEqual(rsc8_audio.main([archive] + (["--quiet"] if quiet else [])), 0)
+                    self.assertEqual(json.loads(out.getvalue())["span"], 64)
+                    if quiet:
+                        self.assertEqual(err.getvalue(), "")
+                    else:
+                        self.assertIn("100.0%", err.getvalue())
 
     def test_scan_rpf_with_and_without_stray_rsc8(self):
         c0 = build_synthetic_rsc8(stream_hash=0x20112233, frames=142)

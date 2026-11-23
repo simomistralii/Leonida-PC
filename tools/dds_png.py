@@ -11,10 +11,10 @@ byte) decodes as transparent black. BC6H is not supported.
 DXT2, DXT4 and premultiplied DX10 images are converted to straight alpha for PNG.
 For tagged sRGB images, unpremultiplication and downscaling use linear light. The PNG stores sRGB bytes.
 
-DX10 R16_FLOAT (54) and R16G16B16A16_FLOAT (10) are read as linear values and
+DX10 R16_FLOAT (54), R32_FLOAT (41) and R16G16B16A16_FLOAT (10) are read as linear values and
 written like the UNORM formats, with no tone mapping or sRGB transfer: clamp to
 [0, 1], then round(v * 255) half up. +inf saturates to 255; -inf, negative values
-and NaN map to 0. R16_FLOAT fills red, with green and blue 0 and alpha 255;
+and NaN map to 0. The single-channel formats fill red, with green and blue 0 and alpha 255;
 R16G16B16A16_FLOAT keeps its own alpha.
 R11G11B10_FLOAT previews clamp RGB to [0, 1], map NaN to zero and use opaque alpha.
 
@@ -86,6 +86,7 @@ _DXGI_MAP: dict[int, str] = {
     92: "BGRX8",
     93: "BGRX8",
     26: "R11G11B10_FLOAT",
+    41: "R32_FLOAT",
     56: "R16_UNORM",
     65: "A8_UNORM",
     70: "BC1",
@@ -367,6 +368,7 @@ class _Plane(NamedTuple):
 _TEXEL_BYTES = {
     "RGBA8": 4, "BGRA8": 4, "BGRX8": 4, "RGBX8": 4, "R11G11B10_FLOAT": 4,
     "BGR8": 3, "RGB8": 3, "R16_UNORM": 2, "A8_UNORM": 1,
+    "R32_FLOAT": 4,
     **{fmt: layout[0] for fmt, layout in _HALF_FLOAT_LAYOUT.items()},
 }
 
@@ -1054,8 +1056,8 @@ def _decode_r11g11b10(payload: memoryview, width: int, height: int, pitch: int) 
 
 
 def _decode_single_channel(payload: memoryview, width: int, height: int, pitch: int, fmt: str) -> bytes:
-    """R16_UNORM (opaque, red only) and A8_UNORM (alpha only, as D3D samples it)."""
-    bpp = 2 if fmt == "R16_UNORM" else 1
+    """Red-only R16_UNORM/R32_FLOAT and alpha-only A8_UNORM."""
+    bpp = _TEXEL_BYTES[fmt]
     row_bytes = width * bpp
     pitch = pitch or row_bytes
     if pitch < row_bytes:
@@ -1065,14 +1067,21 @@ def _decode_single_channel(payload: memoryview, width: int, height: int, pitch: 
         raise DdsError(f"Truncated {fmt} payload: {len(payload)} bytes (need {expected})")
 
     rgba = bytearray(width * height * 4)
-    if fmt == "R16_UNORM":
+    if fmt != "A8_UNORM":
         rgba[3::4] = b"\xff" * (width * height)
     dst = 0
     for start in range(0, height * pitch, pitch):
         row = payload[start:start + row_bytes]
-        if bpp == 2:
+        if fmt == "R16_UNORM":
             for (v,) in struct.iter_unpack("<H", row):
                 rgba[dst] = (v * 255 + 32767) // 65535
+                dst += 4
+        elif fmt == "R32_FLOAT":
+            for (v,) in struct.iter_unpack("<f", row):
+                if v >= 1:
+                    rgba[dst] = 255
+                elif v > 0:  # Negative values and NaN leave red at zero.
+                    rgba[dst] = int(v * 255 + 0.5)
                 dst += 4
         else:
             rgba[dst + 3:dst + 4 * width:4] = row
@@ -1260,7 +1269,7 @@ def _decode_plane(data: bytes | bytearray | memoryview, plane: _Plane, info: _Dd
         rgba = _decode_bc5(payload, 0, width, height, signed=True)
     elif fmt == "R11G11B10_FLOAT":
         rgba = _decode_r11g11b10(payload, width, height, pitch)
-    elif fmt in ("R16_UNORM", "A8_UNORM"):
+    elif fmt in ("R16_UNORM", "R32_FLOAT", "A8_UNORM"):
         rgba = _decode_single_channel(payload, width, height, pitch, fmt)
     elif fmt == "BC7":
         rgba = _decode_bc7(payload, 0, width, height)

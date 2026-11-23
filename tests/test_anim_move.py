@@ -389,6 +389,14 @@ class AnimMoveTest(unittest.TestCase):
         with open(rpf, "rb") as f:
             self.assertEqual(f.read(), original)
 
+    def test_module_docstring_has_no_double_encoded_characters(self):
+        """The preamble layout uses U+00D7; it was once stored as the pair U+00C3 U+2014."""
+        with open(TOOL, encoding="utf-8") as f:
+            source = f.read()
+        for broken in ("\u00c3\u2014", "\u00e2\u20ac", "\u00c2"):
+            self.assertNotIn(broken, source)
+        self.assertIn("N_req \u00d7 u32 request hashes", source)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -100,6 +100,14 @@ Actions -> Runtime, and check out the commit it built, or start a run of the com
 python -I scripts/run_gpu_tests.py --build <unzipped runtime-windows>
 ```
 
+If you also have neither `llvm-mc` nor SPIRV-Tools (`spirv-as` / `spirv-val`) installed, `--disasm-dir` runs the
+pre-disassembled subset in `tests/semantic/fixtures/disasm` and `--assembler python` (the default under `auto` when
+`spirv-as` is absent) assembles SPIR-V with `tools/spirv_asm.py`:
+
+```sh
+python -I scripts/run_gpu_tests.py --build <unzipped runtime-windows> --disasm-dir tests/semantic/fixtures/disasm --assembler python
+```
+
 `build.py` and `check.py` take the same folder as their second argument:
 
 ```sh
@@ -439,6 +447,20 @@ too and which `--bary-fallback` can't express. With `LEONIDA_F16_INTERP_FALLBACK
 exports decoded instead (see Macs, below) and run with or without the bary fallback; `run_gpu_tests.py` turns that
 on by itself where the device lacks the extension. Under the bary fallback without it they skip.
 
+Intel Arc with Mesa ANV currently advertises the native barycentric feature but has a driver bug where translated
+pixel shaders can read `BaryCoordKHR.i` as zero (SHADER-925). `make_game.py` detects ANV and automatically translates
+with `--bary-fallback`; both entry points accept `LEONIDA_BARY_FALLBACK=1` to force it and
+`LEONIDA_BARY_FALLBACK=0` to force native barycentrics. The CLI `--bary-fallback` flag also remains available for
+game builds and other manually built fixtures.
+
+AMD's Windows driver on gfx90c iGPUs (Renoir, Lucienne, Cezanne, Barcelo: Ryzen 4000/5000 mobile and 5000G, GCN 5)
+also advertises the feature but returns a wrong third `BaryCoordKHR` component, about 0.99 where a small value is
+expected (#5933: Vega 8, PCI 1002:15E7, driver 31.0.21921.13001). `ps_bary`, `ps_persp_bary` and `ps_ij_computed`
+fail natively; through the fallback `ps_bary` and `ps_persp_bary` pass. `tools/vk_subgroup_info.py` reports
+`barycentric_fallback` for these PCI IDs under `VK_DRIVER_ID_AMD_PROPRIETARY`, so `make_game.py` and
+`run_gpu_tests.py` turn the fallback on by themselves there, with the same `LEONIDA_BARY_FALLBACK` override. RADV and
+other GCN 5 GPUs are not covered: none has been measured.
+
 ## Macs: 16-bit interpolation without PerVertexKHR
 
 `ps_interp_f16_high` (and `ms_f16_pack`) normally read 16-bit interpolants through `PerVertexKHR` inputs, which
@@ -551,6 +573,7 @@ game's device ignores it`, so leaving them set cannot slow a game down (`run_tin
 | `build.py`: 0 translated, reason `.text` | An old `build.py` with LLVM 19 | Update to current `main` |
 | `vk_harness` doesn't compile: `VK_KHR_maintenance8` names unknown | Vulkan headers older than the SDK the code was written against | Update to current `main` (the code now builds without it), or use current Khronos Vulkan-Headers; conda-forge's package is too old |
 | `ps_bary` and `ps_uniform_branch` fail by about 0.9 | The GPU runs pixel shaders wave64 without fragment barycentrics (GCN3 and RDNA1 on RADV), or an old AMD Windows driver (22.40) | Current `main` skips them on such devices; on Windows, update the driver |
+| `ps_bary`, `ps_persp_bary` and `ps_ij_computed` read the third barycentric as about 0.99 on a gfx90c iGPU (Vega 8, AMD Windows driver 31.0.21921.13001; #5933) | The driver's native `BaryCoordKHR` is wrong there: the same tests pass through `--bary-fallback`, and natively on RADV (Radeon 8060S) | `tools/vk_subgroup_info.py` turns the fallback on by itself for gfx90c under AMD's driver, and `make_game.py`, `run_gpu_tests.py`, `build.py` and `check.py` follow it when `LEONIDA_BARY_FALLBACK` is unset; `=1` forces the fallback and `=0` forces native barycentrics, where they still fail |
 | `cs_w32_salu64` gives eight wrong words on RDNA1 under RADV Mesa 25.2.8 (`0x1E6A2C48 0x1234 0 0x100 47 48 0xFFFF8000 0xFFFFFFFE`, where word 2 should be `0xFFFFFFFF`) | Only the high word of the `s_bfe_i64` result is wrong. The same words appear on four pinned V540s (Navi 12, PCI `1002:7360`) and on a clean upstream/main worktree, and three different valid SPIR-V sign-extension formulations give the same result while the CPU interpreter matches, so this is the driver version rather than the translator (SHADER-276) | Expected with Mesa 25.2.8; the fixture passes on NVIDIA and on AMD's Windows driver. Try a newer Mesa before treating it as a translator bug; do not weaken the fixture's expectation |
 | `d3d12_typeless_rtv` fails its WARP comparison on an AMD desktop iGPU (TEST-591) | [Reported on the Ryzen 5 7600X iGPU with Windows 10 build 19045 and AMD 23.40.02](https://github.com/ItsNotRexed/Leonida/issues/166#issuecomment-7083403389). The exact cause is still open. | Retest on a newer Windows and AMD driver combination. Passing results were reported on the [Ryzen 9 7900 iGPU with AMD 25.10.30.02](https://github.com/ItsNotRexed/Leonida/issues/3232#issuecomment-7085263408), a [gfx1036 iGPU with AMD 26.5.2](https://github.com/ItsNotRexed/Leonida/issues/2891#issuecomment-7084023801), and the [Ryzen 7 9800X3D iGPU with driver 32.0.21045.29003](https://github.com/ItsNotRexed/Leonida/pull/3440). |
 | `ps_interp_f16_high` fails on a Mac: `PerVertexKHR decoration is not supported in MSL`, then `vkCreateGraphicsPipelines` -3 | MoltenVK can't convert `PerVertexKHR` inputs to Metal | Current `main` translates it with `--f16-interp-fallback` on MoltenVK (see "Macs: 16-bit interpolation") |
@@ -603,6 +626,32 @@ of RDNA translation. Independent runs of the same probe reproduced those three m
 a Linux RTX 5090 (595.99.02). On Windows, a Ryzen 7 9800X3D Radeon iGPU (25.10.30.02),
 an RTX 3080 (616.64) and an RTX 3060 (621.14) preserved all 768 words in both formats.
 The device reports are in [PR #3260](https://github.com/ItsNotRexed/Leonida/pull/3260).
+
+### Which known problems the game's shaders reach
+
+Several rows of the table above are tied to particular instructions. A GPU test or fuzzer that hits one does
+not by itself mean the game does. The counts below say how many of the 26,503 1.0.2.1 shaders (`shaders.rpf`,
+LLVM gfx1013) contain those instructions, by stage and by the wave size their FSSM header gives. They are
+counts of instructions over the program up to each listing's last `s_endpgm`. They are not reproductions: a
+shader that contains an instruction does not have to take the exact path a row describes.
+
+```sh
+python -I tools/op_reach.py <work>/shaders/dxbc/disasm --index <work>/shaders/dxbc/index.json \
+    --fssm <work>/shaders/dxbc/fssm s_bfe_i64 '*_dpp' v_permlanex16_b32 ds_bpermute_b32 v_mul_f16 ...
+```
+
+The corpus has 2,662 wave32 shaders (1,535 CS, 1,127 PS) and 23,841 wave64 shaders (every VS, GS and MS, 1,154
+CS, 10,974 PS).
+
+| Row | What the game's shaders contain (1.0.2.1) |
+|---|---|
+| `cs_w32_salu64` on RDNA1 / RADV 25.2.8 (the high word of `s_bfe_i64`) | **No shader uses `s_bfe_i64`** (nor `s_bfe_u64`). The fixture's failure does not reach a game shader. |
+| `lds_fuzz.py --wave 64` `ds_bpermute_b32` on AMD's Windows driver | **No wave64 shader uses `ds_bpermute_b32`**: it occurs in 5 wave32 CS (74 instructions), and `ds_permute_b32` in none. |
+| `crosslane_fuzz.py --wave 64` on an AMD iGPU (a `v_permlanex16_b32` after a partial-`row_mask` DPP) | DPP in 4,313 shaders, 2,496 of them wave64 (2,364 PS, 113 CS, 17 MS, 2 VS). `v_permlanex16_b32` in 2,293 shaders, 561 of them wave64. Whether any of them pairs the two with a partial `row_mask` is not counted, so these are upper bounds. |
+| `cs_dpp_ops` on MoltenVK 1.4.2 | DPP (any `*_dpp`) in 4,313 shaders (66,354 instructions): 1,817 wave32, 2,496 wave64. |
+| `valu_fuzz.py --family f16` signed zero on MoltenVK | `v_mul_f16` 124 shaders, `v_fma_f16` 124, `v_fmac_f16` 130, `v_pk_mul_f16` 55, `v_pk_fma_f16` 47, mostly PS (113–115 for the scalar forms). |
+| `ps_interp_f16_high` on MoltenVK (16-bit interpolation) | `v_interp_p1ll_f16` / `v_interp_p2_f16` in 4,776 PS (679 wave32, 4,097 wave64), 59,367 instructions each. The count is the instruction, not the `high` operand. |
+| `gs_tri` and `ms_tri` on a Mac | 195 GS and 9,282 MS, all wave64. |
 
 ## Posting your result
 

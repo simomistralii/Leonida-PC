@@ -20,6 +20,18 @@ import unicodedata
 _PC_CASE_SENSITIVE = 11  # <sys/unistd.h> on macOS; os.pathconf_names doesn't list it
 
 
+def os_error_text(error):
+    """An exception's text for a message. str(OSError) prints its filename through repr(), which doubles every
+    Windows backslash and escapes quotes, so a path in the message no longer matches the path the user typed.
+    This keeps the errno, the message and the exact name(s); the exception itself is not changed or replaced."""
+    if isinstance(error, OSError) and error.filename is not None and error.errno is not None:
+        text = f"[Errno {error.errno}] {error.strerror}: {error.filename}"
+        if error.filename2 is not None:
+            text += f" -> {error.filename2}"
+        return text
+    return str(error)
+
+
 def case_insensitive_volume(path):
     """True when the volume that will hold `path` ignores letter case, as macOS's default APFS volume does.
     os.path.normcase folds case only on Windows, so on macOS `R.json` and `r.json` would pass as two reports."""

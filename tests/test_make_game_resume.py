@@ -40,6 +40,10 @@ class ResumeShardsTest(unittest.TestCase):
                 self.n = int(args[args.index("--shard") + 1].split("/")[1])
                 started.append(self.i)
 
+            def poll(self):
+                # translate() polls its shards; a fake shard finishes (or crashes) the moment it is asked.
+                return self.wait()
+
             def wait(self):
                 if self.i in crash:
                     return 1

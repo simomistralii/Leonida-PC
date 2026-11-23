@@ -415,9 +415,13 @@ Target write_target(const std::wstring& path, bool copy_up) {
         std::filesystem::create_directories(staging, ec);
         const std::filesystem::path tmp =
             staging / (std::to_wstring(::GetCurrentProcessId()) + L"-" + std::to_wstring(++s_copies));
-        if (!ec) std::filesystem::copy_file(package_path, tmp, std::filesystem::copy_options::overwrite_existing, ec);
+        // Use CopyFileW for staging because MSVC's std::filesystem::copy_file calls CopyFile2, which Wine 9 lacks.
         if (ec) {
             t.error = static_cast<DWORD>(ec.value());
+        } else if (!::CopyFileW(package_path.c_str(), tmp.c_str(), FALSE)) {
+            t.error = ::GetLastError();
+        }
+        if (t.error) {
             std::filesystem::remove(tmp, ec);
             return t;
         }

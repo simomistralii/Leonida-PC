@@ -4,9 +4,9 @@
 
 FAILED_LIST is a file with one failed test name per line, EXIT_STATUS the test runner's exit status, and each
 EXPECTED argument one or more whitespace-separated test names (so a workflow can pass one quoted list). Exits 1 when a
-test outside EXPECTED failed, or when the runner failed without naming a test (a crash, a build error); 2 on a usage
-error, including a non-integer EXIT_STATUS or a FAILED_LIST that cannot be read, reported as one line. `--help` prints
-this text. An expected failure that passed gets a GitHub Actions notice, so the list in the workflow can shrink.
+test outside EXPECTED failed, the runner failed without naming a test, or the runner was terminated by a signal
+(its failure list can be incomplete); 2 on a usage error. `--help` prints this text. An expected failure absent
+from a completed run gets a GitHub Actions notice so the list in the workflow can shrink.
 """
 
 import sys
@@ -16,6 +16,10 @@ def judge(failed: list[str], status: int, expected: list[str]) -> tuple[int, lis
     """(exit status, GitHub Actions workflow commands to print)."""
     unexpected = [name for name in failed if name not in expected]
     lines = [f"::error::{name} failed" for name in unexpected]
+    # subprocess reports a signal as -N; the shell pipelines in runtime.yml report it as 128+N.
+    if status < 0 or 128 < status <= 255:
+        lines.append(f"::error::abnormal test runner exit {status}; the failure list may be incomplete")
+        return 1, lines
     if status != 0 and not failed:
         lines.append(f"::error::the test runner exited with {status} without naming a failed test")
     for name in expected:

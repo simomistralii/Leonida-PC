@@ -151,7 +151,7 @@ def build_report(index, caps, chains=None):
 
 def load_json(path):
     try:
-        with path.open(encoding="utf-8") as source:
+        with path.open(encoding="utf-8-sig") as source:
             return json.load(source)
     except (OSError, ValueError) as exc:
         raise ValueError(f"cannot read JSON input {path}: {exc}") from exc

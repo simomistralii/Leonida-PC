@@ -153,6 +153,14 @@ class ExeChecklist(unittest.TestCase):
         self.assertIn("would overwrite", stderr.getvalue())
         self.assertEqual([report.read_bytes() for report in reports], original)
 
+    def test_an_out_that_cannot_be_written_is_exit_1(self):
+        # --out under a folder that does not exist was a FileNotFoundError traceback.
+        out = os.path.join(self.root, "missing_dir", "notes.md")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ec.main(["--root", self.root, "--out", out]), 1)
+        self.assertIn("cannot write the checklist", stderr.getvalue())
+
     def test_out_cannot_overwrite_any_input_report(self):
         first = Path(self.root, "first.json")
         second = Path(self.root, "second.json")
@@ -180,6 +188,10 @@ class ExeChecklist(unittest.TestCase):
         self.assertTrue(any(n["file"] == "runtime/shims/xgameruntime_store.cpp" and "SKU_ID_SIZE" in n["text"]
                             for n in notes))
         self.assertTrue(any(n["file"] == "docs/runtime_imports.md" and n["kind"] == "UNVERIFIED" for n in notes))
+        # d3d12_vulkan.md's console assumptions carry the page-wide uppercase marker, so the first look lists them
+        self.assertTrue(any(n["file"] == "docs/d3d12_vulkan.md" and n["kind"] == "ASSUMPTION" for n in notes))
+        # so does modding.md's note on the three settings only the executable can confirm
+        self.assertTrue(any(n["file"] == "docs/modding.md" and n["kind"] == "ASSUMPTION" for n in notes))
 
 
 if __name__ == "__main__":

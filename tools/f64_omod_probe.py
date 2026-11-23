@@ -265,7 +265,7 @@ def self_test():
 
 def write_report(path, report):
     try:
-        with open(path, "w", encoding="utf-8") as fh:
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
             json.dump(report, fh, ensure_ascii=False, indent=1)
         return True
     except OSError as exc:

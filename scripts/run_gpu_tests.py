@@ -129,7 +129,25 @@ def assemble_to_s(llvm_mc: str, asm_path: str, s_path: str, name: str) -> None:
         f.write("\n".join(lines) + "\n")
 
 
-def spirv_as(asm_text: str, out_spv: str) -> None:
+def resolve_assembler(choice: str) -> str:
+    """Resolve --assembler choice ('auto', 'spirv-as', or 'python') to a concrete assembler name."""
+    if choice in ("spirv-as", "python"):
+        return choice
+    if choice == "auto":
+        return "spirv-as" if shutil.which("spirv-as") else "python"
+    raise ValueError(f"unknown assembler: {choice!r}")
+
+
+def spirv_as(asm_text: str, out_spv: str, assembler: str = "spirv-as") -> None:
+    if assembler == "python":
+        import spirv_asm
+        try:
+            spv_bytes = spirv_asm.assemble(asm_text, target_env="vulkan1.2")
+        except spirv_asm.SpirvAsmError as exc:
+            raise RuntimeError(f"spirv_asm failed for {out_spv}:\n{exc}") from None
+        with open(out_spv, "wb") as f:
+            f.write(spv_bytes)
+        return
     p = subprocess.run(["spirv-as", "--target-env", "vulkan1.2", "-o", out_spv, "-"],
                        input=asm_text, capture_output=True, text=True)
     if p.returncode != 0:
@@ -286,10 +304,15 @@ def run_cmd(cmd: list[str], env: dict | None = None, gpu: bool = True, *,
 
 
 def bary_fallback() -> bool:
-    """LEONIDA_BARY_FALLBACK=1: pixel shaders that read raw barycentrics are translated with --bary-fallback and drawn
-    through their pass-through geometry shader (tools/bary_fallback_gs.py), so they run on a device without
-    VK_KHR_fragment_shader_barycentric (NVIDIA Pascal, for one)."""
-    return (os.environ.get("LEONIDA_BARY_FALLBACK") or "").strip().lower() in ("1", "true", "yes", "on")
+    """LEONIDA_BARY_FALLBACK=1 (or 0): translate raw barycentrics to an ordinary vec3 input and draw it through
+    tools/bary_fallback_gs.py. Unset, it is on where tools/vk_subgroup_info.py reports a driver with a known
+    BaryCoordKHR bug: Mesa ANV (SHADER-925) and AMD's Windows driver on gfx90c iGPUs (#5933)."""
+    v = (os.environ.get("LEONIDA_BARY_FALLBACK") or "").strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return _device_barycentric_fallback() is True
 
 
 def f16_interp_fallback() -> bool:
@@ -305,6 +328,7 @@ def f16_interp_fallback() -> bool:
 
 
 _PER_VERTEX = []
+_BARYCENTRIC_FALLBACK = []
 
 
 def _device_per_vertex():
@@ -319,6 +343,21 @@ def _device_per_vertex():
             pass
         _PER_VERTEX.append(answer)
     return _PER_VERTEX[0]
+
+
+def _device_barycentric_fallback():
+    """barycentric_fallback from tools/vk_subgroup_info.py (Mesa ANV, SHADER-925; AMD Windows on gfx90c, #5933),
+    cached per suite."""
+    if not _BARYCENTRIC_FALLBACK:
+        answer = None
+        try:
+            r = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "vk_subgroup_info.py")],
+                               capture_output=True, text=True, timeout=60)
+            answer = json.loads(r.stdout.strip().splitlines()[-1]).get("barycentric_fallback")
+        except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+            pass
+        _BARYCENTRIC_FALLBACK.append(answer)
+    return _BARYCENTRIC_FALLBACK[0]
 
 
 def w64_emulated() -> bool:
@@ -699,12 +738,26 @@ def main() -> int:
     ap.add_argument("--work", default=None)
     ap.add_argument("--filter", default="")
     ap.add_argument("--require-pass", action="store_true", help="exit 1 if no GPU test passes")
+    ap.add_argument("--assembler", choices=("auto", "spirv-as", "python"), default="auto",
+                    help="SPIR-V assembler: auto (use spirv-as if on PATH, else tools/spirv_asm.py), "
+                         "spirv-as, or python")
+    ap.add_argument("--no-validate", action="store_true",
+                    help="skip spirv-val during translation (automatic when --assembler resolves to python "
+                         "and spirv-val is not on PATH)")
+    ap.add_argument("--disasm-dir", default=None,
+                    help="folder of pre-disassembled <name>.s listings (e.g. tests/semantic/fixtures/disasm); "
+                         "skips llvm-mc and runs only fixtures present there")
     a = ap.parse_args()
     # Some test programs run with their working directory in <work>/spirv (vk_texture_test), so a relative path
     # given here would point somewhere else for them.
     a.build = os.path.abspath(a.build)
     if a.work:
         a.work = os.path.abspath(a.work)
+    if a.disasm_dir is not None:
+        a.disasm_dir = os.path.abspath(a.disasm_dir)
+        if not os.path.isdir(a.disasm_dir):
+            print(f"error: --disasm-dir is not a directory: {a.disasm_dir}", file=sys.stderr)
+            return 2
 
     ext = ".exe" if os.name == "nt" else ""
     required = tuple(t + ext for t in TEST_PROGRAMS)
@@ -761,10 +814,24 @@ W64_GRAPHICS_ONLY = _w64_graphics_only()
 
 
 def run_suite(a, work: str) -> int:
+    assembler = resolve_assembler(getattr(a, "assembler", "auto"))
+    explicit_no_validate = bool(getattr(a, "no_validate", False))
+    no_validate = explicit_no_validate or (assembler == "python" and shutil.which("spirv-val") is None)
+    disasm_src = getattr(a, "disasm_dir", None)
+
     asm_files = sorted({f for f in os.listdir(SHADER_DIR) if f.endswith(".asm")} | {n + ".asm" for n in CLIP_CASES})
     # The wave64 pixel fixtures of runtime/test/shaders/w64_graphics.py (tiers A-C, #1541) are checked by that
     # runner, not here: they need a 64-wide fragment subgroup or the halves-aware lowering it drives.
     asm_files = [f for f in asm_files if f[:-4] not in W64_GRAPHICS_ONLY]
+    if disasm_src is not None:
+        available = {os.path.splitext(f)[0] for f in os.listdir(disasm_src) if f.endswith(".s")}
+        asm_files = [
+            f for f in asm_files
+            if all(os.path.splitext(p)[0] in available for p in with_draw_shaders([f]))
+        ]
+        if not asm_files:
+            print(f"error: --disasm-dir {disasm_src!r} matched no GPU test cases", file=sys.stderr)
+            return 2
     if a.filter:
         asm_files = [f for f in asm_files if a.filter in f]
         if not asm_files:
@@ -813,7 +880,14 @@ def run_suite(a, work: str) -> int:
                 f.write(compute_header(os.path.join(SHADER_DIR, fname)))
         fname = shader_source(name) + ".asm"
         disasm_path = os.path.join(disasm_dir, f"{name}.s")
-        assemble_to_s(a.llvm_mc, os.path.join(SHADER_DIR, fname), disasm_path, name)
+        if disasm_src is not None:
+            try:
+                shutil.copyfile(os.path.join(disasm_src, f"{name}.s"), disasm_path)
+            except shutil.SameFileError:
+                # A replay can use the work folder's existing listings as its source.
+                pass
+        else:
+            assemble_to_s(a.llvm_mc, os.path.join(SHADER_DIR, fname), disasm_path, name)
         disasm_files.append(disasm_path)
         # A failed translation must not run an old binary left in a reused --work directory.
         Path(spirv_dir, f"{name}.spv").unlink(missing_ok=True)
@@ -823,6 +897,12 @@ def run_suite(a, work: str) -> int:
         for path in disasm_files:
             shutil.copyfile(path, os.path.join(selected_disasm, os.path.basename(path)))
         cmd = [sys.executable, "-I", TRANSLATOR, selected_disasm, "--out", spirv_dir]
+        if assembler == "python":
+            cmd += ["--assembler", "python"]
+        if no_validate:
+            if not explicit_no_validate:
+                print("note: spirv-val not found on PATH; translating with --no-validate", flush=True)
+            cmd.append("--no-validate")
         if w64_emulated():   # wave64 compute/mesh exact on any subgroup size
             cmd.append("--wave64-emulate")
         if bary_fallback():   # raw barycentrics from an interpolated input, fed by a pass-through GS
@@ -856,9 +936,9 @@ def run_suite(a, work: str) -> int:
     vs_tri = os.path.join(spirv_dir, "vs_tri.spv")
     fs_passthru = os.path.join(spirv_dir, "fs_passthru.spv")
     fs_loc1 = os.path.join(spirv_dir, "fs_loc1.spv")
-    spirv_as(VS_TRI_SPVASM, vs_tri)
-    spirv_as(make_fs_passthru(0), fs_passthru)
-    spirv_as(make_fs_passthru(1), fs_loc1)
+    spirv_as(VS_TRI_SPVASM, vs_tri, assembler=assembler)
+    spirv_as(make_fs_passthru(0), fs_passthru, assembler=assembler)
+    spirv_as(make_fs_passthru(1), fs_loc1, assembler=assembler)
 
     index = {}
     idx_path = os.path.join(spirv_dir, "index.json")

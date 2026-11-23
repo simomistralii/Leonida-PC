@@ -42,6 +42,10 @@ struct Module {
     void* function_table = nullptr;
     uint32_t function_count = 0;
 
+    // Mapped for a run-time LoadLibrary or a GetProcAddress forwarder (a dynamic load), not by a host load() (the
+    // start-up graph, a static load). DllMain's DLL_PROCESS_ATTACH gets lpvReserved NULL only for a dynamic load.
+    bool dynamic_load = false;
+
     std::vector<ImportRecord> imports;
     std::map<std::string, void*> exports;           // by name, plus "#ordinal"
     std::map<std::string, std::string> forwarders;  // same keys, holding "module.symbol" for re-exports
@@ -138,6 +142,7 @@ private:
     std::map<std::filesystem::path::string_type, Module*> by_name_;  // native basename, ASCII case folded
     std::vector<Module*> order_;       // mapping order; owns the modules
     std::vector<Module*> init_order_;  // dependencies first, see initialisation_order()
+    int runtime_loads_ = 0;  // > 0 while a run-time load or forwarder maps modules (under mutex_): they are dynamic
 
     // What find_address reads: one entry per mapped image, added once its memory exists. Under ranges_mutex_, a leaf
     // lock: mutex_ is held while image code runs and the registry holds its own lock around the lookup, so the

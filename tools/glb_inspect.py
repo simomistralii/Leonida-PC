@@ -6,6 +6,8 @@ Usage:
 Reads the GLB container (12-byte header, JSON chunk, optional BIN chunk and
 chunk padding), then reports what the JSON actually contains. Missing fields are
 reported as missing; nothing is inferred from the binary buffers.
+For base-color textures without a core source, the inspector checks the declared
+KHR_texture_basisu and EXT_texture_webp image sources without loading either format.
 
 All geometry, names and paths come from the inspected file. No game data is
 needed or bundled.
@@ -390,6 +392,13 @@ def _texture_name(gltf: dict, texture_index: object) -> str | None:
     if texture is None:
         return None
     image = _entry(gltf, "images", texture.get("source"))
+    if "source" not in texture:
+        extensions = _object(texture.get("extensions"))
+        for extension in ("KHR_texture_basisu", "EXT_texture_webp"):
+            source = _object(extensions.get(extension)).get("source")
+            image = _entry(gltf, "images", source)
+            if image is not None:
+                break
     if image is not None:
         name = _text(image.get("name"))
         if name is not None:

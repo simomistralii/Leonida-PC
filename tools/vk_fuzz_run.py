@@ -84,6 +84,8 @@ def run_programs(texts, words=4, wave=32, build=None, work_parent=None, retries=
     """Per program lane 0's `words` words, or a str (see the module docstring). words must be 1, 2, 4 or 8."""
     if words not in (1, 2, 4, 8):
         raise ValueError("words must be 1, 2, 4 or 8")
+    if wave not in (32, 64):
+        raise ValueError("wave must be 32 or 64")
     if SHADERS not in sys.path:
         sys.path.insert(0, SHADERS)
     import mc_command
@@ -95,79 +97,81 @@ def run_programs(texts, words=4, wave=32, build=None, work_parent=None, retries=
                                 "(cmake --build <build dir> --target vk_compute_test)")
     exe = os.path.join(folder, "vk_compute_test" + (".exe" if os.name == "nt" else ""))
     work = tempfile.mkdtemp(prefix="vk_fuzz_", dir=work_parent)
-    disasm, fssm, spirv = (os.path.join(work, d) for d in ("disasm", "fssm", "spirv"))
-    for d in (disasm, fssm):
-        os.mkdir(d)
-    mc = mc_command.mc_command() + ["-triple=amdgcn--amdpal", "-mcpu=gfx1013", "-show-encoding"]
-    if wave == 64:
-        mc.append("-mattr=+wavefrontsize64,-wavefrontsize32")
-    names, results = [], []
-    for i, lines in enumerate(texts):
-        name = f"cs_vkfuzz_{i}"
-        text = program_text(name, lines, words, wave, opaque, rewrite)
-        path = os.path.join(work, name + ".asm")
-        with open(path, "w", encoding="utf-8", newline="\n") as f:
-            f.write(text)
-        r = mc_command.run(mc, input=text, capture_output=True, text=True)
-        if r.returncode or "error:" in r.stderr:
-            names.append(None)
-            results.append("llvm-mc: " + (r.stderr.strip().splitlines() or ["failed"])[0][:100])
-            continue
-        code = "".join(ln for ln in r.stdout.splitlines(keepends=True) if not ln.lstrip().startswith("."))
-        with open(os.path.join(disasm, name + ".s"), "w", encoding="utf-8", newline="\n") as f:
-            f.write(f"; {name}\n{code}")
-        with open(os.path.join(fssm, name + ".fssm"), "wb") as f:
-            f.write(compute_header(path))
-        names.append(name)
-        results.append(None)
-    subprocess.run([sys.executable, "-I", os.path.join(HERE, "rdna2spirv.py"), disasm, "--out", spirv],
-                   capture_output=True, text=True)
-    index = {}
-    index_path = os.path.join(spirv, "index.json")
-    if os.path.isfile(index_path):
-        with open(index_path, encoding="utf-8") as f:
-            index = json.load(f)
-    for i, name in enumerate(names):
-        if name is None:
-            continue
-        spv = os.path.join(spirv, name + ".spv")
-        if name not in index or not os.path.isfile(spv):
-            results[i] = "translator: not translated"
-            continue
-        dump = os.path.join(work, name + ".bin")
-        env = dict(os.environ, VKC_OUT_WORDS=str(words * wave), VKC_DUMP=dump)
-        args = [exe, spv, "1", "dump"]
+    try:
+        disasm, fssm, spirv = (os.path.join(work, d) for d in ("disasm", "fssm", "spirv"))
+        for d in (disasm, fssm):
+            os.mkdir(d)
+        mc = mc_command.mc_command() + ["-triple=amdgcn--amdpal", "-mcpu=gfx1013", "-show-encoding"]
         if wave == 64:
-            args.append("--require-wave64")
-        else:
-            env["VKC_SUBGROUP_SIZE"] = "32"
-        for _ in range(retries + 1):
-            if os.path.isfile(dump):
-                os.remove(dump)
-            r = subprocess.run(args, capture_output=True, text=True, env=env)
-            if r.returncode in (0, 77):
-                break
-        msg = (r.stdout + r.stderr).strip()
-        if r.returncode == 77:
-            results[i] = "vk_compute_test: " + (msg.splitlines()[-1] if msg else "unsupported")
-        elif wave == 32 and unpinned_subgroup(msg):
-            results[i] = f"the device can't run 32-lane subgroups ({unpinned_subgroup(msg)} lanes)"
-        elif r.returncode or not os.path.isfile(dump) or os.path.getsize(dump) != 4 * words * wave:
-            results[i] = f"vk_compute_test exit {r.returncode}"
-        else:
-            with open(dump, "rb") as f:
-                flat = struct.unpack(f"<{words * wave}I", f.read())
-            lanes = [list(flat[k:k + words]) for k in range(0, words * wave, words)]
-            odd = [k for k, w in enumerate(lanes) if w != lanes[0]]
-            if per_lane:
-                results[i] = lanes
-            elif not uniform:
-                results[i] = lanes[0]
+            mc.append("-mattr=+wavefrontsize64,-wavefrontsize32")
+        names, results = [], []
+        for i, lines in enumerate(texts):
+            name = f"cs_vkfuzz_{i}"
+            text = program_text(name, lines, words, wave, opaque, rewrite)
+            path = os.path.join(work, name + ".asm")
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(text)
+            r = mc_command.run(mc, input=text, capture_output=True, text=True)
+            if r.returncode or "error:" in r.stderr:
+                names.append(None)
+                results.append("llvm-mc: " + (r.stderr.strip().splitlines() or ["failed"])[0][:100])
+                continue
+            code = "".join(ln for ln in r.stdout.splitlines(keepends=True) if not ln.lstrip().startswith("."))
+            with open(os.path.join(disasm, name + ".s"), "w", encoding="utf-8", newline="\n") as f:
+                f.write(f"; {name}\n{code}")
+            with open(os.path.join(fssm, name + ".fssm"), "wb") as f:
+                f.write(compute_header(path))
+            names.append(name)
+            results.append(None)
+        subprocess.run([sys.executable, "-I", os.path.join(HERE, "rdna2spirv.py"), disasm, "--out", spirv],
+                       capture_output=True, text=True)
+        index = {}
+        index_path = os.path.join(spirv, "index.json")
+        if os.path.isfile(index_path):
+            with open(index_path, encoding="utf-8-sig") as f:
+                index = json.load(f)
+        for i, name in enumerate(names):
+            if name is None:
+                continue
+            spv = os.path.join(spirv, name + ".spv")
+            if name not in index or not os.path.isfile(spv):
+                results[i] = "translator: not translated"
+                continue
+            dump = os.path.join(work, name + ".bin")
+            env = dict(os.environ, VKC_OUT_WORDS=str(words * wave), VKC_DUMP=dump)
+            args = [exe, spv, "1", "dump"]
+            if wave == 64:
+                args.append("--require-wave64")
             else:
-                results[i] = lanes[0] if not odd else f"lanes {odd[:3]} differ from lane 0 on identical inputs"
-    if not os.environ.get("VK_FUZZ_KEEP"):
-        shutil.rmtree(work, ignore_errors=True)
-    return results
+                env["VKC_SUBGROUP_SIZE"] = "32"
+            for _ in range(retries + 1):
+                if os.path.isfile(dump):
+                    os.remove(dump)
+                r = subprocess.run(args, capture_output=True, text=True, env=env)
+                if r.returncode in (0, 77):
+                    break
+            msg = (r.stdout + r.stderr).strip()
+            if r.returncode == 77:
+                results[i] = "vk_compute_test: " + (msg.splitlines()[-1] if msg else "unsupported")
+            elif wave == 32 and unpinned_subgroup(msg):
+                results[i] = f"the device can't run 32-lane subgroups ({unpinned_subgroup(msg)} lanes)"
+            elif r.returncode or not os.path.isfile(dump) or os.path.getsize(dump) != 4 * words * wave:
+                results[i] = f"vk_compute_test exit {r.returncode}"
+            else:
+                with open(dump, "rb") as f:
+                    flat = struct.unpack(f"<{words * wave}I", f.read())
+                lanes = [list(flat[k:k + words]) for k in range(0, words * wave, words)]
+                odd = [k for k, w in enumerate(lanes) if w != lanes[0]]
+                if per_lane:
+                    results[i] = lanes
+                elif not uniform:
+                    results[i] = lanes[0]
+                else:
+                    results[i] = lanes[0] if not odd else f"lanes {odd[:3]} differ from lane 0 on identical inputs"
+        return results
+    finally:
+        if not os.environ.get("VK_FUZZ_KEEP"):
+            shutil.rmtree(work, ignore_errors=True)
 
 
 def judge(progs, hw, verdict, wave=32, words=4, build=None, work_parent=None, opaque=True, uniform=True):
@@ -195,8 +199,12 @@ def all_skipped(counts):
 
 def exact_verdict(lines, hw, got, n_obs=4):
     """match, or mismatch naming the first word that differs (the observation lines end the program)."""
+    if len(hw) != len(got):
+        return "mismatch", f"word count differs: hardware {len(hw)}, translated on the GPU {len(got)}"
     for k in range(len(hw)):
         if hw[k] != got[k]:
-            reg = lines[-n_obs + k].split(", ")[1] if k < n_obs else f"word {k}"
+            obs = lines[-n_obs + k] if k < n_obs and len(lines) >= n_obs else ""
+            parts = obs.split(", ", 1)
+            reg = parts[1] if len(parts) == 2 else f"word {k}"
             return "mismatch", f"word {k} ({reg}): hardware 0x{hw[k]:08x}, translated on the GPU 0x{got[k]:08x}"
     return "match", ""

@@ -14,8 +14,8 @@ several). A shim note then says whether the executable calls a runtime class tha
 the ones a boot can reach, so they come first; "not called" ones can wait. The classes of a file are its
 `constexpr GUID k...Class` ids, as gdk_runtime_calls reads them.
 
-Output: Markdown, to stdout or --out (LF). Exit status 0 on success, 1 when a --gdk-calls file can't be read,
-or 2 when --out refers to an input report.
+Output: Markdown, to stdout or --out (LF). Exit status 0 on success; 1 when a --gdk-calls file can't be read or
+the checklist cannot be written to --out; 2 when --out refers to an input report.
 Standard library only.
 Usage: `python -I tools/exe_checklist.py --help` lists the options.
 """
@@ -194,8 +194,12 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     text = render(collect(a.root), called)
     if a.out:
-        with open(a.out, "w", encoding="utf-8", newline="\n") as f:
-            f.write(text)
+        try:
+            with open(a.out, "w", encoding="utf-8", newline="\n") as f:
+                f.write(text)
+        except OSError as e:
+            print(f"cannot write the checklist to {a.out}: {e.strerror or e}", file=sys.stderr)
+            return 1
         print(f"wrote {a.out}")
     else:
         print(text, end="")

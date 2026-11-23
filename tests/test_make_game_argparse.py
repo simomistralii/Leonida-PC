@@ -296,6 +296,12 @@ class StageValidationAndSequencingTest(unittest.TestCase):
 class JobsHandlingTest(unittest.TestCase):
     """Test --jobs default computation, command-line overrides, and forwarding."""
 
+    def setUp(self):
+        # --jobs is clamped to the machine's CPU count; pin the bounds so these forwarding checks do not depend on it.
+        bounds = patch.object(make_game.leonida_tui, "cpu_jobs_bounds", return_value=(1, 8, 64))
+        bounds.start()
+        self.addCleanup(bounds.stop)
+
     def test_jobs_default_calculation_scenarios(self):
         scenarios = [
             (None, 1),
@@ -327,6 +333,7 @@ class JobsHandlingTest(unittest.TestCase):
                                 with patch("make_game.shaders") as mock_shaders, \
                                         patch("make_game.wave64_settings", return_value=(True, True)) as probe, \
                                         patch("make_game.runtime_gpu_per_vertex", return_value=None), \
+                                        patch("make_game.runtime_gpu_barycentric_fallback", return_value=None), \
                                         patch("make_game.runtime_gpu_max_push_constants", return_value=None):
                                     ret = make_game.main()
                                     self.assertEqual(ret, 0)

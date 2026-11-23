@@ -20,6 +20,7 @@ Exit 0 when every PR is clean, 1 when any is not, 2 on a usage or git error. Rea
 writes only objects, no refs. Standard library only; needs git 2.38 or newer for `merge-tree --write-tree`.
 """
 import argparse
+import codecs
 import json
 import re
 import subprocess
@@ -37,7 +38,10 @@ class GitError(Exception):
 
 
 def git(repo, *args, check=True):
-    r = subprocess.run(["git", "-C", repo, *args], capture_output=True, encoding="utf-8", errors="replace")
+    r = subprocess.run(["git", "-C", repo, *args], capture_output=True)
+    # Decode without universal-newline translation: a bare CR inside a Git line is content.
+    r.stdout = r.stdout.decode("utf-8", "replace")
+    r.stderr = r.stderr.decode("utf-8", "replace")
     if check and r.returncode != 0:
         raise GitError(f"git {' '.join(args)}: {r.stderr.strip() or r.returncode}")
     return r
@@ -67,25 +71,40 @@ def merged_tree(repo, main, ref):
     return r.stdout.split()[0], r.returncode == 1
 
 
+def patch_destination(header):
+    """Decode Git's +++ header. An unquoted path containing spaces can have a trailing tab."""
+    name = header[4:].removesuffix("\t")
+    if name.startswith('"') and name.endswith('"'):
+        # Git's octal escapes describe filesystem bytes, not Unicode code points.
+        name = codecs.escape_decode(name[1:-1].encode("utf-8"))[0].decode("utf-8", "surrogateescape")
+    return name[2:] if name.startswith("b/") else None  # Deleted files say /dev/null.
+
+
 def duplicates(repo, main, tree, min_length, block=3):
     """{path: [line, ...]} for runs of `block` or more consecutive added lines (each at least `min_length` characters
     once stripped; blank lines skipped) that already stand in the same order in the same file on main: a paragraph,
     table or function body merged twice. A single repeated line is not reported: code and tables repeat lines
     legitimately."""
     found = {}
-    hunks, path = {}, None
-    for line in git(repo, "diff", "--unified=0", "--no-color", "--no-renames", main, tree).stdout.splitlines():
-        if line.startswith("+++ "):
-            path = line[6:] if line.startswith("+++ b/") else None
-        elif line.startswith("@@") and path:
-            hunks.setdefault(path, []).append([])
-        elif line.startswith("+") and path and hunks.get(path):
+    hunks, path, added = {}, None, None
+    patch = git(repo, "-c", "core.quotePath=true", "diff", "--unified=0", "--no-color", "--no-renames",
+                "--src-prefix=a/", "--dst-prefix=b/", "--no-relative", "--no-ext-diff", "--no-textconv",
+                main, tree).stdout
+    for line in patch.split("\n"):
+        if line.startswith("diff --git "):
+            path, added = None, None
+        elif added is None and line.startswith("+++ "):
+            path = patch_destination(line)
+        elif line.startswith("@@ ") and path:
+            added = []
+            hunks.setdefault(path, []).append(added)
+        elif added is not None and line.startswith("+"):
             text = line[1:].strip()
             if text:
-                hunks[path][-1].append(text)
+                added.append(text)
     def windows(rev, path):
         r = git(repo, "show", f"{rev}:{path}", check=False)
-        lines = [l.strip() for l in r.stdout.splitlines() if l.strip()] if r.returncode == 0 else []
+        lines = [l.strip() for l in r.stdout.split("\n") if l.strip()] if r.returncode == 0 else []
         return r.returncode == 0, Counter(tuple(lines[i:i + block]) for i in range(len(lines) - block + 1))
 
     for path, groups in hunks.items():
