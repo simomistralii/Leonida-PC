@@ -86,6 +86,22 @@ class SamePathTests(unittest.TestCase):
         self.assertEqual(got, insensitive or os.path.normcase("A") == os.path.normcase("a"))
 
 
+class OsErrorTextTests(unittest.TestCase):
+    def test_keeps_errno_message_and_the_exact_names(self):
+        # str(OSError) shows a filename through repr(): backslashes double and quotes are escaped.
+        name = 'C:\\Users\\o\'brien\\"x"\\blocked'
+        error = PermissionError(13, "Permission denied", name)
+        self.assertIn("\\\\", str(error))
+        self.assertEqual(report_paths.os_error_text(error), f"[Errno 13] Permission denied: {name}")
+        error = OSError(18, "Invalid cross-device link", name, None, name + "2")
+        self.assertEqual(report_paths.os_error_text(error),
+                         f"[Errno 18] Invalid cross-device link: {name} -> {name}2")
+
+    def test_other_errors_keep_their_own_text(self):
+        for error in (OSError("no errno here"), OSError(2, "No such file"), ValueError("bad value")):
+            self.assertEqual(report_paths.os_error_text(error), str(error))
+
+
 class MacVolumeTests(unittest.TestCase):
     """The macOS branch: pathconf says whether the volume folds case. Patched, so it runs anywhere."""
 
