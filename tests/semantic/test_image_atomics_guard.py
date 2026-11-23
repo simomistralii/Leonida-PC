@@ -36,7 +36,10 @@ def translate(lines, *, emulate=False):
     prev = rdna2spirv.WAVE64_EMULATE
     rdna2spirv.WAVE64_EMULATE = emulate
     try:
-        return support.translate_lines("cs_img_atomic_guard", lines + ["s_endpgm"], fssm=FSSM)
+        # A program that never writes EXEC is translated with every lane statically active, which folds the
+        # `if (active)` guard to a constant true. Write EXEC (to its own value) so the guard under test is emitted.
+        return support.translate_lines("cs_img_atomic_guard", ["s_mov_b32 exec_lo, exec_lo"] + lines + ["s_endpgm"],
+                                       fssm=FSSM)
     finally:
         rdna2spirv.WAVE64_EMULATE = prev
 
@@ -107,6 +110,22 @@ def vgpr_ptrs(spv, reg_idx):
 
 
 class ImageAtomicsGuardTests(unittest.TestCase):
+    def test_never_written_exec_folds_the_guard_but_keeps_the_atomic(self):
+        """A program that never writes EXEC runs every lane active: no `if (active)` guard, same atomic."""
+        lines = [
+            "v_mov_b32_e32 v0, 5",
+            "v_mov_b32_e32 v1, 1",
+            "v_mov_b32_e32 v2, 2",
+            "image_atomic_add v0, v[1:2], s[4:11] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm",
+        ]
+        folded = support.translate_lines("cs_img_atomic_guard", lines + ["s_endpgm"], fssm=FSSM)
+        guarded = translate(lines)
+        self.assertIn("OpImageTexelPointer", folded)
+        self.assertIn("OpAtomicIAdd", folded)
+        self.assertNotIn("OpLoad %bool %active", folded)
+        self.assertIn("OpLoad %bool %active", guarded)
+        validate_spirv(folded)
+
     def test_all_image_atomics_2d_and_3d_guarded_and_valid(self):
         simple_ops = [
             ("image_atomic_add", "OpAtomicIAdd"),
