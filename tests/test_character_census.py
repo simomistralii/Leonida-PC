@@ -228,6 +228,28 @@ class CharacterCensusTest(unittest.TestCase):
                      "triangle count is not a non-negative integer", "missing triangle count"):
             self.assertTrue(any(text in issue for issue in partial["issues"]), text)
 
+    def test_mesh_totals_require_all_contributions_and_derive_triangles_per_mesh(self):
+        root = pathlib.Path(self.temp.name) / "mesh_counts"
+        write_json(root / "model.json", {"name": "mixed", "meshes": [
+            {"vertex_count": 5, "triangle_count": 2}, {"indices": [0, 1, 2]},
+        ]})
+        out = pathlib.Path(self.temp.name) / "counts.json"
+        result = self.run_tool(root, "--json", out)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(out.read_text(encoding="utf-8"))
+        row, = report["models"]
+        self.assertIsNone(row["vertices"])
+        self.assertIsNone(row["indices"])
+        self.assertEqual(row["triangles"], 3)
+        self.assertEqual(report["summary"]["unknown_vertices"], 1)
+        self.assertEqual(report["summary"]["unknown_indices"], 1)
+        self.assertEqual(report["summary"]["by_kind"]["component"]["triangles"], 3)
+
+    def test_indices_from_separate_meshes_do_not_form_a_triangle(self):
+        row = CC.model_row({"meshes": [{"index_count": 2}, {"index_count": 2}]}, "model.json")
+        self.assertEqual(row["indices"], 4)
+        self.assertEqual(row["triangles"], 0)
+
     def test_optional_index_count_is_counted_when_an_input_supplies_it(self):
         with tempfile.TemporaryDirectory() as td:
             root = pathlib.Path(td) / "one"

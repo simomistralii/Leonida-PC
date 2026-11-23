@@ -224,14 +224,35 @@ void test_virtual_alloc(XMemVirtualAllocFn virtual_alloc, XMemGetWriteWatchFn ge
     check(large_page == nullptr && GetLastError() == ERROR_NOT_SUPPORTED,
           "unsupported large-page allocation is rejected before host allocation");
 
-    SetLastError(ERROR_SUCCESS);
-    void* const attributed = virtual_alloc(nullptr, page_size, MEM_RESERVE | MEM_COMMIT, 1, PAGE_READWRITE);
-    check(attributed == nullptr && GetLastError() == ERROR_NOT_SUPPORTED,
-          "nonzero XMem allocation attributes are rejected before host allocation");
+    // The retail executable's GPU pools: the attribute word is recorded, and the PAGE_GRAPHICS_* bits are dropped.
+    MEMORY_BASIC_INFORMATION mbi{};
+    void* const pool = virtual_alloc(nullptr, SIZE_T{8} << 30, MEM_RESERVE | 0x20400000, 0x21, PAGE_READWRITE);
+    check(pool != nullptr, "attributes 0x21 with 64 KiB pages reserves 8 GiB");
+    if (pool) {
+        check(VirtualQuery(pool, &mbi, sizeof mbi) && mbi.State == MEM_RESERVE, "the 8 GiB pool is reserve-only");
+        check(VirtualFree(pool, 0, MEM_RELEASE), "release the 8 GiB pool");
+    }
+
+    void* const noaccess = virtual_alloc(nullptr, 0x10000, MEM_RESERVE | 0x20400000, 0x3, 0x801);
+    check(noaccess != nullptr, "attributes 0x3 with protect PAGE_GRAPHICS_NOACCESS|PAGE_NOACCESS succeeds");
+    if (noaccess) {
+        check(VirtualQuery(noaccess, &mbi, sizeof mbi) && mbi.AllocationProtect == PAGE_NOACCESS,
+              "protect 0x801 becomes PAGE_NOACCESS");
+        check(VirtualFree(noaccess, 0, MEM_RELEASE), "release the PAGE_NOACCESS pool");
+    }
+
+    void* const gpu = virtual_alloc(nullptr, 0x10000, MEM_RESERVE | MEM_COMMIT, 0x183, 0x22004);
+    check(gpu != nullptr, "attributes 0x183 with protect 0x22004 succeeds");
+    if (gpu) {
+        check(VirtualQuery(gpu, &mbi, sizeof mbi) && mbi.Protect == PAGE_READWRITE, "protect 0x22004 becomes PAGE_READWRITE");
+        static_cast<volatile uint8_t*>(gpu)[0] = 0x5a;
+        check(static_cast<volatile uint8_t*>(gpu)[0] == 0x5a, "the 0x183 allocation is writable");
+        check(VirtualFree(gpu, 0, MEM_RELEASE), "release the 0x183 allocation");
+    }
 }
 
 // gta6rt --trace: one "xmem_attributes" event per distinct raw attribute word and API, none with the trace off.
-void test_attribute_trace(XMemAllocFn alloc, XMemFreeFn free_mem) {
+void test_attribute_trace(XMemAllocFn alloc, XMemFreeFn free_mem, XMemVirtualAllocFn virtual_alloc) {
     wchar_t temp[MAX_PATH];
     GetTempPathW(MAX_PATH, temp);
     const std::wstring path =
@@ -250,6 +271,9 @@ void test_attribute_trace(XMemAllocFn alloc, XMemFreeFn free_mem) {
     free_mem(b, 0x5e50000);  // same word again: no second event
     free_mem(c, 0x99);
     free_mem(nullptr, 0x77);  // a free-only word is recorded too
+    void* const v = virtual_alloc ? virtual_alloc(nullptr, 0x10000, MEM_RESERVE | MEM_COMMIT, 0x183, PAGE_READWRITE)
+                                  : nullptr;
+    if (v) VirtualFree(v, 0, MEM_RELEASE);
     rt::startup_trace::close();
 
     std::ifstream in(path);
@@ -261,14 +285,16 @@ void test_attribute_trace(XMemAllocFn alloc, XMemFreeFn free_mem) {
         for (size_t at = log.find(needle); at != std::string::npos; at = log.find(needle, at + 1)) ++n;
         return n;
     };
-    check(count("\"kind\":\"xmem_attributes\"") == 5, "five events: two XMemAlloc words and three XMemFree words");
+    check(count("\"kind\":\"xmem_attributes\"") == 6, "six events: two XMemAlloc words, three XMemFree words and one XMemVirtualAlloc word");
+    check(count("\"api\":\"XMemVirtualAlloc\",\"attributes\":\"0x183\",\"size\":65536") == 1,
+          "XMemVirtualAlloc 0x183 is recorded once, with its size");
     check(count("\"api\":\"XMemAlloc\",\"attributes\":\"0x5e50000\",\"size\":4096") == 1,
           "XMemAlloc 0x5e50000 is recorded once, with the size of the first call");
     check(count("\"api\":\"XMemAlloc\",\"attributes\":\"0x99\",\"size\":16") == 1, "XMemAlloc 0x99 is recorded once");
     check(count("\"api\":\"XMemFree\",\"attributes\":\"0x5e50000\"") == 1, "XMemFree 0x5e50000 is recorded once");
     check(count("\"api\":\"XMemFree\",\"attributes\":\"0x77\"") == 1, "XMemFree 0x77 is recorded");
     check(count("\"attributes\":\"0x1111\"") == 0, "nothing was recorded while the trace was off");
-    check(count("\"caller\":\"") == 5, "every event names its caller");
+    check(count("\"caller\":\"") == 6, "every event names its caller");
     DeleteFileW(path.c_str());
 }
 
@@ -369,6 +395,14 @@ void test_title_virtual_alloc() {
         check(alloc != nullptr, what);
         if (!alloc) continue;
 
+        void* const gfx = alloc(nullptr, 0x10000, MEM_RESERVE | MEM_COMMIT, 0x2004);  // PAGE_GRAPHICS_READWRITE
+        check(gfx != nullptr, "title VirtualAlloc with protect 0x2004 succeeds");
+        if (gfx) {
+            MEMORY_BASIC_INFORMATION mbi{};
+            check(VirtualQuery(gfx, &mbi, sizeof mbi) && mbi.Protect == PAGE_READWRITE,
+                  "protect 0x2004 commits PAGE_READWRITE");
+            VirtualFree(gfx, 0, MEM_RELEASE);
+        }
         for (const DWORD bits : {kMemGraphics, kMemTitle, kMemGraphics | kMemTitle, DWORD{0}}) {
             void* const p = alloc(nullptr, 0x10000, MEM_RESERVE | MEM_COMMIT | bits, PAGE_READWRITE);
             std::snprintf(what, sizeof what, "%s!VirtualAlloc with type bits %#lx returns memory", dll,
@@ -430,7 +464,7 @@ int main() {
     if (virtual_alloc && get_write_watch && reset_write_watch) {
         test_virtual_alloc(virtual_alloc, get_write_watch, reset_write_watch);
     }
-    test_attribute_trace(alloc, free_mem);
+    test_attribute_trace(alloc, free_mem, virtual_alloc);
     if (transfer) {
         test_transfer_memory(transfer);
         test_transfer_trace(transfer);

@@ -39,14 +39,15 @@ class SceneBuildTests(unittest.TestCase):
         (self.models / filename).write_text(obj, encoding="utf-8", newline="\n")
         self.items.append({"Name": name, "File": filename, "MeshShaders": [0]})
 
-    def build_scene(self, rows, max_props, radius=20):
+    def build_scene(self, rows, max_props, radius=20, center=(0, 0)):
         (self.models / "manifest.json").write_text(json.dumps({"Items": self.items}), encoding="utf-8", newline="\n")
         placements = self.root / "entities.jsonl"
         placements.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8", newline="\n")
         scene = self.root / "scene.bin"
         result = subprocess.run(
             [sys.executable, "-I", sandbox_scene.__file__, "--entities", str(placements),
-             "--models", str(self.models), "--center", "0", "0", "--radius", str(radius),
+             "--models", str(self.models), *(["--center", *map(str, center)] if center is not None else []),
+             "--radius", str(radius),
              "--max-props", str(max_props), "--out", str(scene)],
             capture_output=True, text=True, timeout=30,
         )
@@ -85,6 +86,13 @@ class SceneBuildTests(unittest.TestCase):
         meshes, positions, report = self.build_scene(rows, max_props=1)
         self.assertEqual((meshes, positions), (1, [(5.0, 0.0, 0.0)]))
         self.assertIn("placed=1 unresolved=4", report)
+
+    def test_auto_center_ignores_cells_with_only_mismatched_keys(self):
+        wrong_key = f"{world_names.hash64('synthetic_other_prop'):016x}"
+        rows = [entity("synthetic_prop", 25, 25, key=wrong_key) for _ in range(2)]
+        rows.append(entity("synthetic_prop", 225, 25))
+        meshes, positions, _ = self.build_scene(rows, max_props=1, center=None)
+        self.assertEqual((meshes, positions), (1, [(225.0, 25.0, 0.0)]))
 
     def test_models_without_usable_geometry_do_not_consume_limit(self):
         self.add_model("synthetic_empty", "o empty\n")

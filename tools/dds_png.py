@@ -30,8 +30,10 @@ from functools import cache
 import json
 import math
 import os
+import shutil
 import struct
 import sys
+import tempfile
 from typing import BinaryIO, NamedTuple, TypedDict
 import zlib
 
@@ -1438,6 +1440,28 @@ def dds_to_png_bytes(
     return _preview_png(_decode_dds(data, mip=mip, layer=layer, face=face, z=z), max_size)
 
 
+def read_half_texel(path: str, *, x: int, y: int, mip: int = 0, layer: int = 0,
+                    z: int = 0) -> dict[str, str]:
+    """Return exact stored channel values as text, including signed zero and nonfinite values."""
+    with open(path, "rb") as source:
+        info = parse_dds_header(_read_header(source))
+        fmt = info["format"]
+        if fmt not in _HALF_FLOAT_LAYOUT:
+            raise DdsError(f"Expected a half-float DDS, got {fmt}")
+        stride, channels = _HALF_FLOAT_LAYOUT[fmt]
+        plane = _locate_plane(info, mip=mip, layer=layer, z=z)
+        if (type(x) is not int or not 0 <= x < plane.width or
+                type(y) is not int or not 0 <= y < plane.height):
+            raise DdsError("Texel outside the selected mip")
+        if plane.offset + plane.byte_length > source.seek(0, os.SEEK_END):
+            raise DdsError("Truncated DDS plane")
+        source.seek(plane.offset + y * plane.row_pitch + x * stride)
+        raw = source.read(stride)
+        if len(raw) != stride:
+            raise DdsError("Truncated DDS texel")
+    return dict(zip("RGBA", map(str, struct.unpack(f"<{channels}e", raw))))
+
+
 def dds_file_to_png_bytes(
     path: str, max_size: int = 0, *, mip: int = 0, layer: int = 0, face: str | None = None, z: int = 0,
 ) -> bytes:
@@ -1495,11 +1519,17 @@ def main(argv: list[str] | None = None) -> int:
             args.input, args.max_size or 0, mip=args.mip or 0, layer=args.layer or 0,
             face=args.face, z=args.z or 0,
         )
-        parent = os.path.dirname(os.path.abspath(args.output))
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        with open(args.output, "wb") as f:
-            f.write(png)
+        # Resolve an existing symlink as the old direct write did, and stage on the same filesystem.
+        output = os.path.realpath(args.output)
+        parent = os.path.dirname(output)
+        os.makedirs(parent, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".dds-preview-", dir=parent) as staging:
+            pending = os.path.join(staging, "preview.png")
+            with open(pending, "wb") as f:
+                f.write(png)
+            if os.path.isfile(output):
+                shutil.copymode(output, pending)
+            os.replace(pending, output)
     except (DdsError, OSError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

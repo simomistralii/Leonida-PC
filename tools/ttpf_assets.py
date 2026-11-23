@@ -22,7 +22,15 @@ def load_profile(work):
         raw = path.read_bytes()
     except FileNotFoundError:
         return "v1-strict", None
-    profile = json.loads(raw)
+    except OSError as exc:
+        raise ValueError(f"{path}: cannot read the calibration profile: {exc.strerror or exc}") from None
+    try:
+        # json.loads() on the bytes also detects a UTF-16 profile or one saved with a BOM.
+        profile = json.loads(raw)
+    except ValueError as exc:   # JSONDecodeError, or an encoding json cannot detect
+        # The profile is hand-written (make_game says where it goes), so a typo names the file, not a bare
+        # 'Expecting property name enclosed in double quotes'.
+        raise ValueError(f"{path}: not a JSON calibration profile: {exc}") from None
     if not isinstance(profile, dict) or profile.get("version") != 1:
         raise ValueError(f"Unsupported calibration version in {path}")
     try:

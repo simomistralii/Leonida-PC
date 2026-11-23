@@ -13,6 +13,10 @@ foreach(mode args no_args fail_init)
     if(NOT code STREQUAL "1" OR NOT error MATCHES "DllMain returned FALSE" OR output MATCHES "running ")
       message(FATAL_ERROR "Failed attach returned ${code}\n${output}\n${error}")
     endif()
+    if(NOT output MATCHES "2 module\\(s\\) mapped, [0-9]+ unimplemented import\\(s\\)"
+        OR NOT output MATCHES "unimplemented by return policy: hresult=[0-9]+ other=[0-9]+")
+      message(FATAL_ERROR "Failed attach lost the import binding report\n${output}\n${error}")
+    endif()
   elseif(NOT code STREQUAL "0" OR NOT output MATCHES "tiny_startup_cmdline: PASS"
       OR NOT output MATCHES "game exited with code 0")
     message(FATAL_ERROR "Startup command line (${mode}) returned ${code}\n${output}\n${error}")

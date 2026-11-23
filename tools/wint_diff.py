@@ -881,7 +881,8 @@ def main(argv=None):
         for reason, n in sorted(counts["skip"].items(), key=lambda kv: -kv[1]):
             print(f"  skip x{n}: {reason}")
 
-        if "vk" in backends:
+        want_vk = "vk" in backends
+        if want_vk:
             print("translated on the Vulkan GPU against the hardware, every lane: "
                   + ", ".join(f"{k} {n}" for k, n in sorted(counts["vk"].items(), key=lambda kv: kv[0].startswith("skip"))))
             for i, detail, prog in vk_bad[: None if a.all_failures else 3]:
@@ -907,6 +908,11 @@ def main(argv=None):
     if not counts["pass"]:   # nothing was compared: every program was skipped
         print("no program ran: every one was skipped")
         return 2
+    if want_vk:
+        import vk_fuzz_run
+        if vk_fuzz_run.all_skipped(counts["vk"]):
+            print("no Vulkan program ran: every one was skipped")
+            return 2
     return 0
 
 

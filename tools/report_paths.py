@@ -49,7 +49,7 @@ def _resolved_key(path):
     path = posixpath.normcase(path) if sys.platform == "darwin" else os.path.normcase(path)
     if case_insensitive_volume(path):
         # APFS and HFS+ also treat composed and decomposed accents as one name.
-        path = unicodedata.normalize("NFD", path.casefold())
+        return unicodedata.normalize("NFD", path.casefold())
     return path
 
 

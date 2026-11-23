@@ -45,6 +45,8 @@ The tool consumes exactly the shape the renderers write:
 ```
 
 The manifest must be UTF-8; a UTF-8 BOM (which PowerShell may add) is accepted.
+Each JSON object must have unique keys. A repeated field, including a channel in a pixel check,
+is an input error rather than a last-value-wins override.
 
 Validation rules, all reported with the manifest path and the exact scene/check
 position:

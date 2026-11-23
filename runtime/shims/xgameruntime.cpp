@@ -7,9 +7,10 @@
 //
 // Nothing here goes online.
 //
-// ASSUMPTION: the console executable is not available, so the DLL name it imports these through is unknown.
-// "xgameruntime.dll" is the name the PC GDK uses. If the executable's import table names another module, register
-// the same functions under that name too; nothing else changes.
+// Measured on the retail executable (docs/runtime_imports.md, "The retail executable's runtime classes"): it does not
+// import xgameruntime.dll. Its 161 runtime thunks are linked into the image and reach the classes through
+// QueryApiImpl, as libHttpClient.GDK.dll's do, so "xgameruntime.dll" below is the only module name needed. The name
+// occurs in the image as a UTF-16 string, which would be a run-time load.
 #include <windows.h>
 
 #include <algorithm>

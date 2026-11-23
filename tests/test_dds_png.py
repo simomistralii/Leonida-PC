@@ -9,6 +9,7 @@ import os
 import struct
 import tempfile
 import unittest
+from unittest import mock
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1096,6 +1097,43 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(f.read(), original)
             self.assertEqual(result, 1)
             self.assertIn("output must not overwrite the input DDS", stderr.getvalue())
+
+    def test_cli_publishes_only_after_a_complete_write(self):
+        original = dds_buffer(4, 4, bc1_block(0xFFFF, 0, [0, 0, 0, 0]),
+                              flags=DDPF_FOURCC, fourcc=b"DXT1")
+        previous = dds.encode_png(1, 1, b"\x10\x20\x30\xff")
+        replacement = dds.dds_to_png_bytes(original)
+        for existing in (False, True):
+            with self.subTest(existing=existing), tempfile.TemporaryDirectory() as tmp:
+                src = os.path.join(tmp, "in.dds")
+                dst = os.path.join(tmp, "out.png")
+                with open(src, "wb") as f:
+                    f.write(original)
+                if existing:
+                    with open(dst, "wb") as f:
+                        f.write(previous)
+
+                @contextlib.contextmanager
+                def fail_partial_write(path, mode):
+                    with open(path, mode) as f:
+                        def write(data):
+                            f.write(data[:4])
+                            raise OSError("synthetic disk-full write")
+
+                        yield mock.Mock(write=write) if mode == "wb" else f
+
+                err = io.StringIO()
+                with mock.patch.object(dds, "open", side_effect=fail_partial_write, create=True), \
+                        contextlib.redirect_stderr(err):
+                    self.assertEqual(dds.main([src, dst]), 1)
+                self.assertIn("synthetic disk-full write", err.getvalue())
+                self.assertCountEqual(os.listdir(tmp), ["in.dds", "out.png"] if existing else ["in.dds"])
+                if existing:
+                    with open(dst, "rb") as f:
+                        self.assertEqual(f.read(), previous)
+                self.assertEqual(dds.main([src, dst]), 0)
+                with open(dst, "rb") as f:
+                    self.assertEqual(f.read(), replacement)
 
     def test_cli_reports_unsupported_input(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -173,6 +173,11 @@ class StudioHandler(http.server.BaseHTTPRequestHandler):
             self._serve_textures_json()
             return
 
+        if clean.startswith("/api/dds/"):
+            rel = urllib.parse.unquote(clean[len("/api/dds/"):])
+            self._serve_dds(rel, self.path.partition("?")[2])
+            return
+
         if clean.startswith("/vendor/"):
             rel = urllib.parse.unquote(clean[len("/vendor/"):])
             vpath = safe_subpath(os.path.join(self.viewer_dir, "vendor"), rel)
@@ -250,6 +255,53 @@ class StudioHandler(http.server.BaseHTTPRequestHandler):
 
         self.send_error(404, "Not Found")
 
+    def _serve_dds(self, rel: str, query: str) -> None:
+        path = safe_subpath(self.textures_dir, rel)
+        if path is None:
+            self.send_error(403, "Forbidden")
+            return
+        if not rel.lower().endswith(".dds") or not os.path.isfile(path):
+            self.send_error(404, "DDS texture not found")
+            return
+        if dds_png is None:
+            self.send_error(503, "DDS decoder unavailable")
+            return
+        try:
+            if query == "info":
+                with open(path, "rb") as source:
+                    info = dds_png.parse_dds_header(source.read(148))
+                payload = json.dumps(info).encode("utf-8")
+                mime = "application/json"
+            else:
+                pairs = urllib.parse.parse_qsl(query, keep_blank_values=True, strict_parsing=True,
+                                                 max_num_fields=5)
+                selection = {}
+                for key, value in pairs:
+                    if (key not in ("mip", "layer", "z", "x", "y") or key in selection or
+                            not value.isascii() or not value.isdecimal()):
+                        raise ValueError("Expected a single unsigned index per selector")
+                    selection[key] = int(value)
+                if "x" in selection or "y" in selection:
+                    if "x" not in selection or "y" not in selection:
+                        raise ValueError("Expected both texel coordinates")
+                    payload = json.dumps(dds_png.read_half_texel(path, **selection)).encode("utf-8")
+                    mime = "application/json"
+                else:
+                    payload = dds_png.dds_file_to_png_bytes(path, max_size=1024, **selection)
+                    mime = "image/png"
+        except ValueError:
+            self.send_error(400, "Invalid DDS texture or subresource selection")
+            return
+        except OSError:
+            self.send_error(500, "Could not read DDS texture")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(payload)
+
     def _send_file(self, file_path: str, content_type: str) -> None:
         try:
             size = os.path.getsize(file_path)
@@ -325,14 +377,17 @@ class StudioHandler(http.server.BaseHTTPRequestHandler):
                         except OSError:
                             fsize = 0
                         preview_rel = os.path.splitext(rel_path)[0] + ".png" if ext == ".dds" else rel_path
-                        items.append({
+                        item = {
                             "name": fn,
                             "path": rel_path,
                             "size": fsize,
                             "format": TEXTURE_FORMATS[ext],
                             "url": f"/textures/{urllib.parse.quote(rel_path)}",
                             "preview": f"/textures/{urllib.parse.quote(preview_rel)}",
-                        })
+                        }
+                        if ext == ".dds":
+                            item["ddsPreview"] = f"/api/dds/{urllib.parse.quote(rel_path)}"
+                        items.append(item)
 
         items.sort(key=lambda x: x["name"])
         payload = json.dumps({

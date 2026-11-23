@@ -32,7 +32,12 @@ resumes from the DDS files already written.
 stdlib-only BCPack decoder (`tools/bcpack.py`, `tools/bcpack_tables.py`,
 `tools/bcpack_tables_bptc.py`) now decodes the rANS entropy layer and rebuilds BC blocks
 for all six active modes (BC1, BC3, BC4, BC5, BC6H and BC7 — 100% of BCPack codecs in the
-corpus). Strict confirmed-history mode is the default; `--allow-provisional` enables the
+corpus). To inspect or decode one raw BCPack stream from the command line, `tools/bcpack_tool.py`
+wraps the same decoder: `inspect <in.bin> --codec <1..7> --size <uncompressed_bytes> [--json]` prints
+the stream's header, entropy statistics and validation results; `decode <in.bin> <out.bin> --codec <1..7>
+--size <uncompressed_bytes> [--provisional]` writes the rebuilt BC blocks; `profile <in.bin> --codec <1..7>
+--size <uncompressed_bytes>` reports per-symbol frequency statistics. Strict confirmed-history mode is
+the default; `--allow-provisional` enables the
 provisional and last-resort history entries, and `--history <path>` supplies locally
 calibrated BC6H/BC7 initial history JSON tables at run time (no fitted BC6H/BC7 history
 data is embedded in the repository). `rpf9dump`'s C# `TtpfReader` (submodule pin `e293917`,

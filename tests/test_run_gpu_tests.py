@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import run_gpu_tests as rgt
+import check   # runtime/test/shaders, on the path once run_gpu_tests is imported
 
 WANT = [55, 48]
 DEVICE_32 = "device: X (subgroup 32..32)\n"
@@ -168,6 +169,138 @@ class BindlessTestOnASmallPushConstantDevice(unittest.TestCase):
         self.assertEqual(rc, 1, out)
         self.assertIn("0/1 passed", out)
         self.assertNotIn("skipped", out)
+
+
+class StoreHelperUnsupported(unittest.TestCase):
+    """vk_store_test exits 77 when the device lacks a feature (TEST-469): a SKIP that quotes why, not a FAIL."""
+
+    def run_store(self, shader, rc, msg):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = SimpleNamespace(filter=f"{shader}.asm", build=tmp, llvm_mc="unused")
+
+            def run(cmd, env=None, gpu=True):
+                if Path(cmd[0]).stem == "vk_store_test":
+                    return rc, msg
+                (Path(tmp) / "spirv" / f"{shader}.spv").touch()   # rdna2spirv.py "translating" the shader
+                return 0, ""
+
+            output = io.StringIO()
+            with (patch.object(rgt, "assemble_to_s", side_effect=lambda _mc, _src, dst, _name: Path(dst).touch()),
+                  patch.object(rgt, "spirv_as"),
+                  patch.object(rgt, "run_cmd", side_effect=run),
+                  contextlib.redirect_stdout(output), contextlib.redirect_stderr(output)):
+                suite_rc = rgt.run_suite(args, tmp)
+            return suite_rc, output.getvalue()
+
+    def test_unsupported_is_a_skip_with_its_reason(self):
+        for shader in ("cs_imgstore", "cs_imgload", "cs_imgload_d16"):
+            with self.subTest(shader=shader):
+                rc, out = self.run_store(shader, 77, "unsupported: shaderStorageImageWriteWithoutFormat=0\ndevice: X")
+                self.assertEqual(rc, 0, out)
+                self.assertIn("SKIP (unsupported: shaderStorageImageWriteWithoutFormat=0)", out)
+                self.assertIn("0/1 passed, 1 skipped", out)
+
+    def test_other_failures_still_fail(self):
+        rc, out = self.run_store("cs_imgstore", 1, "device: X\nFAILED: texel 3 is 0x0")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("FAILED: texel 3 is 0x0", out)
+        self.assertNotIn("skipped", out)
+
+
+INT64 = "unsupported: m.spv declares Int64 and the device has no shaderInt64\n"
+INT64_SKIP = "SKIP (unsupported: m.spv declares Int64 and the device has no shaderInt64)"
+# judge_cs_dump quotes the reason without the "unsupported:" prefix (87da93277, which wins over the wave64 skip).
+INT64_JUDGE_SKIP = "SKIP (m.spv declares Int64 and the device has no shaderInt64)"
+
+
+class ComputeFeatureUnsupported(unittest.TestCase):
+    """vk_compute_test exits 77 with an "unsupported: ..." line when the module needs a feature the device lacks
+    (Int64, Float64, OpFmaKHR): a SKIP that quotes it in every compute test, not only under --require-wave64."""
+
+    def test_judge_skips_a_named_feature_in_every_mode(self):
+        self.assertEqual(judge(77, DEVICE_32 + INT64), (None, INT64_JUDGE_SKIP))
+        self.assertEqual(judge(77, DEVICE_32 + INT64, partial=True), (None, INT64_JUDGE_SKIP))
+        # A 64-wide device without Int64: the feature is the cause, not the subgroup width.
+        self.assertEqual(judge(77, DEVICE_64 + INT64, wave64=True), (None, INT64_JUDGE_SKIP))
+
+    def test_judge_keeps_the_wave64_wording_and_fails_a_bare_77(self):
+        self.assertEqual(judge(77, DEVICE_32 + "full 64-wide compute subgroups unavailable\n", wave64=True),
+                         (None, "SKIP (no 64-wide compute subgroup on this device)"))
+        ok, _ = judge(77, DEVICE_32 + "something else went wrong\n")
+        self.assertIs(ok, False)
+
+    def run_compute(self, shader, rc, msg):
+        calls = []
+        with tempfile.TemporaryDirectory() as tmp:
+            args = SimpleNamespace(filter=f"{shader}.asm", build=tmp, llvm_mc="unused")
+
+            def run(cmd, env=None, gpu=True):
+                if Path(cmd[0]).stem == "vk_compute_test":
+                    calls.append(cmd)
+                    return rc, msg
+                (Path(tmp) / "spirv" / f"{shader}.spv").touch()
+                return 0, ""
+
+            output = io.StringIO()
+            with (patch.dict(rgt.os.environ, {"LEONIDA_W64_EMULATE": ""}, clear=False),
+                  patch.object(rgt, "assemble_to_s", side_effect=lambda _mc, _src, dst, _name: Path(dst).touch()),
+                  patch.object(rgt, "spirv_as"),
+                  patch.object(rgt, "run_cmd", side_effect=run),
+                  contextlib.redirect_stdout(output), contextlib.redirect_stderr(output)):
+                suite_rc = rgt.run_suite(args, tmp)
+            return suite_rc, output.getvalue(), calls
+
+    def test_every_compute_call_site_skips(self):
+        # One shader per way the runner reads vk_compute_test: judge_cs_dump (cs_bounds), its own checks (cs_lds,
+        # cs_workgroup_yz, cs_heap_init), one dispatch per input (cs_cvt_f32_sat), cs_f64_add and wavemask_check.
+        for shader in ("cs_bounds", "cs_lds", "cs_workgroup_yz", "cs_heap_init", "cs_cvt_f32_sat", "cs_f64_add",
+                       "cs_wavemask"):
+            with self.subTest(shader=shader):
+                rc, out, _ = self.run_compute(shader, 77, "device: X (subgroup 32..32)\n" + INT64)
+                self.assertEqual(rc, 0, out)
+                self.assertIn(INT64_SKIP, out)
+                self.assertIn("0/1 passed, 1 skipped", out)
+
+    def test_one_refused_input_stops_the_per_input_loop(self):
+        _, _, calls = self.run_compute("cs_cvt_f32_sat", 77, INT64)
+        self.assertEqual(len(calls), 1)
+
+    def test_check_py_helpers_skip_a_named_feature(self):
+        # check.py's own runner and the cs_fmt_* rows go through dump_test/compute_test, not run_cmd.
+        with tempfile.TemporaryDirectory() as tmp, patch.object(check, "run", return_value=(77, INT64)):
+            for result in (check.dump_test(tmp, tmp, "cs_fmt_1010102", [1], 1),
+                           check.compute_test(tmp, tmp, "cs_bounds", "1", "dump")):
+                self.assertIsInstance(result, check.Skip)
+                self.assertEqual(result, INT64_SKIP)
+        with tempfile.TemporaryDirectory() as tmp, patch.object(check, "run", return_value=(77, "no reason")):
+            self.assertEqual(check.dump_test(tmp, tmp, "cs_fmt_1010102", [1], 1), "exit 77: no reason")
+
+    def test_a_check_py_skip_counts_as_skipped(self):
+        # The cs_fmt_* rows record (name, not problem, problem): a Skip there is a skip, not a failure.
+        with tempfile.TemporaryDirectory() as tmp:
+            args = SimpleNamespace(filter="cs_fmt_1010102.asm", build=tmp, llvm_mc="unused")
+
+            def translate(_cmd, env=None, gpu=True):
+                (Path(tmp) / "spirv" / "cs_fmt_1010102.spv").touch()
+                return 0, ""
+
+            output = io.StringIO()
+            with (patch.object(rgt, "assemble_to_s", side_effect=lambda _mc, _src, dst, _name: Path(dst).touch()),
+                  patch.object(rgt, "spirv_as"),
+                  patch.object(rgt, "run_cmd", side_effect=translate),
+                  patch.object(rgt, "fmt_1010102_test", return_value=check.Skip(INT64_SKIP)),
+                  contextlib.redirect_stdout(output), contextlib.redirect_stderr(output)):
+                rc = rgt.run_suite(args, tmp)
+        self.assertEqual(rc, 0, output.getvalue())
+        self.assertIn("SKIP  cs_fmt_1010102", output.getvalue())
+        self.assertIn("0/1 passed, 1 skipped", output.getvalue())
+
+    def test_a_bare_77_still_fails(self):
+        for shader in ("cs_bounds", "cs_lds", "cs_heap_init"):
+            with self.subTest(shader=shader):
+                rc, out, _ = self.run_compute(shader, 77, "device: X (subgroup 32..32)\nsomething else went wrong")
+                self.assertEqual(rc, 1, out)
+                self.assertNotIn("skipped", out)
 
 
 class FilterWithoutRunnableCases(unittest.TestCase):

@@ -458,8 +458,8 @@ def collect_ctest(col, args):
             col.source("junit", path, "missing")
             continue
         try:
-            root = ET.fromstring(read_utf8(path))
-        except ET.ParseError as e:
+            root = ET.parse(path).getroot()
+        except (ET.ParseError, LookupError, ValueError) as e:
             col.source("junit", path, "invalid", note=str(e))
             continue
         # CTest writes a single testsuite with a disabled count and hostname. pytest wraps its suite in testsuites.

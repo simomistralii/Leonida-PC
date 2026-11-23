@@ -399,11 +399,12 @@ python -I tools/psin_data.py <PSIN file or carve directory> [--json] [--limit N]
 python -I tools/psin_data.py <PSIN file> --dump
 ```
 
-The default output is the counts above, for one file or every `.bin` in a carve directory. `--dump` prints one
-container's decoded tree (hashes as hex) on stdout, for local inspection only. It writes no file and must not be
-pasted into an issue or a pull request. `tests/test_psin_data.py` builds containers from invented names and covers
-every layout above, the end padding, a bad fill, pointers out of range, an unlisted enum value, a skipped type and
-the CLI.
+The default output is the counts above, for one file or every `.bin` in a carve directory. A single file that does
+not start with the `PSIN` magic is one `ERROR:` line and exit 2; inside a directory such a file is skipped, since a
+carve folder holds other streams too. `--dump` prints one container's decoded tree (hashes as hex) on stdout, for
+local inspection only. It writes no file and must not be pasted into an issue or a pull request.
+`tests/test_psin_data.py` builds containers from invented names and covers every layout above, the end padding, a
+bad fill, pointers out of range, an unlisted enum value, a skipped type and the CLI.
 
 ### Name hashes in the data
 

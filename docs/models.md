@@ -829,3 +829,32 @@ geometry from the BIN chunk. Standard library only; no game files.
    `levels.rpf` has the same 343,327 rows in a full export (50,731 fragments, 2,509,947,536
    triangles).
 4. Keep the README and issue #29 in sync with the new counts.
+
+### Predict model offsets for placements
+
+Run `python -I tools/world_drawable_lookup.py entities.jsonl archetypes.json names.json`
+with the placement rows from `world_index.py --entities-out`, the definitions from
+`world_archetypes.py`, and a bounded `rpf9_names.py --types dr,ft` report. The command
+prints local scratch JSON. Supply `--manifest path/to/models/manifest.json` for each
+existing export whose listed identities should be excluded.
+
+The lookup requires agreement between the placement archetype, the definition's name and
+assetName, the resource stem's joaat and its 64-bit placement key. It considers type 1
+fragments and type 2 drawables at page offset +16. Multiple offsets for an identity in
+the indexed window are marked ambiguous. Even a single hit is a prediction: a stream
+can mention another model. Export a window around the predicted offset with
+`rpf9dump models <archive> <outdir> --start BYTES --length BYTES`, compare the manifest offset and
+model identity and run `world_build.py --placements` with the exported geometry.
+
+Save the lookup JSON and run
+`python -I tools/world_drawable_verify.py lookup.json first/models/manifest.json second/models/manifest.json`
+to verify single-offset predictions. Supply completed normal model manifests from the
+same source archive. The verifier reads cached JSON only. It uses the world builder's
+name hashes and counts each identity and its placements once. A matching offset and both
+hashes confirm an observation, including dictionary children sharing an offset. The local
+report counts repeat exact observations and lists other offsets for the same identity.
+Without an exact match, a different name at the offset takes precedence over a matching
+identity elsewhere. The coverage flag independently records whether the predicted offset
+falls in a supplied scan (start inclusive, end exclusive). A full scan covers all offsets.
+A covered prediction with no named evidence remains missing. Geometry loadability is
+checked separately by running the normal world builder on confirmed placement rows.

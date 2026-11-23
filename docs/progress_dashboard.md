@@ -16,6 +16,8 @@ The page is one self-contained HTML file: no network, no packages, it opens from
 ## Sources
 
 Each source is optional. A missing one is listed under "Sources" on the page; it is never counted as zero or as a failure.
+For `--junit`, keep the original XML encoding. UTF-16 reports and reports with a supported encoding declaration
+are read directly; there is no need to re-save them as UTF-8.
 
 | Panel | Source | Unit |
 |---|---|---|

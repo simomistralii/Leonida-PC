@@ -58,6 +58,7 @@ import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pe_inspect import DIR_EXCEPTION, MACHINES, PeFormatError, PeImage  # noqa: E402
+from report_paths import same_report_path  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_TABLE = os.path.join(HERE, "gdk_runtime_classes.json")
@@ -1030,11 +1031,25 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{path}: another input is also named {r['file']}; report written as {name}.gdk_calls.txt/.json",
                   file=sys.stderr)
         stem = os.path.join(a.out, name + ".gdk_calls")
+        json_path = stem + ".json"
+        txt_path = stem + ".txt"
+        inputs = list(a.image) + [a.table]
+        if os.path.isfile(a.runtime_source):
+            inputs.append(a.runtime_source)
+        collision = next(
+            (out_path for out_path in (json_path, txt_path)
+             if any(same_report_path(inp, out_path) for inp in inputs)),
+            None,
+        )
+        if collision:
+            print(f"{path}: report {collision} would overwrite input file", file=sys.stderr)
+            rc = 1
+            continue
         try:
-            with open(stem + ".json", "w", encoding="utf-8", newline="\n") as f:
+            with open(json_path, "w", encoding="utf-8", newline="\n") as f:
                 json.dump({"table": table.source, **r}, f, indent=1)
                 f.write("\n")
-            with open(stem + ".txt", "w", encoding="utf-8", newline="\n") as f:
+            with open(txt_path, "w", encoding="utf-8", newline="\n") as f:
                 f.write(to_text(r))
         except OSError as e:
             print(f"{path}: cannot write report ({e.strerror or e})", file=sys.stderr)

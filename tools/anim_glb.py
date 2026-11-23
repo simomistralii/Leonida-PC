@@ -730,8 +730,9 @@ def main(argv=None):
     ap.add_argument("--skeleton", type=parse_offset, required=True, help="resource with the skeleton, <offset>[:<child>]")
     ap.add_argument("--part", type=parse_offset, action="append", default=[], help="part drawable, <offset>[:<child>]")
     ap.add_argument("--anim", help="anim.rpf")
-    ap.add_argument("--dictionary", type=lambda t: parse_offset(t)[0], help="clip dictionary offset in --anim")
-    ap.add_argument("--clip", action="append", default=[], help="clip name (without pack:/ and .clip) or 0xhash")
+    ap.add_argument("--dictionary", type=lambda t: parse_offset(t)[0], help="export: clip dictionary offset in --anim")
+    ap.add_argument("--clip", action="append", default=[],
+                    help="export: name (without pack:/ and .clip) or 0xhash in the selected --anim dictionary")
     ap.add_argument("--lod", type=int, default=0, help="LOD level of the parts (0 = highest)")
     ap.add_argument("--max-influences", type=int, choices=(4, 8), default=8,
                     help="bone influences per vertex; 4 keeps the largest four, renormalised (three.js reads four)")
@@ -752,6 +753,11 @@ def main(argv=None):
         ap.error(f"--report is a directory: {args.report}")
     if args.out and args.report and same_path(args.out, args.report):
         ap.error("the GLB and the report are the same path")
+    if args.clip or args.dictionary is not None:
+        if args.coverage:
+            ap.error("--clip and --dictionary select clips for export, not --coverage")
+        if not args.anim:
+            ap.error("--clip and --dictionary require --anim")
     if args.coverage:
         if not args.anim or not args.report:
             ap.error("--coverage needs --anim and --report")

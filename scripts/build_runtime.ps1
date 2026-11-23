@@ -1,4 +1,4 @@
-﻿﻿# Builds runtime\build\gta6rt.exe with MSVC at BelowNormal priority, on half the cores by default.
+﻿# Builds runtime\build\gta6rt.exe with MSVC at BelowNormal priority, on half the cores by default.
 # Uses VS's CMake + Ninja when the "C++ CMake tools" component is installed (or native Windows cmake + ninja on PATH),
 # otherwise calls cl.exe directly.
 # The GameInput controller shim (SDL3, docs/gameinput.md) is built only on the CMake path: with an installed SDL3, or
@@ -106,10 +106,49 @@ $bat = Join-Path $out "_build.cmd"
 $batchText = "@echo off`r`nchcp 65001 >nul`r`nset `"PATH=$installer;%PATH%`"`r`ncall `"$vcvars`" >nul || exit /b 1`r`n$body`r`n"
 [System.IO.File]::WriteAllText($bat, $batchText, [System.Text.UTF8Encoding]::new($false))
 
+# -NoNewWindow attaches cmd/cmake to the parent console, so "Configuring done" / ninja status paint
+# over make_game.py's LEONIDA board. Hidden + file redirects keep the console clean; we then emit the
+# logs on our stdout so the board's pipe capture still sees them.
 # /s with a second pair of quotes: cmd.exe strips only the outer pair, so a path holding & or ^ stays quoted.
-$p = Start-Process cmd.exe -ArgumentList "/s", "/c", "`"`"$bat`"`"" -NoNewWindow -PassThru
+$stdoutLog = Join-Path $out "_build.stdout.log"
+$stderrLog = Join-Path $out "_build.stderr.log"
+foreach ($log in @($stdoutLog, $stderrLog)) {
+    if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
+}
+$p = Start-Process -FilePath cmd.exe -ArgumentList "/s", "/c", "`"`"$bat`"`"" -PassThru `
+    -WindowStyle Hidden `
+    -RedirectStandardOutput $stdoutLog `
+    -RedirectStandardError $stderrLog
 $null = $p.Handle  # keeps the exit code readable after WaitForExit
 try { $p.PriorityClass = "BelowNormal" } catch {}
-$p.WaitForExit()
+
+function Emit-NewLogLines {
+    param([ref]$Offset, [string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::ReadWrite)
+    try {
+        if ($fs.Length -lt $Offset.Value) { $Offset.Value = 0 }
+        [void]$fs.Seek($Offset.Value, [System.IO.SeekOrigin]::Begin)
+        $sr = New-Object System.IO.StreamReader($fs)
+        while (($line = $sr.ReadLine()) -ne $null) {
+            Write-Output $line
+        }
+        # Keep a partial trailing line for the next poll (ReadLine consumed only complete lines).
+        $Offset.Value = $fs.Position
+    } finally {
+        $fs.Dispose()
+    }
+}
+
+$outOff = 0
+$errOff = 0
+while (-not $p.HasExited) {
+    Emit-NewLogLines -Offset ([ref]$outOff) -Path $stdoutLog
+    Emit-NewLogLines -Offset ([ref]$errOff) -Path $stderrLog
+    Start-Sleep -Milliseconds 150
+}
+Emit-NewLogLines -Offset ([ref]$outOff) -Path $stdoutLog
+Emit-NewLogLines -Offset ([ref]$errOff) -Path $stderrLog
 if ($p.ExitCode -ne 0) { throw "build failed ($($p.ExitCode))" }
-Write-Host "built $out\gta6rt.exe"
+Write-Output "built $out\gta6rt.exe"

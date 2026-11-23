@@ -50,6 +50,10 @@ class TranslateFallbacksTest(unittest.TestCase):
         class FakeProc:
             def __init__(self, args):
                 started.append(args)
+                self.stdout = None
+
+            def poll(self):
+                return 0
 
             def wait(self):
                 return 0
@@ -98,7 +102,10 @@ class FailedShardTest(unittest.TestCase):
                 json.dump({"old": True}, f)
 
             class FailingProc:
-                def wait(self):
+                def poll(self):
+                    return 1
+
+                def wait(self, timeout=None):
                     return 1
 
             with mock.patch.object(make_game.subprocess, "Popen", lambda *a, **k: FailingProc()),                     mock.patch.object(make_game, "py"),                     mock.patch.object(make_game, "log", lambda *a: None),                     self.assertRaises(SystemExit) as cm:
@@ -181,7 +188,7 @@ class MainWiringTest(unittest.TestCase):
         # is the user's own.
         out = tempfile.TemporaryDirectory()
         self.addCleanup(out.cleanup)
-        argv = ["make_game.py", "--stages", "shaders", "--out", out.name, *extra_argv]
+        argv = ["make_game.py", "--stages", "shaders", "--out", out.name, "--no-tui", *extra_argv]
         with mock.patch.object(sys, "argv", argv), \
                 mock.patch("make_game.below_normal"), \
                 mock.patch("make_game.choose_game", return_value=os.path.abspath("C:/dummy_game")), \

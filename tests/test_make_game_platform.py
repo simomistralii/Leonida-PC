@@ -33,7 +33,7 @@ class DefaultStagesTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def run_main(self, os_name, *args, lacking=("clang-cl",)):
-        argv = ["make_game.py", "--game", self.game, "--out", os.path.join(self.tmp.name, "out"), *args]
+        argv = ["make_game.py", "--game", self.game, "--out", os.path.join(self.tmp.name, "out"), "--no-tui", *args]
         mocks = {n: mock.MagicMock() for n in STAGE_FUNCS}
         with mock.patch.object(sys, "argv", argv), \
                 mock.patch.object(make_game.os, "name", os_name), \

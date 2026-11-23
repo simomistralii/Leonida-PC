@@ -615,6 +615,26 @@ class ExportTest(unittest.TestCase):
         (gltf, _binary), _report = self.export("--no-root-motion")
         self.assertNotIn("mover", [n.get("name") for n in gltf["nodes"]])
 
+    def test_clip_selection_must_have_an_animation_export(self):
+        out = os.path.join(self.tmp.name, "out.glb")
+        report = os.path.join(self.tmp.name, "report.json")
+        common = ["--skeleton", hex(self.offsets[0]), "--report", report]
+        for selector in (["--clip", "walk"], ["--dictionary", "0"]):
+            for mode, args in (("--anim", [out, "--part", hex(self.offsets[1])]),
+                               ("--coverage", ["--coverage", "--anim", self.anim])):
+                with self.subTest(selector=selector, mode=mode):
+                    result = self.run_tool(self.packs, *args, *common, *selector)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn(selector[0], result.stderr.splitlines()[-1])
+                    self.assertIn(mode, result.stderr.splitlines()[-1])
+                    self.assertFalse(os.path.exists(out))
+                    self.assertFalse(os.path.exists(report))
+
+        # The same authored part is still a valid static export without selectors.
+        result = self.run_tool(self.packs, out, "--part", hex(self.offsets[1]), *common)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("animations", read_glb(out)[0])
+
     def test_coverage_counts_bone_tracks(self):
         report = os.path.join(self.tmp.name, "coverage.json")
         r = self.run_tool(self.packs, "--coverage", "--skeleton", hex(self.offsets[0]), "--anim", self.anim,

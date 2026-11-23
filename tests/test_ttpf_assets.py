@@ -359,6 +359,12 @@ class ProfileRules(unittest.TestCase):
         with self.assertRaises(ValueError):
             ttpf_assets.load_profile(self.work)
 
+    def test_malformed_json_names_the_profile(self):
+        self.write("{")
+        with self.assertRaises(ValueError) as caught:
+            ttpf_assets.load_profile(self.work)
+        self.assertIn("bcpack-calibration.json", str(caught.exception))
+
 
 class CompletePoolEarlyReturn(unittest.TestCase):
     def test_a_matching_pass_stamp_returns_before_opening_the_pool(self):

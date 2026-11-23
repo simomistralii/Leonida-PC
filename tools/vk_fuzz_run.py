@@ -188,6 +188,11 @@ def judge(progs, hw, verdict, wave=32, words=4, build=None, work_parent=None, op
     return counts, bad
 
 
+def all_skipped(counts):
+    """True when a Vulkan run compared no program (every entry is a skip, or none ran)."""
+    return not any(n > 0 and not k.startswith("skip") for k, n in counts.items())
+
+
 def exact_verdict(lines, hw, got, n_obs=4):
     """match, or mismatch naming the first word that differs (the observation lines end the program)."""
     for k in range(len(hw)):

@@ -25,6 +25,7 @@ _TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _TOOLS_DIR not in sys.path:
     sys.path.insert(0, _TOOLS_DIR)
 
+import pool_workers  # noqa: E402
 import world_census as WC  # noqa: E402
 import world_index as WI  # noqa: E402
 from report_paths import same_report_path  # noqa: E402
@@ -209,7 +210,7 @@ def _scan_rpf_offsets(path: str, jobs: int = 1) -> tuple[list[int], int, int]:
     size = os.path.getsize(path)
     if size < 16:
         return [], 0, 0
-    workers = max(1, jobs)
+    workers = pool_workers.process_workers(max(1, jobs))
     chunk_sz = max(4 * 1024 * 1024, min(64 * 1024 * 1024, (size + workers - 1) // workers))
     ranges = [(path, s, min(size, s + chunk_sz)) for s in range(0, size, chunk_sz)]
     offs: list[int] = []

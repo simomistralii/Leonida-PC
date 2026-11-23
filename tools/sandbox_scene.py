@@ -87,7 +87,8 @@ def build(args):
     if args.center is None:   # the 50 m cell holding the most entities that resolve to a model
         cells = {}
         for row in rows:
-            if row["_arch"] in index:
+            model, _ = world_build.resolve_placement(index, row["_arch"], row.get("key"))
+            if model is not None:
                 key = (math.floor(row["_pos"][0] / 50), math.floor(row["_pos"][1] / 50))
                 cells[key] = cells.get(key, 0) + 1
         if not cells:
@@ -164,7 +165,8 @@ def main(argv=None):
     ap.add_argument("--entities", required=True, help="world_index.py --entities-out file (JSON lines)")
     ap.add_argument("--models", required=True, help="folder holding rpf9dump models manifests")
     ap.add_argument("--textures", action="append", default=[], help="folder holding rpf9dump ttpf manifests (repeatable)")
-    ap.add_argument("--center", type=float, nargs=2, metavar=("X", "Y"), help="RAGE world x y (default: densest 50 m cell)")
+    ap.add_argument("--center", type=float, nargs=2, metavar=("X", "Y"),
+                    help="RAGE world x y (default: densest 50 m cell of resolved model placements)")
     ap.add_argument("--radius", type=float, default=150.0)
     ap.add_argument("--max-props", type=int, default=400, help="entities to place, nearest first (each can be several draws)")
     ap.add_argument("--tex-size", type=int, default=256)

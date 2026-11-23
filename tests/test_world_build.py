@@ -18,6 +18,7 @@ import json
 import math
 import os
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -1983,6 +1984,23 @@ world_build.build_world(assets, output)
             self.assertEqual(len(os.listdir(os.path.join(output, "chunks"))), 1)
             self._rerun_with_missing_assets(tmp, output)
             self.assertEqual(self._snapshot(output), before)
+
+    @unittest.skipUnless(os.name == "nt", "Windows refuses to replace a read-only destination")
+    def test_killed_after_installing_readonly_chunk_restores_previous_world(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            assets, output, before = self._previous_world(tmp)
+            chunk_dir = os.path.join(output, "chunks")
+            chunks = [os.path.join(chunk_dir, name) for name in os.listdir(chunk_dir)]
+            for chunk in chunks:
+                os.chmod(chunk, stat.S_IREAD)
+
+            self._kill_during_publication(assets, output, "new")
+            self.assertNotEqual(self._snapshot(output), before)
+            self._rerun_with_missing_assets(tmp, output)
+
+            self.assertEqual(self._snapshot(output), before)
+            for chunk in chunks:
+                self.assertFalse(os.stat(chunk).st_mode & stat.S_IWRITE)
 
     def test_killed_after_installing_new_chunk_removes_it_on_recovery(self):
         with tempfile.TemporaryDirectory() as tmp:

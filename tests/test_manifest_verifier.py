@@ -203,6 +203,19 @@ class TestManifestVerifier(unittest.TestCase):
         entries = mv.load_manifest(flat_path)
         self.assertEqual(list(entries.keys()), ["alpha.bin"])
 
+    def test_flat_manifest_checks_files_named_like_metadata(self) -> None:
+        files = {"alpha.bin": b"keep", "version": b"old"}
+        directory = os.path.join(self.root, "flat-game")
+        os.mkdir(directory)
+        for name, data in files.items():
+            with open(os.path.join(directory, name), "wb") as f:
+                f.write(b"new" if name == "version" else data)
+        path = self.write_manifest(os.path.join(self.root, "flat.json"), files, wrapper=False)
+        report = mv.verify_manifest(directory, path, jobs=1)
+        self.assertFalse(report.passed)
+        self.assertEqual(report.problems, {"version": "CHANGED"})
+        self.assertEqual(report.untracked, [])
+
     def test_load_manifest_duplicate_normalized_paths_raise(self) -> None:
         digest = hashlib.sha256(b"x").hexdigest()
         for wrapper in (True, False):

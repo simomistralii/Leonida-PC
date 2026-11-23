@@ -160,9 +160,12 @@ resolve most of them. The resolved names are game data and stay local; only coun
 
 ## Tool
 
+`verify` reports on every supplied file. Its exit status is 2 if any file could not be read or parsed,
+otherwise 1 if any rebuild differed, otherwise 0.
+
 ```powershell
 python -I tools/saves.py info    <file or folder>...
-python -I tools/saves.py verify  <JSAV>                 # parse every block, rebuild, compare byte for byte
+python -I tools/saves.py verify  <JSAV>...              # parse every block, rebuild, compare byte for byte
 python -I tools/saves.py extract <JSAV|ASAV> <outdir>   # blocks/*.json, index.json, save.pretty.json
 python -I tools/saves.py pack    <outdir> <JSAV>        # after editing blocks/*.json
 python -I tools/saves.py diff    <JSAV a> <JSAV b>

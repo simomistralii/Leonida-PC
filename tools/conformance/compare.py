@@ -621,8 +621,17 @@ def load_manifest(path):
     """Load and validate a renderer manifest. Unknown extra keys are ignored."""
     manifest_path = os.path.abspath(path)
     text = read_text_file(manifest_path, "scene manifest")
+
+    def unique_keys(pairs):
+        obj = {}
+        for key, value in pairs:
+            if key in obj:
+                raise ToolError(f"manifest '{manifest_path}': duplicate key {key!r}")
+            obj[key] = value
+        return obj
+
     try:
-        document = json.loads(text)
+        document = json.loads(text, object_pairs_hook=unique_keys)
     except json.JSONDecodeError as error:
         raise ToolError(
             f"manifest '{manifest_path}' is not valid JSON: {error.msg} at line "
@@ -1489,6 +1498,17 @@ def step_expect_missing_and_invalid(directory):
         "manifest scene with no checks",
     )
     print("ok    failure path: a scene with no checks is rejected, not silently passed")
+
+    duplicate_path = os.path.join(directory, "manifest-duplicate.json")
+    for key, document in (
+        ("renderer", b'{"renderer":"first","renderer":"second"}'),
+        ("r", b'{"scenes":[{"checks":[{"r":255,"r":0}]}]}'),
+    ):
+        write_file_bytes(duplicate_path, document, "duplicate key fixture")
+        assert_tool_error(lambda: load_manifest(duplicate_path),
+                          f"manifest '{duplicate_path}': duplicate key {key!r}",
+                          f"duplicate manifest key {key}")
+    print("ok    manifest: duplicate top-level and nested keys cannot hide declarations")
 
 
 def step_diff_metrics():

@@ -384,6 +384,23 @@ class OutputTest(unittest.TestCase):
         rbf0_tree.write_xml(xml_dir, doc["resources"])  # a rerun overwrites, it does not add -0000 duplicates
         self.assertEqual(len(os.listdir(xml_dir)), 1)
 
+    def test_csv_distinguishes_trees_with_the_same_offset_and_root(self):
+        names = ["00000100-left.bin", "00000100-right.bin"]
+        for name in names:
+            with open(os.path.join(self.root, name), "wb") as f:
+                f.write(wide_blob())
+        out = os.path.join(self.root, "tree.json")
+        table = os.path.join(self.root, "nodes.csv")
+        self.assertEqual(rbf0_tree.main([self.root, out, "--csv", table, "--quiet"]), 0)
+        with open(table, encoding="utf-8", newline="") as f:
+            rows = list(csv.DictReader(f))
+        self.assertEqual({row["resource"] for row in rows}, {"0x100"})
+        self.assertEqual({row["source"] for row in rows}, set(names))
+        for name in names:
+            nodes = [row for row in rows if row["source"] == name]
+            self.assertEqual(len(nodes), 8)
+            self.assertEqual({node["kind"] for node in nodes}, {"element", "value", "text"})
+
     def test_duplicate_offsets_keep_each_source(self):
         names = ["000000000100-left.bin", "000000000100-right.bin"]
         roots = ["RootA", "RootB"]

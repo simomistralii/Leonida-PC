@@ -90,6 +90,7 @@ const char* name(leonida::ReplayResult result) {
     case leonida::ReplayResult::invalid_copy: return "invalid copy or resolve";
     case leonida::ReplayResult::invalid_query: return "invalid query";
     case leonida::ReplayResult::invalid_indirect_arguments: return "invalid indirect argument or count buffer range";
+    case leonida::ReplayResult::invalid_draw: return "draw kind does not match the pipeline (mesh or vertex)";
     case leonida::ReplayResult::unsupported: return "unsupported";
     }
     return "?";
@@ -433,6 +434,20 @@ public:
         record_draw(true, indices, instances, first_index, base_vertex, first_instance);
     }
 
+    // ID3D12GraphicsCommandList6: a mesh draw. The bound graphics pipeline must have a mesh shader (checked at
+    // execution, where the pipeline is resolved). D3D12 caps each count at 65535 and their product at 2^22
+    // (D3D12_MS_DISPATCH_MAX_THREAD_GROUPS_PER_GRID); a larger grid is a recording error.
+    void STDMETHODCALLTYPE DispatchMesh(UINT x, UINT y, UINT z) override {
+        d3d12_trace::record("ID3D12GraphicsCommandList6::DispatchMesh");
+        if (x > 65535 || y > 65535 || z > 65535 || std::uint64_t(x) * y * z > (1u << 22)) return check(false);
+        if (!graphics_pipeline_ || !graphics_.layout) return check(false);
+        if (!(viewport_.width > 0) || !(viewport_.height > 0)) return;  // as record_draw: nothing is rasterized
+        leonida::Draw draw{graphics_pipeline_, graphics_.data, draw_views(), depth_, {}, 0, viewport_,
+                           scissor_, blend_factor_, front_stencil_ref_, back_stencil_ref_, false, x, y, z, 0, 0};
+        draw.mesh = true;
+        check(list_.draw(std::move(draw)));
+    }
+
     void STDMETHODCALLTYPE ResourceBarrier(UINT count, const D3D12_RESOURCE_BARRIER* barriers) override {
         d3d12_trace::record("ID3D12GraphicsCommandList::ResourceBarrier");
         if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) return check(false);
@@ -749,6 +764,29 @@ public:
         UINT stride = 0;
         if (!command_signature_info(signature, kind, stride) || !argument_buffer)
             return check(false);
+        const auto arg_desc = argument_buffer->GetDesc();
+        if (arg_desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER || argument_buffer_offset % 4 != 0)
+            return check(false);
+        if (count_buffer) {
+            const auto count_desc = count_buffer->GetDesc();
+            if (count_desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER || count_buffer_offset % 4 != 0 ||
+                count_desc.Width < sizeof(UINT) || count_buffer_offset > count_desc.Width - sizeof(UINT))
+                return check(false);
+        } else if (count_buffer_offset != 0) {
+            return check(false);
+        }
+        if (max_command_count) {
+            const UINT64 record_size =
+                kind == leonida::IndirectKind::draw ? sizeof(D3D12_DRAW_ARGUMENTS)
+                : kind == leonida::IndirectKind::draw_indexed ? sizeof(D3D12_DRAW_INDEXED_ARGUMENTS)
+                : kind == leonida::IndirectKind::dispatch ? sizeof(D3D12_DISPATCH_ARGUMENTS)
+                : 0;
+            if (!record_size || stride < record_size || stride % 4 != 0)
+                return check(false);
+            const UINT64 required = UINT64(max_command_count - 1) * stride + record_size;
+            if (argument_buffer_offset > arg_desc.Width || arg_desc.Width - argument_buffer_offset < required)
+                return check(false);
+        }
         leonida::ExecuteIndirect cmd{};
         cmd.kind = kind;
         cmd.stride = stride;
@@ -769,7 +807,17 @@ public:
         const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC* desc, UINT postbuild_count,
         const D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC* postbuild) override {
         if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE || !desc) return check(false);
+        if (postbuild_count && !postbuild) return check(false);
+        for (UINT i = 0; i < postbuild_count; ++i) {
+            if (!valid_postbuild_info_type(postbuild[i].InfoType)) return check(false);
+        }
         const auto& in = desc->Inputs;
+        if (in.Type != D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL &&
+            in.Type != D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL)
+            return check(false);
+        if (in.DescsLayout != D3D12_ELEMENTS_LAYOUT_ARRAY &&
+            in.DescsLayout != D3D12_ELEMENTS_LAYOUT_ARRAY_OF_POINTERS)
+            return check(false);
         leonida::BuildAccelerationStructure cmd{};
         cmd.is_tlas = (in.Type == D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL);
         cmd.update = (in.Flags & D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE) != 0;
@@ -844,6 +892,7 @@ public:
         const D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC* desc, UINT count,
         const D3D12_GPU_VIRTUAL_ADDRESS* sources) override {
         if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE || !desc || !count || !sources) return check(false);
+        if (!valid_postbuild_info_type(desc->InfoType)) return check(false);
         leonida::AccelerationStructurePostbuild info{};
         info.dest_va = desc->DestBuffer;
         info.type = static_cast<std::uint32_t>(desc->InfoType);
@@ -855,12 +904,37 @@ public:
                                                                D3D12_GPU_VIRTUAL_ADDRESS source,
                                                                D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE mode) override {
         if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) return check(false);
+        if (!valid_copy_mode(mode)) return check(false);
         check(list_.copy_acceleration_structure({dest, source, static_cast<std::uint32_t>(mode)}));
     }
 
     static GraphicsCommandList* from(IUnknown* object) { return Child::from<GraphicsCommandList>(object); }
 
 private:
+    static bool valid_postbuild_info_type(D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_TYPE type) {
+        switch (type) {
+        case D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_COMPACTED_SIZE:
+        case D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_TOOLS_VISUALIZATION:
+        case D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_SERIALIZATION:
+        case D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_CURRENT_SIZE:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    static bool valid_copy_mode(D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE mode) {
+        switch (mode) {
+        case D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_CLONE:
+        case D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_COMPACT:
+        case D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_VISUALIZATION_DECODE_FOR_TOOLS:
+        case D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_SERIALIZE:
+        case D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_DESERIALIZE:
+            return true;
+        default:
+            return false;
+        }
+    }
     template<class E>
     static std::uint32_t u(E value) {
         return static_cast<std::uint32_t>(value);

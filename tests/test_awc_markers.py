@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import os
+from pathlib import Path
 import struct
 import subprocess
 import sys
@@ -66,6 +67,67 @@ def speech_bank(sid, samples, marker_chunk, payload=b"\0" * 64):
     struct.pack_into("<H", fmt, 8, 48000)
     fmt[28], fmt[29] = 0x0B, 1
     return build_bank([(sid, [(0x55, payload), (0x76, bytes(fmt)), (0xBD, marker_chunk)])])
+
+
+class MusicCueSheetTest(unittest.TestCase):
+    def test_failed_cli_rerun_clears_previous_regions(self):
+        from rsc8_audio import MARKER_VALUE_START, MARKER_VALUE_END
+
+        cues = event(1, MARKER_VALUE_START, 10) + event(1, MARKER_VALUE_END, 30)
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "music.awc"
+            out = Path(tmp) / "out"
+            sheet = out / "music" / "cue_regions.json"
+            args = [sys.executable, "-I", Path(TOOL).with_name("awc_opus.py"), src, out, "--cue-sheet", "--jobs", "1"]
+            for failure in ("parse", "write"):
+                with self.subTest(failure=failure):
+                    src.write_bytes(music_bank(7, 200, 0xFC, cues))
+                    subprocess.run(args, check=True, capture_output=True)
+                    self.assertEqual(json.loads(sheet.read_bytes())["regions"][0]["file"], "00000007.ogg")
+                    if failure == "parse":
+                        src.write_bytes(b"invalid bank")
+                    else:
+                        src.write_bytes(music_bank(8, 200, 0xFC, cues))
+                        (sheet.parent / "00000008.ogg").mkdir()
+                    result = subprocess.run(args, capture_output=True)
+                    self.assertEqual(result.returncode, 0 if failure == "parse" else 1)
+                    self.assertEqual(json.loads(sheet.read_bytes()), {"sample_rate": 48000, "regions": []})
+
+    def test_exported_frame_coordinates_and_ambiguous_inputs(self):
+        import awc_opus
+        from rsc8_audio import MARKER_VALUE_START as start, MARKER_VALUE_END as end, parse_adat_header_bytes
+
+        cues = (event(1, start, 10) + event(2, start, 20) + event(1, end, 30)
+                + event(2, end, 40) + event(3, start, 60) + event(3, end, 500))
+        bank = music_bank(7, 200, 0xFC, cues)  # 100 frames of stereo
+        header = parse_adat_header_bytes(bank, 0, len(bank))
+        entries = [(sid, [(kind, bank[off:off + size]) for kind, off, size in tags])
+                   for sid, tags in header["entries"]]
+        desc, data = [blob for _, blob in entries[0][1]]
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, "music.awc")
+            out = os.path.join(tmp, "out")
+            sheet = os.path.join(out, "music", "cue_regions.json")
+
+            def export(payload, flag=True):
+                with open(src, "wb") as f:
+                    f.write(payload)
+                args = [src, out, "--jobs", "1"] + (["--cue-sheet"] if flag else [])
+                self.assertEqual(awc_opus.main(args), 0)
+                if flag:
+                    with open(sheet, encoding="utf-8") as f:
+                        return json.load(f)
+
+            export(bank, False)
+            self.assertFalse(os.path.exists(sheet))
+            self.assertEqual(export(bank), {"sample_rate": 48000, "regions": [
+                {"file": "00000007.ogg", "name_hash": "00000001", "start_sample": 10, "end_sample": 30},
+                {"file": "00000007.ogg", "name_hash": "00000002", "start_sample": 20, "end_sample": 40}]})
+            self.assertTrue(os.path.isfile(os.path.join(out, "music", "00000007.ogg")))
+            for ambiguous in (entries + [entries[0]], entries + [entries[1]],
+                              [(0, [(0x48, desc), (0x55, bytes(len(data)))]), entries[1]],
+                              [entries[0], (9, entries[1][1])]):
+                self.assertEqual(export(build_bank(ambiguous))["regions"], [])
 
 
 class EventLayoutTest(unittest.TestCase):

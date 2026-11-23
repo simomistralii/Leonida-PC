@@ -52,6 +52,9 @@ Usage:
 The default output is counts only: containers, block tables, bytes reached from the root, pointers, arrays and maps,
 with every check. `--dump` prints the decoded tree of one container on stdout, hashes as hex, for local inspection;
 it writes no file. Unknown member types (0x5a, 0x76, 0x77, ...) are counted and skipped, never guessed.
+
+In a carve directory, a stream that does not start with the `PSIN` magic is skipped (the folder holds other files
+too). As the only argument it is a wrong path, so it is one `ERROR:` line and exit 2 rather than an empty count.
 """
 import argparse
 import bisect
@@ -570,6 +573,17 @@ def main():
     if not os.path.exists(a.src):
         print(f"ERROR: {a.src}: no such file or folder", file=sys.stderr)
         return 2
+    if os.path.isfile(a.src):
+        # a directory skips a stream without the magic, but a lone file named on the command line is a wrong path
+        try:
+            with open(a.src, "rb") as f:
+                magic = f.read(4)
+        except OSError as e:
+            print(f"ERROR: {a.src}: {e}", file=sys.stderr)
+            return 2
+        if magic != psin_index.MAGIC:
+            print(f"ERROR: {a.src}: not a PSIN container", file=sys.stderr)
+            return 2
     if a.dump:
         if not os.path.isfile(a.src):
             print("ERROR: --dump takes one PSIN file", file=sys.stderr)

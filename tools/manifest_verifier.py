@@ -120,6 +120,8 @@ def load_manifest(path: str) -> dict[str, dict]:
       {"files": {<rel_path>: {"size": <int>, "sha256": <str>}, ...}}
       or flat:
       {<rel_path>: {"size": <int>, "sha256": <str>}, ...}
+    In a flat manifest, `created`, `title`, `version` and `note` are metadata unless
+    their value is an explicit file object with a `sha256` field.
 
     Rejects repeated JSON keys and normalizes relative paths to forward
     slashes and hashes to lowercase hex.
@@ -162,7 +164,8 @@ def load_manifest(path: str) -> dict[str, dict]:
 
     entries: dict[str, dict] = {}
     for raw_rel, info in raw_files.items():
-        if not nested and raw_rel in ("created", "title", "version", "note"):
+        if (not nested and raw_rel in ("created", "title", "version", "note")
+                and not (isinstance(info, dict) and "sha256" in info)):
             continue
         rel = str(raw_rel).replace("\\", "/")
         if rel in entries:

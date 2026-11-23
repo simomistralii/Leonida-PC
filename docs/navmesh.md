@@ -527,7 +527,8 @@ are authoring/build-time inputs to that partition:
   counts the `CVehiclePoints` cell sizes and searches the meshes for the models' name hashes; `--static-every N`
   adds a static-tile control. It prints aggregates only (ASSET-332).
 - `tools/navmesh_index.py` (stdlib-only) performs the quick `0DRP` header inventory (`offset`, sizes, version, `+0x20`,
-  raw `+0x60`/`+0x68`).
+  raw `+0x60`/`+0x68`). For a carve directory, `--pattern` selects paths recursively. Each matching pathname
+  counts once, including when the pattern itself contains `**`.
 - `tools/navmesh_decode.py` (stdlib-only) decodes all four resource classes (`0DRP`, `0x00010015`, `grid`, `PSIN`),
   joins continuations (including tiny `< 64`-byte continuations), validates structural invariants, and writes aggregate
   JSON and optional numeric CSV metadata. It never writes payload bytes and never touches the TOC.

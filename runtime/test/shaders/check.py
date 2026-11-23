@@ -85,7 +85,7 @@ WAVE32_DUMPS = ("cs_store", "cs_signed_zero_nan", "cs_smem_soffset_imm", "cs_wqm
                 "cs_w32_lds_subdword", "cs_w32_lds_wide",
                 "cs_w32_partial_scmp", "cs_exec_const", "cs_w32_mask_imm", "cs_w32_int_ext",
                 "cs_w32_salu64", "cs_w32_misc_ext", "cs_w32_new_ops", "cs_w32_sincos", "cs_lds_b64_cmpst", "cs_w32_andn2_exec",
-                "cs_mask_vgpr_exec", "cs_w32_fcmpswap", "cs_w32_permlane_fi")
+                "cs_mask_vgpr_exec", "cs_w32_buffer_sub16", "cs_w32_buffer_store_sub", "cs_w32_fcmpswap", "cs_w32_permlane_fi")
 # Wave32 lane-mask dumps: their EXEC/VCC masks and lane selects cover 32 lanes, so a device whose widest subgroup is
 # narrower (Mesa llvmpipe: 8) can't produce their words. They are skipped there, as ps_bitmask_perm is. They run with
 # 32 lanes requested (WAVE32_LANE_ENV), as run_gpu_tests.py does: a device with a range like 8..32 (Intel ANV) may
@@ -115,6 +115,10 @@ CS_DUMPS = [*CS_DPP, ("cs_store", CS_STORE), ("cs_smem_soffset_imm", CS_SMEM),
             # 64-bit scalar data ops and v_mad_u64_u32 (derivations in cs_w32_salu64.asm)
             # more ops with CPU-only checks until now (derivations in cs_w32_misc_ext.asm)
             # ops merged on 2026-11-22 with CPU-only checks (derivations in cs_w32_new_ops.asm)
+            # plain 8/16-bit MUBUF stores, one crossing a dword (cs_w32_buffer_store_sub.asm)
+            ("cs_w32_buffer_store_sub", [0x1122AB44, 0xCDEF7788, 0x34AABBCC, 0xDDDDDD12, 0x0102035A, 0x05061234, 0xAB, 0xFFFFCDEF]),
+            # 8/16-bit MUBUF d16 loads and stores (cs_w32_buffer_sub16.asm)
+            ("cs_w32_buffer_sub16", [0xBEEF00AA, 0x00AA1234, 0xBEEFFFAA, 0xFFAA1234, 0xBEEF8899, 0x88991234, 0x1122CD44, 0xABCD7788]),
             # ds_cmpst_f32 and buffer_atomic_fcmpswap: float compare (cs_w32_fcmpswap.asm)
             ("cs_w32_fcmpswap", [0, 0x3F800000, 0x7FC00000, 0x3F800000, 0x80000000, 0x40400000, 0x3F800000, 0x7FC00000]),
             ("cs_w32_new_ops", [0x55, 0x8001, 0xC0000000, 0x80014000, 0x4000FFFF, 0x77, 0x99, 0x1234]),
@@ -339,6 +343,8 @@ CVT_F32_SAT_CASES = (
     (0x7F800001, 0, 0), (0xFFC00000, 0, 0))
 # v_cvt_pk_u8_f32 (cs_cvt_pk_u8.asm), measured natively on RDNA2 (gfx1036): halves round to even, NaN gives 0.
 CVT_PK_U8_WORDS = [0x1122330C, 0x11220E44, 0x11003344, 0xFE223344, 0x1122330D, 0x11220044, 0x11FF3344, 0x00223344]
+# v_pk_mul_lo_u16 with a constant operand (cs_pk_mul_lo_const.asm), measured natively on RDNA2 (gfx1036); lanes 0 and 1.
+PK_MUL_LO_WORDS = [0x00009E88, 0x03675433, 0x00230000, 0x00077F6C] * 2
 # Wave64-only dump tests (mostly the x = cross-half checks): exact results need 64 lanes, or an emulation of them
 # on narrower subgroups. cs_dpp_w64 is not cross-half, but its lane id needs both halves.
 W64_EMULATED = os.environ.get("LEONIDA_W64_EMULATE") == "1"
@@ -616,10 +622,10 @@ def timed_out(name, limit):
             "LEONIDA_GPU_TEST_TIMEOUT sets the limit")
 
 
-def run(*cmd, env=None):
+def run(*cmd, env=None, cwd=None):
     limit = gpu_test_timeout()
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=limit)
+        r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=limit, cwd=cwd)
     except subprocess.TimeoutExpired:
         return 1, timed_out(cmd[0], limit)
     except OSError as e:
@@ -645,6 +651,14 @@ def run_readback(path, launch, *args, **kwargs):
     return code, output
 
 
+def compute_unsupported(code, output):
+    """A Skip quoting vk_compute_test's "unsupported: ..." line when it exited UNSUPPORTED because the module needs a
+    feature the device lacks (Int64, Float64, OpFmaKHR), in any run mode; None otherwise. Its --require-wave64
+    refusal prints no such line and keeps the callers' own handling, and a 77 without a reason stays a failure."""
+    m = re.search(r"^unsupported: .*", output, re.MULTILINE) if code == UNSUPPORTED else None
+    return Skip(f"SKIP ({m.group(0)})") if m else None
+
+
 def failure(code, output, lines):
     details = "\n".join(output.strip().splitlines()[-lines:])
     return f"exit {code}: {details or 'no test output'}"
@@ -659,6 +673,8 @@ def dump_test(tools, spirv, name, want, words, env=None):
         child = dict(os.environ if env is None else env, VKC_DUMP=str(dump), VKC_OUT_WORDS=str(words))
         code, out = run(os.path.join(tools, "vk_compute_test" + EXE), os.path.join(spirv, name + ".spv"),
                         "1", "dump", env=child)
+        if skip := compute_unsupported(code, out):
+            return skip
         if code:
             return failure(code, out, 3)
         if not dump.is_file():
@@ -886,7 +902,7 @@ def words_match(got, want):
 def compute_test(tools, spirv, name, groups, mode, *, require_wave64=False, expected_words=None, needs_32_lanes=False,
                  env=None):
     """Return an empty string for a pass, None for unsupported wave64, a Skip for a wave32 lane-mask test on a device
-    narrower than 32 lanes (needs_32_lanes), or a failure diagnostic. `env` adds variables for vk_compute_test
+    narrower than 32 lanes (needs_32_lanes) or a module the device lacks a feature for, or a failure diagnostic. `env` adds variables for vk_compute_test
     (VKC_SGPRS)."""
     shader = os.path.join(spirv, name + ".spv")
     args = []
@@ -903,6 +919,8 @@ def compute_test(tools, spirv, name, groups, mode, *, require_wave64=False, expe
         env = {**(env or {}), "VKC_SUBGROUP_SIZE": str(sg)}
     extra = {"env": dict(os.environ, **env)} if env else {}
     code, out = run(os.path.join(tools, "vk_compute_test" + EXE), shader, groups, mode, *args, **extra)
+    if skip := compute_unsupported(code, out):
+        return skip
     if require_wave64 and code == 77:  # vk_compute_test: the device cannot run a 64-wide compute subgroup
         return None
     if needs_32_lanes:
@@ -1092,6 +1110,19 @@ GRADIENT_TESTS = ("ps_texture_grad_a16", "ps_texture_bias_a16", "ps_texture_grad
 # ps_texture_cl / ps_texture_b_cl (image_sample_cl / _b_cl) draw on the two-mip texture too: the left half reads mip 0 (red,
 # the top-left quadrant), the right half mip 1 (cyan) where the clamp is 1.
 CLAMP_TESTS = ("ps_texture_cl", "ps_texture_b_cl")
+
+
+def table_fetch_test(tools, spirv):
+    tool = os.path.abspath(os.path.join(tools, "vk_texture_test" + EXE))
+    with tempfile.TemporaryDirectory(prefix="table-fetch-") as tmp:
+        for mode in ("fetch-sint", "fetch-uint", "fetch-miss"):
+            raw = os.path.join(tmp, mode + ".raw")
+            code, output = run_readback(raw, run, tool, mode, raw, cwd=spirv)
+            if code == UNSUPPORTED:
+                return Skip(output.strip())
+            if code or f"{mode}: 4096 exact pixels" not in output:
+                return failure(code, output, 3)
+    return ""
 
 
 def texture_gradient_a16_test(tools: str, spirv: str, name: str = "ps_texture_grad_a16") -> str:
@@ -1746,6 +1777,8 @@ def main():
     results.append(("cs_fma_fused", fma_fused_test(tools, spirv)))
     results.append(("cs_cvt_pk_u8", compute_test(tools, spirv, "cs_cvt_pk_u8", "1", "dump",
                                                  expected_words=CVT_PK_U8_WORDS)))
+    results.append(("cs_pk_mul_lo_const", compute_test(tools, spirv, "cs_pk_mul_lo_const", "1", "dump",
+                                                       expected_words=PK_MUL_LO_WORDS)))
     for name, want in W64X_DUMPS:   # without --require-wave64 when LEONIDA_W64_EMULATE=1
         results.append((name, compute_test(tools, spirv, name, "1", "dump", require_wave64=not W64_EMULATED,
                                            expected_words=want)))
@@ -1780,6 +1813,7 @@ def main():
     results.append(("ps_imgatomic", bindless_test(tools, spirv, "ps_imgatomic")))
     for name in MIP_TEST_PASSES:
         results.append((name, texture_mip_test(tools, spirv, name)))
+    results.append(("ps_table_fetch", table_fetch_test(tools, spirv)))
     for name in GRADIENT_TESTS:
         results.append((name, texture_gradient_a16_test(tools, spirv, name)))
     for name, problem in results:

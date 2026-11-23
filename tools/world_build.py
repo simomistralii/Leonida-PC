@@ -34,6 +34,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import statistics
 import sys
 import tempfile
@@ -1369,7 +1370,18 @@ def _restore_publication(staging_dir: str, chunks_dir: str, replace) -> None:
             except FileNotFoundError:
                 pass
         for name in backups:
-            replace(os.path.join(backup_dir, name), os.path.join(chunks_dir, name))
+            live = os.path.join(chunks_dir, name)
+            if os.name == "nt":
+                try:
+                    mode = os.lstat(live).st_mode
+                except FileNotFoundError:
+                    pass
+                else:
+                    if stat.S_ISREG(mode) and not mode & stat.S_IWRITE:
+                        # The uncommitted replacement inherited the original's mode.
+                        # Windows cannot overwrite it until it is writable.
+                        os.chmod(live, stat.S_IMODE(mode) | stat.S_IWRITE)
+            replace(os.path.join(backup_dir, name), live)
         os.unlink(journal)
     except (OSError, ValueError) as exc:
         raise OSError(f"could not recover the previous world from {staging_dir}: {exc}") from exc

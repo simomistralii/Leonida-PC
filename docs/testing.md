@@ -368,7 +368,10 @@ Without `VK_EXT_mesh_shader`, the `ms_*` tests are skipped; that's expected, not
 runs them anyway, set `LEONIDA_MESH_COMPUTE=1` for `run_gpu_tests.py`, together with `LEONIDA_W64_EMULATE=1` on a
 32-wide GPU (every mesh shader is wave64). The mesh shaders are then translated with `--mesh-compute`, dispatched as
 compute and drawn by a generated vertex shader (`docs/design.md`, "Mesh shaders as compute"), so the device needs
-`bufferDeviceAddress` and `shaderInt64` instead.
+`bufferDeviceAddress` instead, and `shaderInt64` for a module that declares `Int64`. The standalone tools
+(`vk_harness`, `vk_compute_test`, `vk_texture_test`, `vk_store_test`, `vk_bindless_test`) read the modules'
+capabilities first: they enable `shaderInt64` only for one that declares `Int64` (or `Int64Atomics`), and report 77
+(SKIP, with the reason) when the device lacks it.
 
 ## Without a GPU: Mesa llvmpipe
 
@@ -535,6 +538,7 @@ game's device ignores it`, so leaving them set cannot slow a game down (`run_tin
 
 | What you see | Cause | What to do |
 |---|---|---|
+| Under Wine 9.0 (Ubuntu 24.04's `wine`), a test or the runtime waits out every `std::condition_variable` timeout: `wait_registration_admission` ("native drainage complete"), `vk_presenter_sync` (`unblocked_during_present`), `frame_pacer`, `vk_fence_dispatcher_sync`, `context_concurrent_detach` | The STL's timed wait (`_Cnd_timedwait_for_unchecked`) is linked statically from `msvcprt.lib` and reads Windows' `_Mtx_t` layout, while `_Mtx_lock`/`_Mtx_unlock` come from Wine's builtin msvcp140, which used another layout until wine-10.1 (757bd7909fda); the wait never released the mutex (#3796) | Fixed in the build: `runtime/src/crt_timed_wait.cpp` routes the wait through msvcp140's own `_Cnd_timedwait` in every `/MD` binary, and `crt_timed_wait_test` checks it. A binary built before that fix still needs Wine 10.1 or newer (or Proton) |
 | `ctest` passes but runs far fewer tests than expected (about 45 instead of 125 on Windows), no `d3d12_*` GPU tests, and `LEONIDA_D3D12=vulkan` does nothing | CMake found no Vulkan headers: `VULKAN_SDK` was not set in the environment that ran CMake (for example a user variable set after the terminal opened), and `CMakeCache.txt` keeps that failed lookup. The configure prints a `CMake Warning` "Vulkan headers not found" | Set `VULKAN_SDK` in that environment (or pass `-DLEONIDA_VULKAN_HEADERS_FETCH=ON`), delete `CMakeCache.txt` and configure again. `-DLEONIDA_REQUIRE_VULKAN=ON` makes this a configure error; CI and `scripts/build_runtime.ps1` (with `VULKAN_SDK` set) pass it |
 | Windows refuses to start freshly built test programs ("An Application Control policy has blocked this file"), and the runner stops with a traceback | Smart App Control on Windows 11 | Turn Smart App Control off for the run |
 | `tools/hw_oracle` works once, then stops with "hardware oracle unavailable: Windows Defender blocked the launcher ... (WinError 225)" (older runs: an `OSError: [WinError 225] ... contains a virus or potentially unwanted software` traceback) | Defender's machine-learning check flags the small unsigned `leonida_hw_oracle_<hash>.exe` that the runner builds in `%TEMP%` (seen as `Trojan:Win32/Bearfoos.A!ml`) and quarantines it; every later run rebuilds and loses it again | Add an exclusion for the build folder (`%TEMP%`) in Windows Security, Virus & threat protection, Manage settings, Exclusions, restore the file from Protection history if you want it back, and rerun. The program is built from `tools/hw_oracle/hw_oracle.c` and is a false positive |

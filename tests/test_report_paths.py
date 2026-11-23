@@ -20,8 +20,8 @@ sys.path.insert(0, str(TOOLS))
 import report_paths  # noqa: E402
 
 # Tools that use report_paths and must not define their own copy again.
-SHARED = ("anim_index", "awc_manifest", "gamedata_index", "gamedata_xml", "glb_inspect", "navmesh_index",
-          "rpf_probe", "tile_probe", "world_lights_paths", "world_names")
+SHARED = ("anim_index", "awc_manifest", "gamedata_index", "gamedata_xml", "gen_d3d12_stubs", "glb_inspect",
+          "navmesh_index", "rpf_probe", "tile_probe", "world_lights_paths", "world_names")
 # The one tool that still carries its own copy (an open pull request edits its call site). Do not add to this list:
 # import report_paths instead.
 LEGACY_COPIES = {"navmesh_decode"}

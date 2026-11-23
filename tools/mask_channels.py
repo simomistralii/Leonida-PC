@@ -83,7 +83,7 @@ def same_file(first: str, second: str) -> bool:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("dds", help="an exported .dds texture")
-    ap.add_argument("--thresholds", default="64,128,192", help="comma-separated 0..255 levels (default 64,128,192)")
+    ap.add_argument("--thresholds", default="64,128,192", help="comma-separated 1..255 levels (default 64,128,192)")
     ap.add_argument("--json", help="also write the counts here")
     a = ap.parse_args(argv)
     try:

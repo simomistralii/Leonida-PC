@@ -390,6 +390,22 @@ class ImageTest(unittest.TestCase):
         self.assertIn("report written as thunks.dll-2.gdk_calls.txt/.json", stderr.getvalue())
         self.assertIn("path is a file, not a directory", stderr.getvalue())
 
+    def test_main_refuses_out_that_overwrites_input(self):
+        aliased_dir = os.path.join(self.tmp, "alias-out")
+        os.makedirs(aliased_dir, exist_ok=True)
+        aliased = os.path.join(aliased_dir, "thunks.dll.gdk_calls.json")
+        shutil.copyfile(grc.DEFAULT_TABLE, aliased)
+        with open(aliased, "rb") as f:
+            original = f.read()
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            rc = grc.main([self.path, "--table", aliased, "--out", aliased_dir])
+        self.assertEqual(rc, 1)
+        self.assertIn("would overwrite input file", stderr.getvalue())
+        with open(aliased, "rb") as f:
+            self.assertEqual(f.read(), original)
+        self.assertFalse(os.path.exists(os.path.join(aliased_dir, "thunks.dll.gdk_calls.txt")))
+
     def test_the_default_source_is_every_runtime_shim(self):
         # The classes xgameruntime.cpp hands on to its sibling files count as served: XUserImpl, XGameSaveImpl and
         # XStoreImpl live in xgameruntime_user.cpp, _gamesave.cpp and _store.cpp.

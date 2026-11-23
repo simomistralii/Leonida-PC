@@ -234,6 +234,21 @@ class GlbSkinningTests(unittest.TestCase):
             capture_output=True, text=True, errors="replace", timeout=60,
         )
 
+    def test_inverse_bind_fourth_row_is_affine_not_the_translation_column(self):
+        doc, binary, _ = glb_skinning.parse_glb(make_glb())
+        accessor = doc["accessors"][doc["skins"][0]["inverseBindMatrices"]]
+        second = doc["bufferViews"][accessor["bufferView"]]["byteOffset"] + 64
+        data = bytearray(binary)
+        struct.pack_into("<3f", data, second + 12 * 4, 2.0, -3.0, 4.0)
+        self.assertTrue(glb_skinning.analyze_glb(build_glb(doc, data))["ok"])
+        for component in (3, 7, 11, 15):
+            with self.subTest(component=component):
+                invalid = bytearray(data)
+                struct.pack_into("<f", invalid, second + component * 4, 0.5)
+                proc = self.run_tool(self.write("projective.glb", build_glb(doc, invalid)))
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn("inverseBindMatrices[1] fourth row", proc.stderr)
+
     def test_valid_two_joint_skinned_mesh(self):
         report = glb_skinning.analyze_glb(make_glb())
         self.assertTrue(report["ok"], report["errors"])

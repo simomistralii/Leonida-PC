@@ -60,6 +60,22 @@ class Contract(unittest.TestCase):
 
 
 class Tests(unittest.TestCase):
+    def test_junit_honors_each_reports_encoding(self):
+        xml = '<?xml version="1.0" encoding="{}"?><testsuite><testcase name="{}"><failure/></testcase></testsuite>'
+        with tempfile.TemporaryDirectory() as root:
+            paths = []
+            for codec, declared, name in (("utf-16", "UTF-16", "日本語"), ("latin-1", "ISO-8859-1", "café"),
+                                          ("ascii", "not-a-codec", "bad")):
+                path = os.path.join(root, codec + ".xml")
+                with open(path, "wb") as f:
+                    f.write(xml.format(declared, name).encode(codec))
+                paths.append(path)
+            col = pd.Collector()
+            with mock.patch.object(pd, "ROOT", root), mock.patch.object(pd, "last_commit_time", return_value=None):
+                pd.collect_ctest(col, SimpleNamespace(junit=paths))
+        self.assertEqual([(c["name"], c["status"]) for c in col.components], [("日本語", "failed"), ("café", "failed")])
+        self.assertEqual([s["status"] for s in col.sources if s["id"] == "junit"], ["ok", "ok", "invalid"])
+
     def test_unittest_file_is_skipped_only_when_all_cases_skip(self):
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(pd, "ROOT", directory):
             file = os.path.join(directory, "test_sample.py")

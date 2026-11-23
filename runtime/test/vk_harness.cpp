@@ -36,6 +36,7 @@
 #include "vk_pc_tail.h"
 #include "../src/descriptor_table.h"
 #include "../src/gfx10_descriptors.h"
+#include "spirv_capability.h"
 
 #include <cctype>
 #include <cstddef>
@@ -507,9 +508,18 @@ int main(int argc, char** argv) {
         }
         feats.shaderFloat64 = VK_TRUE;
     }
-    if (need_heap || mesh_compute) {
-        if (!f2q.features.shaderInt64) { std::fprintf(stderr, "unsupported: 64-bit addresses need shaderInt64\n"); return 77; }
-        feats.shaderInt64 = VK_TRUE;   // heap and --mesh-compute output addresses are 64-bit
+    // shaderInt64 only when a stage has 64-bit integers. Heap and --mesh-compute addresses are 64-bit, but rdna2spirv.py
+    // builds them from 32-bit pairs unless the shader also does 64-bit arithmetic (SHADER-423), so the module decides,
+    // not VKH_HEAP (TEST-468).
+    bool needs_int64 = leonida::vk_test::needs_shader_int64(fs_code);
+    for (const char* p : std::initializer_list<const char*>{argv[1], mesh_vs_path, gs_path})
+        if (p && !needs_int64) needs_int64 = leonida::vk_test::needs_shader_int64(read_spv(p));
+    if (needs_int64) {
+        if (!f2q.features.shaderInt64) {
+            std::fprintf(stderr, "unsupported: a stage declares Int64 and the device has no shaderInt64\n");
+            return 77;
+        }
+        feats.shaderInt64 = VK_TRUE;
     }
     if (tex_rgba_path) {
         if (!f2q.features.shaderSampledImageArrayDynamicIndexing) {

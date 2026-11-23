@@ -119,6 +119,9 @@ instruction family per file; the list below describes some of them, not every fi
 - `test_wave32_pixel_subgroup64.py` translates wave32 pixel shaders with lane-specific inputs in each physical half
   and runs them as one 64-lane subgroup and as two 32-lane subgroups. `v_readfirstlane`, `v_readlane`,
   `v_writelane`, `ds_bpermute`, `ds_permute`, ballots, and both votes must produce the same per-half results.
+  The descriptor case makes the first quad of each half either not running (`run_workgroup(lanes=...)`) or helpers
+  left out of subgroup operations (`helpers=...`), and binds the descriptor hash table and an image array
+  (`resources=...`): each half must read its own image.
 - `test_w64x_scalar_load_order.py` translates wave64 programs with `--wave64-emulate` and checks the emitted rounds:
   no case of the round loop's switch reads or writes buffer memory after a write, or writes after a read, so a
   `buffer_store` and a later `s_load` / `s_buffer_load` of the wave (and a scalar load and a later store) run in

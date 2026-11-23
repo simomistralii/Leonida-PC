@@ -175,8 +175,9 @@ HRESULT CALLBACK error_dialog_provider(XAsyncOp op, const XAsyncProviderData* da
 // 3: HRESULT XGameUiShowMessageDialogAsync(XAsyncBlock* async, const char* titleText, const char* contentText,
 //        const char* firstButtonText, const char* secondButtonText, const char* thirdButtonText,
 //        XGameUiMessageDialogButton defaultButton, XGameUiMessageDialogButton cancelButton)
-// ASSUMPTION: the parameter list is the one the GDK reference gives; only the result-page and the enum were checked
-// for this file. The dialog is "answered" with its default button.
+// The parameter list is the one the GDK reference gives; only the result-page and the enum were checked for this
+// file. No caller confirms it: tools/gdk_runtime_calls.py finds no thunk for this slot in the executable
+// (docs/runtime_imports.md). The dialog is "answered" with its default button.
 HRESULT STDMETHODCALLTYPE ui_message_dialog_async(void*, XAsyncBlock* async, const char* title, const char* content,
                                                   const char* first, const char* second, const char* third,
                                                   XGameUiMessageDialogButton default_button, XGameUiMessageDialogButton) {
@@ -298,8 +299,8 @@ uint32_t STDMETHODCALLTYPE streaming_client_count(void*) { return 0; }
 
 // 12: HRESULT XGameStreamingRegisterConnectionStateChanged(XTaskQueueHandle queue, void* context,
 //        XGameStreamingConnectionStateChangedCallback* callback, XTaskQueueRegistrationToken* token)
-// ASSUMPTION: that parameter list (the GDK reference's, not re-checked for this file). No client connects, so the
-// callback never runs.
+// That parameter list is the GDK reference's, not re-checked for this file, and no caller confirms it: the executable
+// links no XGameStreamingImpl thunk (docs/runtime_imports.md). No client connects, so the callback never runs.
 HRESULT STDMETHODCALLTYPE streaming_register_connection(void*, XTaskQueueHandle, void*, void* callback,
                                                         XTaskQueueRegistrationToken* token) {
     if (!callback || !token) return E_INVALIDARG;
@@ -325,7 +326,7 @@ template <int Slot> HRESULT STDMETHODCALLTYPE client_not_connected(void*) {
 static_assert((static_cast<uint32_t>(E_GAMESTREAMING_NOT_INITIALIZED) & 0xFF) == 0, "reads as false in al");
 
 // 11: XGameStreamingConnectionState XGameStreamingGetConnectionState(XGameStreamingClientId client): 0, the first
-// enumerator. ASSUMPTION: it is Disconnected; there is no client to ask about either way.
+// enumerator, taken to be Disconnected; there is no client to ask about either way, and the executable has no caller.
 uint32_t STDMETHODCALLTYPE streaming_connection_state(void*) { return 0; }
 
 HRESULT STDMETHODCALLTYPE streaming_query_interface(void*, REFIID iid, void** out);
@@ -431,7 +432,8 @@ const GUID kUserDeviceInterfaces[] = {
     {0x0cc6a956, 0xe7e1, 0x4fdf, {0x93, 0x41, 0x9d, 0x5d, 0xa6, 0x49, 0xeb, 0xc8}},    // IXUserDeviceImpl2 (no methods)
 };
 
-// ASSUMPTION: APP_LOCAL_DEVICE_ID is 32 bytes (APP_LOCAL_DEVICE_ID_SIZE), not on the pages read for this file.
+// APP_LOCAL_DEVICE_ID is taken to be 32 bytes (APP_LOCAL_DEVICE_ID_SIZE), not on the pages read for this file. No
+// caller confirms it: the executable links no XUserDeviceImpl thunk (docs/runtime_imports.md).
 struct APP_LOCAL_DEVICE_ID {
     uint8_t value[32];
 };

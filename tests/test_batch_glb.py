@@ -207,6 +207,25 @@ class TestBatchGlb(unittest.TestCase):
 
             self.assertEqual(textures, [red_png, blue_png])
 
+    def test_readable_texture_reported_only_if_all_matching_groups_lack_uvs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            png = dds_png.dds_to_png_bytes(_create_minimal_bc1_dds())
+            (root / "paint.png").write_bytes(png)
+            obj = root / "panel.obj"
+            for groups, embedded in ((("bare", "bare"), False), (("bare", "uv"), True), (("uv", "bare"), True)):
+                with self.subTest(groups=groups):
+                    faces = "".join(f"g part{i}\n" + ("f 1/1 2/1 3/1\n" if g == "uv" else "f 1 2 3\n")
+                                    for i, g in enumerate(groups))
+                    obj.write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nusemtl paint\n" + faces,
+                                   encoding="utf-8", newline="\n")
+                    stats = batch_glb.batch_convert(temp, temp, texture_dir=temp, jobs=1)
+                    self.assertEqual(stats["succeeded"], 1)
+                    self.assertEqual(png in (root / "panel.glb").read_bytes(), embedded)
+                    expected = [] if embedded else [(str(obj), str(root / "paint.png"),
+                                                     "matching primitives have no texture coordinates")]
+                    self.assertEqual(stats["dropped_textures"], expected)
+
     def test_batch_convert_with_dds_texture(self) -> None:
         with tempfile.TemporaryDirectory() as in_dir, \
              tempfile.TemporaryDirectory() as out_dir, \

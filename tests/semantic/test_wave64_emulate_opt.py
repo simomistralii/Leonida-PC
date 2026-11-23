@@ -1652,6 +1652,65 @@ class StructuredEmulationTests(unittest.TestCase):
         for lane in range(64):
             self.assertEqual(mem[lane * 4], 1, f"lane {lane}: src_scc lost wave vote after s_and_saveexec_b64")
 
+    def test_bounded_opcode_caches_and_superblock_dirty_transfer(self):
+        # 1) Bounded caches must stay within _OP_CACHE_MAX even with > _OP_CACHE_MAX synthetic opcodes.
+        limit = wave64_emulate_opt._OP_CACHE_MAX
+        wave64_emulate_opt._BASE_OP_CACHE.clear()
+        wave64_emulate_opt._OP_META_CACHE.clear()
+        for i in range(limit + 32):
+            op = f"v_synth_op_{i}_e32"
+            self.assertEqual(wave64_emulate_opt.base_op(op), f"v_synth_op_{i}")
+            meta = wave64_emulate_opt._get_op_meta(op)
+            self.assertEqual(meta[0], f"v_synth_op_{i}")
+        self.assertLessEqual(len(wave64_emulate_opt._BASE_OP_CACHE), limit)
+        self.assertLessEqual(len(wave64_emulate_opt._OP_META_CACHE), limit)
+
+        # 2) Precomputed superblock dirty transfer: s_barrier clears earlier dirty state while a
+        #    subsequent folded region's mem_reads still propagates to the successor block.
+        sgpr = lambda r, n=1: {"k": "sgpr", "r": r, "n": n}
+        vgpr = lambda r, n=1: {"k": "vgpr", "r": r, "n": n}
+        spec = lambda t: {"k": "special", "t": t}
+        imm = lambda v: {"k": "imm", "v": v}
+        ins_se = {"op": "s_and_saveexec_b64", "args": [sgpr(8, 2), spec("vcc")], "mods": ()}
+        blocks = [
+            [
+                {"op": "ds_write_b32", "args": [vgpr(0), vgpr(1)], "mods": ()},
+                {"op": "s_barrier", "args": [], "mods": ()},
+                ins_se,
+                {"op": "s_cbranch_execz", "args": [imm(2)], "mods": ()},
+            ],
+            [
+                {"op": "buffer_load_dword", "args": [vgpr(2), vgpr(0), sgpr(0, 4), imm(0)], "mods": ()},
+            ],
+            [
+                {"op": "s_or_b64", "args": [spec("exec"), spec("exec"), sgpr(8, 2)], "mods": ()},
+                {"op": "s_cmp_eq_u32", "args": [sgpr(4), imm(0)], "mods": ()},
+                {"op": "s_cbranch_scc0", "args": [imm(1)], "mods": ()},
+            ],
+            [
+                {"op": "buffer_store_dword", "args": [vgpr(2), vgpr(0), sgpr(0, 4), imm(0)], "mods": ()},
+                {"op": "s_endpgm", "args": [], "mods": ()},
+            ],
+            [
+                {"op": "s_endpgm", "args": [], "mods": ()},
+            ],
+        ]
+        raw_edges = [[2, 1], [2], [4, 3], [], []]
+        succ = [[2, 1], [2], [4, 3], [], []]
+        lm = {id(ins_se): {"vcc": True}}
+        scc_live = wave64_emulate_opt.scc_live_outs(blocks, succ)
+        folds, fold_chain, absorbed = wave64_emulate_opt.find_local_exec_folds(blocks, raw_edges, succ, lm, scc_live)
+        self.assertIn(0, folds)
+        self.assertEqual(fold_chain.get(0), 2)
+        plan = wave64_emulate_opt.plan_structured_emulation(
+            blocks, raw_edges, succ, folds, fold_chain, absorbed, lm, scc_live, 64
+        )
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan["mode"], "inline_all")
+        # s_barrier cleared ("lds", "w"), and folded block 1 added ("mem", "r") after it.
+        self.assertEqual(plan["dirty_in"][3], frozenset({("mem", "r")}))
+        self.assertEqual(plan["dirty_in"][4], frozenset({("mem", "r")}))
+
 
 if __name__ == "__main__":
     unittest.main()

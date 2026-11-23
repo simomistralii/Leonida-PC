@@ -3,15 +3,20 @@
 
     python -I tests/test_vk_fuzz_run.py
 """
+import contextlib
+import importlib
+import io
 import subprocess
 import sys
 import unittest
+import unittest.mock as mock
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS))
 sys.dont_write_bytecode = True
 
+import hw_oracle.runner  # noqa: E402
 import vk_fuzz_run as R  # noqa: E402
 
 
@@ -72,15 +77,45 @@ class ProgramText(unittest.TestCase):
         self.assertEqual(counts, {"match": 1, "mismatch": 1, "skip: llvm-mc: bad": 1})
         self.assertEqual([b[0] for b in bad], [1])
 
+    def test_all_skipped(self):
+        self.assertTrue(R.all_skipped({}))
+        self.assertTrue(R.all_skipped({"skip: vk_compute_test: unsupported": 3}))
+        self.assertTrue(R.all_skipped({"skip: hardware: no": 2, "match": 0}))
+        self.assertFalse(R.all_skipped({"match": 1, "skip: x": 2}))
+        self.assertFalse(R.all_skipped({"denormal": 1, "skip: x": 2}))
+
 
 class Guard(unittest.TestCase):
+    FUZZERS = ("pk16_diff", "vint_diff", "sdwa_diff", "wint_diff", "fmisc_diff")
+
     def test_vk_without_hw_is_a_usage_error(self):
-        for tool in ("pk16_diff.py", "vint_diff.py", "sdwa_diff.py", "wint_diff.py"):
+        for tool in self.FUZZERS:
             with self.subTest(tool=tool):
-                r = subprocess.run([sys.executable, "-I", str(TOOLS / tool), "--oracle", "vk", "--programs", "1"],
+                r = subprocess.run([sys.executable, "-I", str(TOOLS / f"{tool}.py"), "--oracle", "vk", "--programs", "1"],
                                    capture_output=True, text=True)
                 self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
                 self.assertIn("--oracle hw,vk", r.stderr)
+
+    def test_hw_vk_exits_two_when_all_vk_programs_skip(self):
+        for tool in self.FUZZERS:
+            mod = importlib.import_module(tool)
+            for vk_counts, expected_rc in (
+                ({"skip: vk_compute_test: unsupported": 2}, 2),
+                ({"match": 1, "skip: vk_compute_test: unsupported": 1}, 0),
+            ):
+                oracle = mock.Mock(device="mock", arch="gfx1030")
+                counts = {"pass": 2, "mismatch": 0, "skip": {}, "vk": dict(vk_counts), "vk_failures": []}
+                out = io.StringIO()
+                with self.subTest(tool=tool, expected_rc=expected_rc):
+                    with mock.patch.object(hw_oracle.runner, "open_oracle", return_value=oracle), \
+                         mock.patch.object(mod, "run_suite", return_value=(counts, [])), \
+                         contextlib.redirect_stdout(out):
+                        rc = mod.main(["--oracle", "hw,vk", "--programs", "2"])
+                    self.assertEqual(rc, expected_rc, out.getvalue())
+                    if expected_rc == 2:
+                        self.assertIn("no Vulkan program ran: every one was skipped", out.getvalue())
+                    else:
+                        self.assertNotIn("no Vulkan program ran", out.getvalue())
 
 
 if __name__ == "__main__":

@@ -48,6 +48,14 @@ a reference to be trusted. A hand-written SPIR-V twin of a test program is a use
 checks the harness and driver without involving the translator, so a harness failure is not blamed on
 translation.
 
+Assembling needs no external `spirv-as` binary: `tools/spirv_asm.py` encodes SPIR-V assembly text into binary
+words in process, as a module (`assemble(text, target_env="vulkan1.2")`) or from the command line
+(`python -I tools/spirv_asm.py in.spvasm -o out.spv`, with `--target-env` choosing the environment and
+`vulkan1.2` the default), using the Khronos SPIRV-Headers grammar kept in `tools/spirv_asm_tables.py`.
+`tools/rdna2spirv.py --assembler python` takes that path instead of the `spirv-as` subprocess and its
+temporary `.spvasm` file; `spirv-val` stays the external validator. `tests/test_spirv_asm.py` and
+`tests/test_spirv_asm_tables.py` cover the assembler and the tables.
+
 The CPU model is deliberately not a second translator. It interprets the listing's mnemonics and
 operands; it never consumes SPIR-V. That independence is what makes a disagreement meaningful.
 
@@ -722,9 +730,10 @@ Covered: 2D `image_load`, `R8G8B8A8_UNORM`, `R16G16B16A16_SFLOAT`, `R32G32B32A32
 and `R8G8B8A8_UINT`/`SINT`, all as sampled images, as the runtime binds a read-only texture (integer formats are
 read through the translator's uint/sint aliases of the sampled array). The shader converts the loaded 8-bit integer values to float for
 readback; every such value is exactly representable, including signed negatives. Wider integers are not covered.
-Texture sizes divide the 64x64 draw (8/16/32/64), so every texel is read at least once. The nonzero masks cycle from
-`0xf` through `0x1`–`0xe`; 90 programs cover all 15 masks for each of the six default formats. Selected channels
-are packed into consecutive destination registers, while unwritten registers keep initialized sentinel values.
+Texture sizes divide the 64x64 draw (8/16/32/64), so every texel is read at least once. The mask cycle starts with
+`0xf` and `0x5`, so the default eight programs already exercise packing across a gap. With 90 programs, each of the
+six default formats exercises all 15 nonzero masks. Selected channels are packed into consecutive destination
+registers, while unwritten registers keep initialized sentinel values.
 The packing model follows the image VGPR usage description in AMD's
 [RDNA 1.0 ISA guide](https://www.amd.com/content/dam/amd/en/documents/radeon-tech-docs/instruction-set-architectures/rdna-shader-instruction-set-architecture.pdf);
 the Vulkan test compares translated shaders on the host GPU, not native RDNA2 execution.
@@ -1297,9 +1306,10 @@ Differences are `denormal` (the reference declines the program for a denormal: f
 which fails the run. Seeds 11 to 13, 600 programs each, up to 8 ops: Radeon gfx1036 wave32 597 match, 3 omod_neg_zero;
 wave64 593 match, 3 denormal, 4 omod_neg_zero; RTX 5080 wave32 595 match, 3 omod_neg_zero, 2 denormal; no mismatch.
 
-### Translated programs on a Vulkan GPU: `--oracle hw,vk` of `pk16_diff`, `vint_diff`, `wint_diff`, `sdwa_diff` (and `fmisc_diff`, `f32_fuzz`)
+### Translated programs on a Vulkan GPU: `--oracle hw,vk` of `pk16_diff`, `vint_diff`, `wint_diff`, `sdwa_diff` and `fmisc_diff`
 
-These fuzzers judge the translator in `spirv_mini_interp`, which cannot see what a driver does with the SPIR-V. With
+These fuzzers judge the translator in `spirv_mini_interp`, which cannot see what a driver does with the SPIR-V. `f32_fuzz`
+has no Vulkan path (its GPU oracle is `--oracle hw`, above). With
 `--oracle hw,vk` each program also runs through llvm-mc (gfx1013), `rdna2spirv.py` and `runtime/build/vk_compute_test`
 (`tools/vk_fuzz_run.py`; `--build DIR`, `--work DIR`, `LEONIDA_VK_DEVICE`) as one wave, and its words are judged against
 the hardware's words from a kernel run in the same wave size (`--wave 32` or `--wave 64`; wave64 needs native 64-wide
@@ -1410,6 +1420,41 @@ python -I tests/test_f64_diff.py
 
 The skips are counted by reason: subnormal FTZ, implementation-defined binary64 `InverseSqrt`/`Sqrt` precision,
 non-finite scaled FMA, and translator-rejected directed rounding. The compared cases had no mismatches.
+
+### Output modifiers of the binary64 and f16 division ops (`tools/f64_omod_probe.py`)
+
+`tools/f64_omod_probe.py` measures what `mul:2`, `mul:4`, `div:2` and `clamp` do to six VOP3 results: the binary64
+conversions `v_cvt_f64_i32` and `v_cvt_f64_u32`, `v_cvt_f32_f64` (an f32 destination), `v_frexp_mant_f64`,
+`v_div_fixup_f64` and `v_div_fixup_f16`. Each case is measured plain and with each modifier in the same kernel launch,
+so the probe compares the modifier's effect and not the semantics of the op. A hand-written kernel writes the whole
+destination (both words for binary64, the low half only for the 16-bit form, as the ISA defines) and runs once in
+wave32 and once in wave64, which must agree word for word. It needs `tools/hw_oracle` on a GFX10 AMD GPU: the kernels
+set their own MODE from the descriptor, and a device of another family is reported as unavailable, since the gate was
+measured on RDNA2. It reads no game files.
+
+The five MODEs are `game_i0_d3` (the game's, and the translator's: IEEE 0, `denorm_mode_16_64 = 3`,
+`denorm_mode_32 = 0`, DX10_CLAMP 1), `i0_d0`, `i1_d3`, `i1_d0` and `i0_d3_f32keep` (`denorm_mode_32 = 3`). The gate
+turns out to be **per result precision, not per instruction family**: the f32 result of `v_cvt_f32_f64` follows
+`denorm_mode_32` and scales whenever it is 0, while the f16 and binary64 results scale only with IEEE 0 and
+`denorm_mode_16_64 = 0` and ignore the modifiers in the game's MODE. `clamp` applies in every MODE. That is why
+`tools/rdna2spirv.py` keeps only `clamp` for these destinations, and the rows for these ops in `docs/design.md` carry
+the measurement.
+
+`--modes` takes a comma-separated subset of the five (all by default), `--waves` the wave sizes (`32,64` by default),
+`--hw-arch` the architecture handed to `tools/hw_oracle`, and `--json` a path for the report: the device, the
+architecture, the modes, the wave sizes, the modifier forms, the ops and the counts `scaling_gated_on`,
+`scaling_gated_off`, `scaling_changed_value`, `clamp_changed_value`, `mismatches` and `wave_diffs`, with the first
+cases of each. `--self-test` checks the model's own cases without a GPU. Exit 0 when every word matches the model and
+the wave sizes agree, 1 on a mismatch or a wave difference (the first cases are printed), 2 on a CLI or harness error
+and 77 when the oracle or a GFX10 device is missing. `tests/test_f64_omod_probe.py` covers the gate and the CLI with a
+fake oracle.
+
+```
+python -I tools/f64_omod_probe.py                  # all five MODEs, wave32 and wave64
+python -I tools/f64_omod_probe.py --waves 64 --json f64_omod.json
+python -I tools/f64_omod_probe.py --self-test
+python -I tests/test_f64_omod_probe.py
+```
 
 **Default-mode DX9 multiply regression.** `v_mul_legacy_f32` now explicitly flushes each f32 operand before the
 DX9 `0 * anything => +0` override, and flushes the nonzero product before its VOP3 output modifier. The output is
@@ -2082,6 +2127,12 @@ tolerance (1e-3 absolute plus relative), NaN or all-zero on one GPU only, fails 
 Variant `t` (`VKS_TEX=1`) replaces the fallback images with an 8x8 gradient (2D, 2D array, 1D, 3D) and a linear
 sampler so sampled values are not all zero.
 
+Warning: a few sampled shaders hang NVIDIA GPUs with the zeroed heap (see "Fails on one GPU, NVIDIA" below). The
+`--timeout` of `ps_sweep.py run` only bounds the wait on the host side; the driver resets the GPU (TDR). On a GPU that
+also drives the display the desktop freezes until each reset (a tester saw five in six minutes on an RTX 3060 around
+shaders 120 to 310 of the 480). Run it on a GPU with no display attached, or expect a freeze of a few seconds per hang;
+`--lo`/`--hi`/`--only` run part of the sample.
+
 RTX 4080 SUPER and Intel UHD 770 (32.0.101.6129), Windows 11, 480 of 12,101 pixel shaders (seed 20261122):
 
 | class | variant z (fallback images) | variant t (gradient textures) |
@@ -2112,6 +2163,30 @@ RTX 4080 SUPER and Intel UHD 770 (32.0.101.6129), Windows 11, 480 of 12,101 pixe
   zeroed heap mostly samples zero or discards). That is the limit of the synthetic inputs: a
   seeded heap was tried and abandoned, because a pointer read from float data is a wild address and takes NVIDIA's
   device down.
+
+**With the fallbacks (`--bary-fallback` plus the MinLod fallback of #4642, same 480 shaders, variant z).** The same sample was
+retranslated with both flags and drawn through `<name>.bary_gs.spv` where a shader reads raw barycentrics (`VKS_GS`,
+`tools/bary_fallback_gs.py`). The Intel UHD 770 creates 440 of the 480 (265 before; the 207 that needed
+`fragmentShaderBarycentric` or `shaderResourceMinLod` are gone), 32 time out (zeroed-heap loops, which the same
+translation also hits on the RTX 4080 SUPER), and 8 are not translated (`computed I/J pair under --bary-fallback`,
+#3898). Intel against NVIDIA on the same fallback translation: 434 OK on both, 0 differ, 4 NVIDIA device losses
+(the unterminated loop above), 8 not translated, 34 timeouts on both. Intel with the fallbacks against NVIDIA with
+the default translation: 373 OK, 53 differ by more than 0.1 and 8 are NaN on one side. The same 61 differ between the
+two translations on NVIDIA alone, so it is the translation, not the GPU. **Cause (counted on the same 480 translated
+again, `--bary-fallback` alone, without the MinLod flag of #4642, against the default):** 199 modules differ between the two translations, 190 that read a
+16-bit interpolant (`v_interp_p1ll/p1lv/p2_f16`) and the 9 that read raw barycentrics; the other 273 translated under
+both are byte-identical, so ordinary `v_interp_p1/p2/mov_f32` is not translated differently (the remaining 8 are not
+translated under the fallback). `--bary-fallback` has no `PerVertexKHR` inputs, so a 16-bit interpolant is read as the
+smooth f32 of its packed word (design.md, "16-bit interpolation"); `--f16-interp-fallback` is its companion, and
+`make_game.py` turns it on with it wherever the device has no per-vertex inputs, as an Intel UHD has none. The sweep
+used the first flag without the second, and its generated vertex shader wrote the decoded halves nowhere. The synthetic
+`ps_interp_f16_high` drawn with `vs_f16_pack` agrees: with `--bary-fallback` alone its f16 halves are off by 0.984 on
+both GPUs, with both flags and by default they are within 2e-3 on both, and `ps_interp_f32_mods` / `ps_interp_mov_mods`
+(plain f32 and mov reads) are exact with `--bary-fallback`. `ps_sweep.py` now builds the vertex shader of a pixel
+shader with `f16_halves` in its index entry so that the halves are decoded from the same words a default translation
+reads per vertex. Not shown: the 61 individually (a 12-shader subset of the 190 agreed between the two translations on
+the RTX 4080 SUPER; draws of these shaders take about 20 s each). Only 9 of the 480 read raw
+barycentrics and need the geometry shader; all 9 agree on both GPUs.
 
 ## Coverage plan and cost
 

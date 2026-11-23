@@ -169,6 +169,10 @@ struct VulkanDeviceInfo {
     // VkAccelerationStructureKHR; needs buffer_device_address and the GPU address arena. The standalone device sets it
     // unless LEONIDA_RT_AS=khr (docs/d3d12_vulkan.md 4.8); with it set, ray_tracing is not enabled.
     bool xdxr_acceleration_structures = false;
+    // VK_EXT_mesh_shader with its meshShader feature is enabled on `device` (taskShader is not needed: the game's
+    // shaders have no amplification stage). Mesh-shader PSOs and DispatchMesh work, and CheckFeatureSupport reports
+    // D3D12_MESH_SHADER_TIER_1; without it mesh PSOs are refused and the tier is NOT_SUPPORTED.
+    bool mesh_shader = false;
     // The core features enabled on `device`. Graphics PSOs that need independentBlend, fillModeNonSolid,
     // depthBiasClamp or dualSrcBlend are refused unless it is set here.
     VkPhysicalDeviceFeatures features{};

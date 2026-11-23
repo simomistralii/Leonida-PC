@@ -381,6 +381,26 @@ class TestCli(unittest.TestCase):
             self.assertEqual(r.returncode, 2)
             self.assertIn("incomplete", r.stderr)
 
+    def test_a_single_file_without_the_magic_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "not-psin.bin")
+            with open(path, "wb") as f:
+                f.write(b"\x78\xda not psin")
+            r = self.run_tool(path, "--json")
+            self.assertEqual(r.returncode, 2)
+            self.assertEqual(r.stdout, "")
+            self.assertEqual(len(r.stderr.strip().splitlines()), 1)
+            self.assertIn("not a PSIN container", r.stderr)
+
+    def test_a_folder_still_skips_a_file_without_the_magic(self):
+        # the negative control: the same bytes inside a folder are skipped, not refused
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "000000003000.bin"), "wb") as f:
+                f.write(b"\x78\xda not psin")
+            r = self.run_tool(tmp, "--json")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(json.loads(r.stdout), {})
+
     def test_dump_missing_file_returns_2(self):
         with tempfile.TemporaryDirectory() as tmp:
             missing = os.path.join(tmp, "missing.bin")
