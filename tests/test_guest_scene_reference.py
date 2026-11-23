@@ -54,7 +54,7 @@ class GuestSceneReferenceTest(unittest.TestCase):
             "runpy.run_path(script, run_name='__main__')"
         )
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            root = Path(temp).resolve()  # the script resolves its paths, so a short Windows temp name expands
             (root / "spirv").mkdir()
             loader = root / "loader.py"
             diagnostic = "guest diagnostic: 測試"
@@ -80,7 +80,7 @@ class GuestSceneReferenceTest(unittest.TestCase):
 
     def test_launch_failure_preserves_run_record_and_logs(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            root = Path(temp).resolve()  # the script resolves its paths, so a short Windows temp name expands
             (root / "spirv").mkdir()
             bad_loader = root / "invalid.exe"
             bad_loader.write_bytes(b"synthetic input that is not an executable")
@@ -106,7 +106,7 @@ class GuestSceneReferenceTest(unittest.TestCase):
 
     def test_timeout_has_its_own_run_outcome(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            root = Path(temp).resolve()  # the script resolves its paths, so a short Windows temp name expands
             args = argparse.Namespace(wine=None, loader=root / "loader.exe", guest=root / "guest.exe",
                                       shaders=root, play_audio=False)
             session = runner.Session(args, root)
