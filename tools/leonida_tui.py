@@ -750,7 +750,7 @@ class StageConsole:
         self.status = "idle"  # idle | running | done | failed
         self._lock = threading.Lock()
         os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
-        self._file = open(log_path, "a", encoding="utf-8", errors="replace")
+        self._file = open(log_path, "a", encoding="utf-8", errors="replace", newline="\n")
 
     def close(self) -> None:
         with self._lock:
