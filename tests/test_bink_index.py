@@ -408,7 +408,7 @@ class TestCommandLine(unittest.TestCase):
         err = io.StringIO()
         with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(bink.main([path, "--out", out]), 2)
-        self.assertIn("not a Bink 2 stream or an RPF archive", err.getvalue())
+        self.assertIn("not a Bink 2 stream (KB2) or an RPF archive", err.getvalue())
         self.assertNotIn("Traceback", err.getvalue())
         self.assertFalse(os.path.exists(out))
 
