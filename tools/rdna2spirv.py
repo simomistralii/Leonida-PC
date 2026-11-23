@@ -13249,9 +13249,10 @@ class Gen:
                 self.emit(f"{iv} = OpCompositeConstruct {'%v2int' if ncoord == 2 else '%v3int'} {' '.join(ints)}")
             if coherent:
                 self.image_load_coherent(view_dim, self.sgpr_word(a[2], 1), iv, img_idx, dmask, vdata, d16)
-                return
-            self.image_load_typed(view_dim, self.sgpr_word(a[2], 1), iv, img, img_idx,
-                                  dmask, vdata, self.cu(0), d16)
+            else:
+                self.image_load_typed(view_dim, self.sgpr_word(a[2], 1), iv, img, img_idx,
+                                      dmask, vdata, self.cu(0), d16)
+            self.image_load_status(vdata, dmask, d16, mods)
             return
         else:
             smp_idx = self.desc_lookup_sgpr(a[3], 4)
@@ -13702,6 +13703,20 @@ class Gen:
         else:
             self.emit(f"{half} = OpExtInst %uint %glsl UMin {bits} {self.cu(0xFFFF)}")
         return half
+
+    def image_load_status(self, vdata, dmask, d16, mods):
+        """SHADER-1266: with tfe (or lwe) an MIMG read returns one more dword after its data, the fetch status, in
+        vdata[data dwords] (RDNA2 ISA, MIMG TFE/LWE): popcount(dmask) data dwords, half that rounded up under d16.
+        The translator binds only fully resident, non-sparse resources, so the status is 0 for every texel. Masked by
+        EXEC like any VALU write. GPU fixtures: cs_imgload_tfe.asm, cs_imgload_d16_tfe.asm."""
+        if not any(m in mods for m in ("tfe", "lwe")):
+            return
+        if vdata["k"] != "vgpr":
+            raise Unsupported("image_load tfe data")
+        n = bin(dmask & 0xF).count("1") or 1
+        if d16:
+            n = (n + 1) // 2
+        self.dst({"k": "vgpr", "r": vdata["r"] + n, "n": 1}, self.cu(0))
 
     def image_load_typed(self, dim, t1, iv, img, idx, dmask, vdata, lod, d16=False):
         def fetch(image, _cls, ty):
