@@ -13,6 +13,7 @@ import struct
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
@@ -507,6 +508,18 @@ class TestPieces(unittest.TestCase):
                              os.path.join(directory, "missing.json"), "--json", directory])
             self.assertEqual(rc, 2)
             self.assertIn("is a directory", err.getvalue())
+
+    def test_json_write_failure_preserves_previous_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            previous = '{"previous": true}'
+            path = os.path.join(directory, "report.json")
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(previous)
+            with mock.patch.object(M, "replace_retry", side_effect=OSError(13, "Permission denied")):
+                with self.assertRaises(OSError):
+                    M.write_json_report(path, {"signature": [], "consistent": False})
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(f.read(), previous)
 
 
 if __name__ == "__main__":

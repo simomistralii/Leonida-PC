@@ -26,9 +26,49 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import awc_opus as awc  # noqa: E402
 from file_mode import published_mode  # noqa: E402
 from pool_workers import process_workers  # noqa: E402
+from replace_retry import replace as replace_retry  # noqa: E402
 from report_paths import path_key  # noqa: E402
 
 FIELDS = ("bank", "stream", "duration_s", "channels", "packets", "file")
+
+
+def _write_catalog(catalog: str, rows: list) -> None:
+    """Publish complete shorts.csv, or leave the previous catalog intact on replace failure."""
+    destination = os.path.abspath(catalog)
+    parent = os.path.dirname(destination) or "."
+    os.makedirs(parent, exist_ok=True)
+    try:
+        mode = os.stat(destination).st_mode
+    except FileNotFoundError:
+        mode = None
+    except OSError:
+        # Non-regular destinations (pipes/devices) keep a direct write.
+        with open(destination, "w", encoding="utf-8", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=FIELDS, lineterminator="\n")
+            w.writeheader()
+            w.writerows(rows)
+        return
+    if mode is not None:
+        # Retain the direct writer's permission check without truncating the report.
+        os.close(os.open(destination, os.O_WRONLY))
+
+    staged = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", newline="", delete=False,
+        dir=parent, prefix=".shorts-", suffix=".tmp",
+    )
+    try:
+        with staged:
+            w = csv.DictWriter(staged, fieldnames=FIELDS, lineterminator="\n")
+            w.writeheader()
+            w.writerows(rows)
+        if os.name != "nt":
+            os.chmod(staged.name, published_mode(destination))
+        replace_retry(staged.name, destination)
+    finally:
+        try:
+            os.unlink(staged.name)
+        except FileNotFoundError:
+            pass
 
 
 def short_channels(d: bytes, mus, data, min_seconds: float, max_seconds: float):
@@ -165,14 +205,7 @@ def main(argv=None) -> int:
     rows.sort(key=lambda r: (r["bank"].lower(), r["stream"]))
     catalog = os.path.join(a.out, "shorts.csv")
     try:
-        with tempfile.TemporaryDirectory(dir=a.out, prefix=".shorts-") as staging:
-            staged = os.path.join(staging, "shorts.csv")
-            with open(staged, "w", encoding="utf-8", newline="") as f:
-                w = csv.DictWriter(f, fieldnames=FIELDS, lineterminator="\n")
-                w.writeheader()
-                w.writerows(rows)
-            os.chmod(staged, published_mode(catalog))
-            os.replace(staged, catalog)
+        _write_catalog(catalog, rows)
     except OSError as e:
         print(f"awc_shorts: cannot write {catalog}: {e}", file=sys.stderr)
         return 1

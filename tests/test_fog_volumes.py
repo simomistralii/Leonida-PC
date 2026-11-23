@@ -112,6 +112,23 @@ def build_synthetic_fog_0x7a(volumes: list[dict]) -> bytes:
 
 
 class FogVolumesTests(unittest.TestCase):
+    def test_field_reads_stay_inside_each_volume(self):
+        raw = bytearray(build_synthetic_fog_0x7a([{"IsBox": 1}, {"IsBox": 0}]))
+        record_size = 512
+        end_field = record_size - 4
+        for at in range(0xB0, 0x1A0, 16):
+            field_hash, = struct.unpack_from("<I", raw, at)
+            if field_hash in (fv.FIELDS["Position"], fv.FIELDS["ProfileIndex"]):
+                struct.pack_into("<I", raw, at + 4, end_field)
+        for i, profile in enumerate((10, 12)):
+            struct.pack_into("<I", raw, 0x1B0 + i * record_size + end_field, profile)
+
+        rows = fv.parse_fog_volumes(raw)
+        self.assertEqual([row["ProfileIndex"] for row in rows], [10, 12])
+        self.assertEqual([row["IsBox"] for row in rows], [1, 0])
+        for row in rows:
+            self.assertNotIn("Position", row)
+
     def test_parse_and_summarize_carved_file(self):
         raw = build_synthetic_fog_0x7a([
             {"IsBox": 1, "Position": (0.0, 0.0, 0.0), "PositionOffset": (1.5, -2.0, 0.5),

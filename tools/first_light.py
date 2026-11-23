@@ -145,8 +145,7 @@ def ensure_carve(game: str, work: str) -> str:
 
 
 def choose(index_path: str, vs: str, ps: str) -> list[dict]:
-    with open(index_path, encoding="utf-8") as f:
-        entries = json.load(f)
+    entries = load_json(index_path, "carve index", list, entry_keys=("stage", "name", "file"))
     by_stage_and_name = {(entry["stage"], entry["name"]): entry for entry in entries}
     requested = (("vs", vs), ("ps", ps))
     missing = [f"{stage} {name}" for stage, name in requested if (stage, name) not in by_stage_and_name]
@@ -960,6 +959,8 @@ def main(argv=None) -> int:
         help="list VS/PS names in the carve index and exit",
     )
     a = ap.parse_args(argv)
+    if a.width < 1 or a.height < 1:
+        ap.error("--width and --height must be at least 1")
     if a.min_coverage is not None and not 0.0 <= a.min_coverage <= 1.0:
         ap.error("--min-coverage must be between 0 and 1")
     if a.camera:

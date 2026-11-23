@@ -385,6 +385,20 @@ synthetic grids with tiles at known cells, stored in text order, and requires ev
 at its cell; stored in number order instead, the text-order check reports breaks. The `--json` file holds the cell
 of every placed tile, derived from your own copy of the game: keep it local.
 
+The shoreline mask matcher can use a dependency-free Rust library for overlap ranking and order-constrained
+alignment. Build it in the default Cargo target directory; the tool picks up the release library automatically.
+Without a usable library, or with `LEONIDA_WORLD_ATLAS_NATIVE=0`, the NumPy/Python matcher still runs. This does
+not change image decoding, mask extraction, the other grid matchers, or the report format.
+
+```powershell
+cargo build --release --locked --offline --manifest-path tools/world_atlas_native/Cargo.toml
+python -I tests/test_world_grid_atlas_native.py
+```
+
+Set `LEONIDA_WORLD_ATLAS_BENCHMARK=1` to include a synthetic benchmark. It times the matching kernel (including
+Python-to-Rust packing) separately from the full mask report, where finding the background and extracting the
+masks can dominate runtime. Neither test reads game files.
+
 ### `TextureGridInfo`
 
 In the 1.0.2.1 exports, one content change set lists four grid metadata registrations and three candidate

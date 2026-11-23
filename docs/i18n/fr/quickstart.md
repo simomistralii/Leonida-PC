@@ -116,7 +116,10 @@ python -I make_game.py --game "D:\chemin\vers\le\paquet" --wav  # décode aussi 
 python -I make_game.py --wave64-emulate off            # auto (par défaut), on ou off
 ```
 
-Les étapes s'exécutent dans cet ordre : `check` → `shaders` → `assets` → `runtime` → `pipelines`. L'étape
+`check` passe toujours en premier ; ensuite, `shaders`, `assets` et `runtime` tournent en même temps quand ils sont
+demandés (ils ne dépendent pas les uns des autres). `pipelines` démarre dès que les shaders traduits sont prêts et,
+si l'exécution comprend `runtime`, une fois que cette étape a recompilé `vk_pipeline_check` : elle peut donc tourner
+pendant la fin d'`assets`. L'étape
 `pipelines` crée chaque shader traduit avec le pilote de votre GPU, vérifie qu'il compile, signale ceux qu'elle doit
 ignorer et enregistre un cache de pipelines dans `pipeline_cache.bin` (dans `--out`) ; le runtime ne charge pas
 encore ce cache.

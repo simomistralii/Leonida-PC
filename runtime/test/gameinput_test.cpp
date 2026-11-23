@@ -42,6 +42,35 @@ void check(bool condition, const char* what) {
 
 bool approx(float a, float b) { return std::fabs(a - b) < 0.002f; }
 
+// A device's info tables as a title built against Microsoft's public v0 GameInput.h reads them: by that header's byte
+// offsets, not through gameinput_abi.h, so a member the shim's header misplaces fails here instead of agreeing with
+// itself. The labels are GameInputLabel values (Microsoft Learn's GameInputLabel page), written out for that reason.
+enum : int32_t {
+    kLabelUnknown = -1, kLabelNone = 0, kXboxGuide = 1, kXboxMenu = 4, kXboxView = 5, kXboxA = 7, kXboxB = 8,
+    kXboxX = 9, kXboxY = 10, kXboxUp = 11, kXboxDown = 12, kXboxLeft = 13, kXboxRight = 14, kXboxLeftShoulder = 15,
+    kXboxLeftTrigger = 16, kXboxLeftStick = 17, kXboxRightShoulder = 18, kXboxRightTrigger = 19, kXboxRightStick = 20,
+};
+
+template <class T>
+T field_at(const void* table, size_t offset) {
+    T v{};
+    std::memcpy(&v, static_cast<const char*>(table) + offset, sizeof v);
+    return v;
+}
+
+// Whether `table` starts with these labels, four bytes each; prints the ones it holds.
+bool labels_are(const char* name, const void* table, std::initializer_list<int32_t> want) {
+    bool same = table != nullptr;
+    std::printf("     %s:", name);
+    for (size_t i = 0; table && i < want.size(); ++i) {
+        const int32_t got = field_at<int32_t>(table, 4 * i);
+        std::printf(" %d", got);
+        same = same && got == want.begin()[i];
+    }
+    std::printf("\n");
+    return same;
+}
+
 // What SDL handed to one virtual pad.
 struct Pad {
     SDL_JoystickID id = 0;
@@ -1555,6 +1584,8 @@ void test_haptic_motors(IGameInput* input) {
               motors[0].waveformInfo != nullptr && motors[0].waveformInfo->isIntensitySupported,
           "haptics: they are the left and right trigger, one waveform each, an intensity");
     check(sticks_at_rest(pad_state(input, dev)), "haptics: the pad still reads normally");
+    check(motors[0].waveformInfo->isRepeatDelaySupported && motors[1].waveformInfo->isRepeatDelaySupported,
+          "haptics: both waveforms advertise repeat delay");
 
     GameInputHapticFeedbackParams p{};
     p.intensity = 0.5f;
@@ -1598,6 +1629,61 @@ void test_haptic_motors(IGameInput* input) {
     dev->SetHapticMotorState(0, nullptr);
     rt::gameinput::poll();
     check(xbox.left == 0, "haptics: releasing both leaves the trigger silent");
+
+    // A request too long for a uint64 microsecond deadline plays until it is set again: the end time saturates
+    // instead of wrapping into the past (never plays) or into the near future (stops early).
+    p.intensity = 1.0f;
+    p.playCount = 1;
+    p.duration = UINT64_MAX;
+    p.repeatDelay = 0;
+    check(dev->SetHapticMotorState(0, &p) == S_OK, "haptics: a duration of UINT64_MAX is accepted");
+    rt::gameinput::poll();
+    check(xbox.left == 65535, "haptics: and plays (its end time does not wrap into the past)");
+    p.duration = (1ull << 63) + 50'000;  // times 2 wraps to 100 ms
+    p.playCount = 2;
+    check(dev->SetHapticMotorState(1, &p) == S_OK, "haptics: duration * playCount past UINT64_MAX is accepted");
+    rt::gameinput::poll();
+    Sleep(130);
+    rt::gameinput::poll();
+    check(xbox.right == 65535, "haptics: and keeps playing (the product does not wrap to a short request)");
+    dev->SetHapticMotorState(0, nullptr);
+    dev->SetHapticMotorState(1, nullptr);
+    rt::gameinput::poll();
+    check(xbox.left == 0 && xbox.right == 0, "haptics: both long requests stop when the state is cleared");
+
+    // Observe the output at the virtual pad. The left pulse plays twice over ordinary rumble; the right repeats
+    // until stopped. Poll for each transition so the test need not wake on an exact millisecond boundary.
+    dev->SetRumbleState(&rumble);
+    p.duration = 120'000;
+    p.repeatDelay = 180'000;
+    p.playCount = 2;
+    dev->SetHapticMotorState(0, &p);
+    p.playCount = 0;
+    dev->SetHapticMotorState(1, &p);
+    auto reaches = [&](uint16_t left, uint16_t right) {
+        const uint64_t deadline = input->GetCurrentTimestamp() + 900'000;
+        do {
+            rt::gameinput::poll();
+            if (xbox.left == left && xbox.right == right) return true;
+            Sleep(5);
+        } while (input->GetCurrentTimestamp() < deadline);
+        return false;
+    };
+    check(reaches(65535, 65535), "haptics: both pulse trains start at full intensity");
+    check(reaches(16384, 0), "haptics: only ordinary rumble remains between pulses");
+    check(reaches(65535, 65535), "haptics: both motors resume for the second pulse");
+    check(reaches(16384, 0), "haptics: both motors release after the second pulse");
+    check(reaches(16384, 65535), "haptics: only the indefinitely repeating motor starts a third pulse");
+    dev->SetHapticMotorState(1, nullptr);
+    dev->SetRumbleState(nullptr);
+    check(reaches(0, 0), "haptics: cancelling the repeating waveform releases the trigger");
+
+    p.duration = 80'000;
+    p.repeatDelay = UINT64_MAX - p.duration + 1;  // duration + delay would wrap to zero
+    dev->SetHapticMotorState(0, &p);
+    check(reaches(65535, 0), "haptics: an indefinitely repeated pulse accepts a very long delay");
+    check(reaches(0, 0), "haptics: the motor enters the quiet interval even if the cycle exceeds UINT64_MAX");
+    dev->SetHapticMotorState(0, nullptr);
 
     detach(xbox);
     rt::gameinput::poll();
@@ -1673,6 +1759,50 @@ int main() {
     check(info->controllerAxisCount == 6 && info->controllerAxisInfo && info->gamepadInfo && info->displayName &&
               std::strcmp(info->displayName->data, "Leonida virtual Xbox pad") == 0,
           "info axis table, gamepad info and display name");
+    // The label tables: 14 and 21 labels in the public v0 order. Every pad is presented as an Xbox One pad and carries
+    // the Xbox labels; the UI navigation ones follow the shim's own mapping (triggers page up and down, no label for
+    // a stick).
+    check(labels_are("gamepadInfo", info->gamepadInfo,
+                     {kXboxMenu, kXboxView, kXboxA, kXboxB, kXboxX, kXboxY, kXboxUp, kXboxDown, kXboxLeft, kXboxRight,
+                      kXboxLeftShoulder, kXboxRightShoulder, kXboxLeftStick, kXboxRightStick}),
+          "info.gamepadInfo: menu, view, A B X Y, d-pad, shoulders and stick buttons carry the Xbox labels");
+    check(labels_are("uiNavigationInfo", info->uiNavigationInfo,
+                     {kXboxMenu, kXboxView, kXboxA, kXboxB, kXboxUp, kXboxDown, kXboxLeft, kXboxRight, kXboxX, kXboxY,
+                      kXboxLeftStick, kXboxRightStick, kXboxLeftTrigger, kXboxRightTrigger, kXboxLeftShoulder,
+                      kXboxRightShoulder, kLabelNone, kLabelNone, kLabelNone, kLabelNone, kXboxGuide}),
+          "info.uiNavigationInfo: the labels of the controls its UI navigation state reads");
+    // One axis is 48 bytes and one button 32: mappedInputKinds, the label at 4, then for an axis isContinuous at 8,
+    // hasRestValue at 11, restValue at 12, resolution at 16 and the legacy indices at 24 and 26; for a button the
+    // legacy indices at 8 and 10 and rawReportIndex at 12.
+    const char* stick = reinterpret_cast<const char*>(info->controllerAxisInfo);
+    const char* trigger = stick + 4 * 48;  // LX, LY, RX, RY, LT, RT
+    std::printf("     axis 0: label=%d continuous=%u hasRest=%u rest=%.3f; axis 4: label=%d rest=%.3f dinput=%u\n",
+                field_at<int32_t>(stick, 4), field_at<uint8_t>(stick, 8), field_at<uint8_t>(stick, 11),
+                field_at<float>(stick, 12), field_at<int32_t>(trigger, 4), field_at<float>(trigger, 12),
+                field_at<uint16_t>(trigger, 24));
+    check(field_at<uint32_t>(stick, 0) == GameInputKindGamepad && field_at<int32_t>(stick, 4) == kLabelNone &&
+              field_at<uint8_t>(stick, 8) == 1 && field_at<uint8_t>(stick, 11) == 1 &&
+              approx(field_at<float>(stick, 12), 0.5f) && field_at<uint64_t>(stick, 16) == 65536,
+          "info.controllerAxisInfo[0]: a stick axis has no label, is continuous and rests at 0.5");
+    check(field_at<int32_t>(trigger, 4) == kXboxLeftTrigger && field_at<uint8_t>(trigger, 8) == 1 &&
+              field_at<uint8_t>(trigger, 11) == 1 && field_at<float>(trigger, 12) == 0.0f &&
+              field_at<uint16_t>(trigger, 24) == 4 && field_at<uint16_t>(trigger, 26) == 4,
+          "info.controllerAxisInfo[4]: the left trigger's label, rest value 0 and legacy indices");
+    const char* button_table = reinterpret_cast<const char*>(info->controllerButtonInfo);
+    const char* east = button_table + SDL_GAMEPAD_BUTTON_EAST * 32;
+    std::printf("     button %d: label=%d dinput=%u hid=%u raw=%u; guide label=%d, misc1 label=%d\n",
+                SDL_GAMEPAD_BUTTON_EAST, field_at<int32_t>(east, 4), field_at<uint16_t>(east, 8),
+                field_at<uint16_t>(east, 10), field_at<uint32_t>(east, 12),
+                field_at<int32_t>(button_table, SDL_GAMEPAD_BUTTON_GUIDE * 32 + 4),
+                field_at<int32_t>(button_table, SDL_GAMEPAD_BUTTON_MISC1 * 32 + 4));
+    check(info->controllerButtonCount == SDL_GAMEPAD_BUTTON_COUNT &&
+              field_at<uint32_t>(east, 0) == GameInputKindGamepad && field_at<int32_t>(east, 4) == kXboxB &&
+              field_at<uint16_t>(east, 8) == SDL_GAMEPAD_BUTTON_EAST &&
+              field_at<uint16_t>(east, 10) == SDL_GAMEPAD_BUTTON_EAST && field_at<uint32_t>(east, 12) == 0,
+          "info.controllerButtonInfo: the east button is B, with its legacy indices and rawReportIndex 0");
+    check(field_at<int32_t>(button_table, SDL_GAMEPAD_BUTTON_GUIDE * 32 + 4) == kXboxGuide &&
+              field_at<int32_t>(button_table, SDL_GAMEPAD_BUTTON_MISC1 * 32 + 4) == kLabelUnknown,
+          "info.controllerButtonInfo: the guide button's label, and unknown for a button with no gamepad meaning");
     check(dev->GetDeviceStatus() & GameInputDeviceConnected, "GetDeviceStatus: connected");
     check(xbox.player == 0, "player index 0 for the first pad");
 
@@ -1791,6 +1921,9 @@ int main() {
     check(dsdev && dsdev != dev && (dsdev->GetDeviceInfo()->supportedRumbleMotors & GameInputRumbleLeftTrigger),
           "DualSense device reported with trigger motors");
     if (!dsdev) return 1;
+    check(labels_are("DualSense gamepadInfo", dsdev->GetDeviceInfo()->gamepadInfo,
+                     {kXboxMenu, kXboxView, kXboxA, kXboxB, kXboxX, kXboxY, kXboxUp}),
+          "a DualSense is presented as an Xbox pad: its labels are the Xbox ones, not the shapes printed on it");
 
     GameInputRumbleParams ds_rumble{0.0f, 0.0f, 1.0f, 0.5f};
     dsdev->SetRumbleState(&ds_rumble);
@@ -1846,6 +1979,9 @@ int main() {
     check(plaindev && (plaindev->GetDeviceInfo()->supportedRumbleMotors & GameInputRumbleLeftTrigger) == 0,
           "a pad without trigger motors does not report them");
     if (plaindev) {
+        check(labels_are("Switch Pro gamepadInfo", plaindev->GetDeviceInfo()->gamepadInfo,
+                         {kXboxMenu, kXboxView, kXboxA, kXboxB, kXboxX, kXboxY, kXboxUp}),
+              "a Switch Pro is presented as an Xbox pad too: Xbox labels by position");
         GameInputRumbleParams p{0.25f, 0.25f, 1.0f, 1.0f};
         plaindev->SetRumbleState(&p);
         rt::gameinput::poll();

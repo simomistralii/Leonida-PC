@@ -248,6 +248,8 @@ class FakeVulkan:
                 ctypes.c_uint32.from_address(node_addr + 16).value = int(dev.dynamic_rendering)
             elif stype == 1000314007:  # VkPhysicalDeviceSynchronization2FeaturesKHR
                 ctypes.c_uint32.from_address(node_addr + 16).value = int(dev.synchronization2)
+            elif stype == 1000225002:  # VkPhysicalDeviceSubgroupSizeControlFeaturesEXT
+                ctypes.c_uint32.from_address(node_addr + 16).value = int(dev.subgroup_size_control)
             elif stype == vk_info.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR:
                 ctypes.c_uint32.from_address(node_addr + 16).value = int(dev.fragment_shader_barycentric)
         expected = {
@@ -259,6 +261,8 @@ class FakeVulkan:
             expected.add(vk_info.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES)
         else:
             expected.update((1000044003, 1000314007))
+            if b"VK_EXT_subgroup_size_control" in dev.extension_names:
+                expected.add(1000225002)
         if expected != seen_types:
             raise AssertionError(f"unexpected feature structs in pNext chain: {seen_types!r}")
 
@@ -637,6 +641,19 @@ class QueryTest(unittest.TestCase):
                 if suitable:
                     self.assertFalse(result["subgroup_size_control"])
                     self.assertFalse(result["native64"])
+
+    def test_vulkan_1_2_subgroup_size_control_extension(self):
+        base = (b"VK_KHR_dynamic_rendering", b"VK_KHR_synchronization2")
+        for extension, feature, expected in ((True, True, True), (True, False, False), (False, True, False)):
+            with self.subTest(extension=extension, feature=feature):
+                extensions = base + ((b"VK_EXT_subgroup_size_control",) if extension else ())
+                result, _ = self._run_query(FakeDevice(
+                    api_version=vk_info.VK_API_VERSION_1_2, extension_names=extensions,
+                    subgroup_size=32, min_subgroup_size=32, max_subgroup_size=64,
+                    subgroup_size_control=feature, subgroup_supported_stages=vk_info.VK_SHADER_STAGE_COMPUTE_BIT,
+                    required_subgroup_size_stages=vk_info.VK_SHADER_STAGE_COMPUTE_BIT))
+                self.assertEqual(result["subgroup_size_control"], expected)
+                self.assertEqual(result["native64_compute"], expected)
 
     def test_accepts_graphics_bit_on_non_zero_queue_family(self):
         dev = FakeDevice(

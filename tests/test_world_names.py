@@ -331,6 +331,23 @@ class CliTest(unittest.TestCase):
             self.assertEqual(names, {WN.joaat_hex(name): [name]
                                      for name in ("A&B", "Cell&Prop", "Cell&Prop.rpf")})
 
+    def test_xml_names_require_matching_end_tags_in_fragments(self):
+        fragment = (
+            b"<name>WrongElement</other><Name>WrongCase</name>"
+            b"<a:name>WrongPrefix</b:name><name>Unclosed"
+            b"<name>GoodOne</name ><a:Name>GoodTwo</a:Name\r\n>"
+            b"<locationName>GoodThree</locationName>"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            xml = os.path.join(tmp, "fragment.xml")
+            with open(xml, "wb") as handle:
+                handle.write(fragment)
+            dictionary = WN.NameDictionary()
+            self.assertEqual(dictionary.add_xml(xml), 3)
+            names = dictionary.to_json()["names"]
+        self.assertEqual(sorted(name for group in names.values() for name in group),
+                         ["GoodOne", "GoodThree", "GoodTwo"])
+
     def test_resolve_rejects_a_malformed_dictionary(self):
         with tempfile.TemporaryDirectory() as tmp:
             dictionary = os.path.join(tmp, "names.json")

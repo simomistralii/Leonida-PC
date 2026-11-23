@@ -292,16 +292,25 @@ def listings(src):
         return sorted(e.path for e in entries if e.name.endswith(".s") and e.is_file())
 
 
+def positive_int(text: str) -> int:
+    """--limit -1 dropped the last listing and --limit 0 scanned none, both with exit 0."""
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid int value: {text!r}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be at least 1 (a smaller value would silently scan fewer listings)")
+    return value
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("src", help="folder of .s listings (<work>/shaders/disasm)")
     ap.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) - 1))
-    ap.add_argument("--limit", type=int, help="scan at most this many listings (at least 1)")
+    ap.add_argument("--limit", type=positive_int, help="scan at most this many listings (at least 1)")
     ap.add_argument("--json", help="write the summary here")
     ap.add_argument("--index-out", help="write {number: {stage, user_sgpr_reads}} for tools/user_sgpr_census.py")
     a = ap.parse_args(argv)
-    if a.limit is not None and a.limit < 1:
-        ap.error("--limit must be at least 1 (a smaller value would silently scan fewer listings)")
     if not os.path.isdir(a.src):
         print(f"ERROR: {a.src} is not a folder", file=sys.stderr)
         return 2

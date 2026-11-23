@@ -1,4 +1,6 @@
 """Tests for tools/spirv_opt.py (sound basic-block SPIR-V peephole optimizer, #884)."""
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -415,6 +417,28 @@ class SpirvOptTests(unittest.TestCase):
                 opt = f.read()
         _validate(opt)
         self.assertEqual(support.mrt0_words(opt), [42] * 4)
+
+    def test_cli_passes_below_one_is_usage_error(self):
+        raw = support.translate_lines("ps_opt_cli_passes", [
+            "v_mov_b32_e32 v1, 42",
+            "exp mrt0 v1, v1, v1, v1 done vm",
+            "s_endpgm",
+        ])
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "in.spvasm")
+            with open(src, "w", encoding="utf-8", newline="\n") as f:
+                f.write(raw)
+            for bad in ("0", "-1"):
+                dst = os.path.join(d, f"out{bad}.spvasm")
+                with contextlib.redirect_stderr(io.StringIO()) as err:
+                    with self.assertRaises(SystemExit) as cm:
+                        spirv_opt.main([src, "-o", dst, "--passes", bad])
+                self.assertEqual(cm.exception.code, 2)
+                self.assertIn("--passes must be at least 1", err.getvalue())
+                self.assertFalse(os.path.exists(dst))
+            dst = os.path.join(d, "out1.spvasm")
+            self.assertEqual(spirv_opt.main([src, "-o", dst, "--passes", "1"]), 0)
+            self.assertTrue(os.path.exists(dst))
 
     def test_trivial_phi_requires_strict_dominance(self):
         # 1. Reachable loop header %hdr has:

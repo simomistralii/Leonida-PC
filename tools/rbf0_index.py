@@ -26,13 +26,17 @@ import json
 import mmap
 import os
 import re
+import stat
 import struct
 import sys
+import tempfile
 import zlib
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
+from file_mode import published_mode  # noqa: E402
+from replace_retry import replace as replace_retry  # noqa: E402
 from zero_span import gap_split  # noqa: E402
 
 MAGIC = b"RBF0"
@@ -453,6 +457,40 @@ def scan_dir(path, string_limit=16):
     return rows, records, summary
 
 
+def write_json(path, payload):
+    """Write ``payload`` as JSON, staging regular files via a sibling temporary file."""
+    destination = os.path.realpath(path)
+    try:
+        st = os.stat(destination)
+    except FileNotFoundError:
+        st = None
+    if st is not None and not stat.S_ISREG(st.st_mode):
+        with open(destination, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(payload, f, indent=1)
+        return
+    if st is not None:
+        # Fail before staging when an existing regular destination is not writable.
+        os.close(os.open(destination, os.O_WRONLY))
+    staged_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", newline="\n", delete=False,
+            dir=os.path.dirname(destination) or ".", prefix=".rbf0_index-", suffix=".tmp",
+        ) as staged:
+            staged_path = staged.name
+            json.dump(payload, staged, indent=1)
+        if os.name != "nt":
+            os.chmod(staged_path, published_mode(destination))
+        replace_retry(staged_path, destination)
+        staged_path = None
+    finally:
+        if staged_path is not None:
+            try:
+                os.unlink(staged_path)
+            except OSError:
+                pass
+
+
 def write_output(path, records, summary, all_strings=False):
     """Write CSV or JSON, chosen by the extension."""
     ext = os.path.splitext(path)[1].lower()
@@ -464,8 +502,7 @@ def write_output(path, records, summary, all_strings=False):
             doc["sample_strings"] = r["_all_strings"] if all_strings else r["sample"]
             doc["sample_truncated"] = not all_strings and r["strings"] > len(r["sample"])
             docs.append(doc)
-        with open(path, "w", encoding="utf-8", newline="\n") as f:
-            json.dump({"summary": summary, "files": docs}, f, indent=1)
+        write_json(path, {"summary": summary, "files": docs})
         return
     with open(path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f, lineterminator="\n")

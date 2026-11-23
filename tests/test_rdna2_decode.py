@@ -297,6 +297,57 @@ class Rdna2DecodeUnitTests(unittest.TestCase):
         out = si.run_fragment(spv)["%out_mrt0"]
         self.assertEqual(list(out), [0x3F800000, 0x40400000, 0x3F800000, 0x40400000])
 
+    def test_flat_scratch_vaddr_off_and_lds_loads(self):
+        # LLVM GFX10/GFX10.30 disassembler vectors (gfx10_flat.txt / gfx1030_new.txt):
+        # - SCRATCH (seg=1) only uses VGPR vaddr in SV mode (saddr == 0x7d); SS mode (SGPR saddr) and GFX10.30
+        #   ST mode (saddr == 0x7f) emit `off` for vaddr.
+        # - Direct-to-LDS global/scratch loads (lds=1) omit VDST.
+        for hexcode, asm in (
+            # SCRATCH SS mode (SGPR saddr -> vaddr is off)
+            ("004030dc00000101", "scratch_load_dword v1, off, s1"),
+            ("204030dc00000101", "scratch_load_dword v1, off, s1 offset:32"),
+            ("004030dc00007e01", "scratch_load_dword v1, off, exec_lo"),
+            ("004030dc00007c01", "scratch_load_dword v1, off, m0"),
+            ("004070dc00020100", "scratch_store_dword off, v2, s1"),
+            ("0c4070dc00020100", "scratch_store_dword off, v2, s1 offset:12"),
+            ("004064dc00020100", "scratch_store_byte_d16_hi off, v2, s1"),
+            # Non-zero don't-care addr bits in SS mode still decode as off.
+            ("004030dc05000101", "scratch_load_dword v1, off, s1"),
+            # SCRATCH ST mode (GFX10.30 saddr == 0x7f -> vaddr and saddr are both off)
+            ("004030dc00007f01", "scratch_load_dword v1, off, off"),
+            ("004038dc00007f01", "scratch_load_dwordx4 v[1:4], off, off"),
+            ("ff4770dc00027f00", "scratch_store_dword off, v2, off offset:2047"),
+            # SCRATCH SV mode control (saddr == 0x7d -> VGPR vaddr kept, including v0)
+            ("004030dc02007d01", "scratch_load_dword v1, v2, off"),
+            ("005030dc00007d05", "scratch_load_dword v5, v0, off dlc"),
+            ("ff4f70dc00027d00", "scratch_store_dword v0, v2, off offset:-1"),
+            # Direct-to-LDS global and scratch loads (lds=1 -> VDST omitted)
+            ("00a430dc02000400", "global_load_dword v2, s[4:5] offset:1024 lds"),
+            ("00a430dc02007d00", "global_load_dword v[2:3], off offset:1024 lds"),
+            ("00a424dc02000400", "global_load_sbyte v2, s[4:5] offset:1024 lds"),
+            ("006430dc02007d00", "scratch_load_dword v2, off offset:1024 lds"),
+            ("006430dc00000400", "scratch_load_dword off, s4 offset:1024 lds"),
+            ("006430dc00007f00", "scratch_load_dword off, off offset:1024 lds"),
+            # Non-zero don't-care vdst bits in lds mode still omit VDST.
+            ("00a430dc02000407", "global_load_dword v2, s[4:5] offset:1024 lds"),
+            # Non-LDS global load control (VDST kept)
+            ("008430dc02000401", "global_load_dword v1, v2, s[4:5] offset:1024"),
+        ):
+            with self.subTest(hexcode=hexcode, asm=asm):
+                raw = bytes.fromhex(hexcode)
+                dec = rdna2_decode.decode_bytes(raw)
+                self.assertEqual(dec["invalid"], 0)
+                (ins,) = dec["insns"]
+                expected = shader_ir.parse_line(asm)
+                for field in ("op", "args", "mods"):
+                    self.assertEqual(ins[field], expected[field])
+                # Formatted text also round-trips cleanly through shader_ir.parse_line.
+                text, bad = rdna2_decode.disasm_bytes(raw)
+                self.assertEqual(bad, 0)
+                reparsed = shader_ir.parse_line(text.strip())
+                for field in ("op", "args", "mods"):
+                    self.assertEqual(reparsed[field], expected[field])
+
     def test_parity_with_llvm_mc_on_shader_fixtures(self):
         mc = os.environ.get("LLVM_MC") or shutil.which("llvm-mc") or shutil.which("llvm-mc-18")
         if not mc:

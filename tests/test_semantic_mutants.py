@@ -115,6 +115,8 @@ SAD_TEST = textwrap.dedent('''\
     if __name__ == "__main__":
         unittest.main()
     ''')
+MAIN_BLOCK = 'if __name__ == "__main__":\n    unittest.main()\n'
+assert SAD_TEST.endswith(MAIN_BLOCK)
 STRONG_EXTRA = '''
     def test_sad_reversed(self):
         self.assertEqual(self.run_sad(0, 0x04030201), 10)
@@ -133,12 +135,16 @@ class EndToEnd(unittest.TestCase):
                 return i + 1
         self.skipTest("v_sad_u8's UMax line moved")
 
-    def run_tool(self, extra):
+    def run_tool(self, extra, main_block=True):
         line = self.umax_line()
+        source = SAD_TEST.format(semantic=os.path.join(ROOT, "tests", "semantic"), extra=extra)
+        if not main_block:
+            source = source.replace(MAIN_BLOCK, "")
+            self.assertNotIn("__main__", source)
         with tempfile.TemporaryDirectory() as tmp:
             test = os.path.join(tmp, "test_sad_probe.py")
-            with open(test, "w", encoding="utf-8") as f:
-                f.write(SAD_TEST.format(semantic=os.path.join(ROOT, "tests", "semantic"), extra=extra))
+            with open(test, "w", encoding="utf-8", newline="\n") as f:
+                f.write(source)
             p = subprocess.run([sys.executable, "-I", TOOL, test, "--lines", f"{line}-{line}"],
                                capture_output=True, text=True, timeout=600)
         return p.returncode, p.stdout + p.stderr
@@ -151,6 +157,44 @@ class EndToEnd(unittest.TestCase):
     def test_strong_test_catches_it(self):
         code, out = self.run_tool(STRONG_EXTRA)
         self.assertRegex(out, r"caught\s+line \d+: last operand \{ya\} -> \{xa\}")
+
+    def test_file_without_a_main_block_still_runs_its_tests(self):
+        # Eight tests/semantic files have no `__main__` block; started as a script they ran nothing, so the baseline
+        # passed and every mutant was reported SURVIVED.
+        code, out = self.run_tool(STRONG_EXTRA, main_block=False)
+        self.assertNotEqual(code, 2, out)
+        self.assertRegex(out, r"caught\s+line \d+: last operand \{ya\} -> \{xa\}")
+
+    def test_file_with_no_tests_is_a_baseline_error(self):
+        line = self.umax_line()
+        with tempfile.TemporaryDirectory() as tmp:
+            test = os.path.join(tmp, "test_empty_probe.py")
+            with open(test, "w", encoding="utf-8", newline="\n") as f:
+                f.write("import unittest\n")
+            p = subprocess.run([sys.executable, "-I", TOOL, test, "--lines", f"{line}-{line}"],
+                               capture_output=True, text=True, timeout=600)
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertIn("no tests ran", p.stderr)
+
+
+class RunTestEncoding(unittest.TestCase):
+    def test_utf8_bytes_outside_windows_codepage_do_not_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            test = os.path.join(tmp, "test_utf8_out.py")
+            with open(test, "w", encoding="utf-8", newline="\n") as f:
+                f.write("import sys\nsys.stdout.buffer.write(b'fail: \\xe2\\x86\\x90 bad\\n')\nsys.exit(1)\n")
+            ok, last = sm.run_test(test, os.path.join(ROOT, "tools"), 30)
+        self.assertEqual((ok, last), (False, "fail: \u2190 bad"))
+
+    def test_invalid_utf8_bytes_are_replaced_not_raised(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            test = os.path.join(tmp, "test_bad_bytes.py")
+            with open(test, "w", encoding="utf-8", newline="\n") as f:
+                f.write("import sys\nsys.stderr.buffer.write(b'raw: \\xff\\xfe\\n')\nsys.exit(1)\n")
+            ok, last = sm.run_test(test, os.path.join(ROOT, "tools"), 30)
+        self.assertIs(ok, False)
+        self.assertIn("raw:", last)
+        self.assertIn("\ufffd", last)
 
 
 if __name__ == "__main__":

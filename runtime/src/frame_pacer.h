@@ -23,6 +23,11 @@
 //   * A frame is due at the vblank after the origin that handed out its token; a PresentX after that vblank is late by
 //     the time since it (present_timing), and ImmediateThresholdPercent decides whether that lateness is shown at once
 //     (decide_present_sync).
+//
+// Uncapped (set_uncapped; LEONIDA_PRESENT_UNCAP in the shim): the registration calls keep working and waits keep
+// handing out one token each, but a wait never blocks — no vblank grid, no latency throttle — and a presented
+// frame counts as shown at once. The frame rate is then the title's own; the error surface (nothing registered,
+// suspended) is unchanged.
 
 #include <algorithm>
 #include <atomic>
@@ -267,9 +272,9 @@ public:
         return pacer_hr::ok;
     }
     // How late the frame of `token` is if it is presented now (see the model above). late_us stays 0 when the frame
-    // could not be shown at once anyway: unpaced, null or unknown token, or earlier frames still waiting for their
-    // vblank (a flip cannot overtake them), or the token was already presented or is older than the last presented
-    // (a repeated or stale token never tears).
+    // could not be shown at once anyway: unpaced, uncapped, null or unknown token, or earlier frames still waiting
+    // for their vblank (a flip cannot overtake them), or the token was already presented or is older than the last
+    // presented (a repeated or stale token never tears).
     struct PresentTiming {
         std::uint64_t late_us = 0;
         std::uint32_t period_us = 0;   // 0: unpaced
@@ -277,7 +282,7 @@ public:
     PresentTiming present_timing(std::uint64_t token) {
         std::lock_guard guard(mutex_);
         PresentTiming timing;
-        if (!interval_set_ || !token) return timing;
+        if (!interval_set_ || uncapped_ || !token) return timing;
         const std::uint64_t now = clock_.now_us();
         retire_locked(now);
         timing.period_us = period_us_;
@@ -297,7 +302,7 @@ public:
         const std::uint64_t now = clock_.now_us();
         retire_locked(now);
         last_presented_ = std::max(last_presented_, token);
-        if (!interval_set_ || !armed_) {  // not paced (PresentX holds no vblank until the event is armed): shows at once
+        if (!interval_set_ || !armed_ || uncapped_) {  // not paced or uncapped: shows at once
             for (Record& r : records_)
                 if (r.token == token) { r.presented = r.displayed = true; r.present_us = r.display_us = now; }
             return;
@@ -321,11 +326,11 @@ public:
         retire_locked(now);
         cv_.notify_all();
     }
-    // A blank present (no planes) carries no token: it is only counted as a frame to show. With no interval set or
-    // the origin event not armed it is not paced: it shows at once and is not counted.
+    // A blank present (no planes) carries no token: it is only counted as a frame to show. With no interval set,
+    // the origin event not armed or the cap off it is not paced: it shows at once and is not counted.
     void note_untokened_present() {
         std::lock_guard guard(mutex_);
-        if (!interval_set_ || !armed_) return;
+        if (!interval_set_ || !armed_ || uncapped_) return;
         const std::uint64_t now = clock_.now_us();
         retire_locked(now);
         const std::uint64_t since = now > epoch_us_ ? now - epoch_us_ : 0;
@@ -363,6 +368,11 @@ public:
     std::uint32_t period_us() const { std::lock_guard guard(mutex_); return period_us_; }
     bool registered() const { std::lock_guard guard(mutex_); return interval_set_ && armed_; }
 
+    // The fps cap off (LEONIDA_PRESENT_UNCAP; see the top comment): waits never block and presents count as shown
+    // at once. Registration and suspension keep meaning what they did; the flag survives suspend/resume.
+    void set_uncapped(bool on) { std::lock_guard guard(mutex_); uncapped_ = on; }
+    bool uncapped() const { std::lock_guard guard(mutex_); return uncapped_; }
+
 private:
     struct Pending {
         std::uint64_t token;
@@ -397,6 +407,16 @@ private:
             if (shutdown_ || suspended_ || !interval_set_ || !armed_) return pacer_hr::invalid_state;
             const std::uint64_t now = clock_.now_us();
             retire_locked(now);
+            if (uncapped_) {  // no vblank grid and no latency throttle: a token at once, due now
+                *token = ++issued_;
+                Record record;
+                record.token = *token;
+                record.origin_us = now;
+                record.due_us = now;
+                records_.push_back(record);
+                if (records_.size() > 64) records_.pop_front();
+                return pacer_hr::ok;
+            }
             const std::uint64_t first = epoch_us_ + offset_us_;  // origin 0
             const std::int64_t next = last_origin_ + 1;
             const std::uint64_t next_us = first + std::uint64_t(next) * period_us_;
@@ -431,6 +451,7 @@ private:
     bool suspended_ = false;
     bool interval_set_ = false;
     bool armed_ = false;
+    bool uncapped_ = false;
     std::uint32_t period_us_ = 0;
     std::uint32_t latency_ = 1;
     std::uint32_t offset_us_ = 0;

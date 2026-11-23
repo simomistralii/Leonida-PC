@@ -8,8 +8,9 @@ as .txt. This reads the first bytes of each file and matches the magic numbers o
 files the build extracts from it: RPF9 archives, TTPF texture pools, RAGE resources, XBCH/FSSM/DXBC shader
 containers, SPIR-V, DDS, AWC audio, PSIN/PAMH/MHIU/SPS1/SGD5/RDS5 containers, YSC/SCRP compiled scripts, the
 animation MoVE container and SKEL_ bone table, Ogg, RIFF WAVE, Bink, glTF binaries, PE executables and XVD
-images. The magics are
-the ones docs/ measures (docs/gamedata.md and the shader and audio notes). Text formats (disassembly, .obj, .spvasm)
+images, the player's saves (JSAV, ASAV and SLAYER1) and world_build.py's LPK1 staging packs of the game's
+geometry. The magics are the ones docs/ measures (docs/gamedata.md, docs/saves.md and the shader and audio
+notes). Text formats (disassembly, .obj, .spvasm)
 have no magic and stay with the extension check.
 
 A compressed file hides those magics from both checks, so the script looks inside what the standard library opens:
@@ -64,6 +65,11 @@ MAGICS = (
     ("MoVE animation container", 0, b"MoVE"),
     ("SKEL_ bone table", 0, b"SKEL_"),
     ("SCRP compiled script", 0, b"SCRP"),
+    # docs/saves.md: "Never commit or attach real saves"; and the geometry world_build.py packs from the game's models.
+    ("JSAV story save", 0, b"JSAV"),
+    ("ASAV save record", 0, b"ASAV"),
+    ("SLAYER1 packed save", 0, b"SLAYER1\0"),
+    ("LPK1 world staging pack", 0, b"LPK1"),
     ("Ogg stream", 0, b"OggS"),
     ("Bink 2 video", 0, b"KB2"),
     ("Bink video", 0, b"BIK"),
@@ -251,13 +257,20 @@ def tracked_files(root):
     return [os.path.join(root, p) for p in out.decode("utf-8", "surrogateescape").split("\0") if p]
 
 
-def check(paths):
-    """[(path, format)] for every regular file in `paths` that starts like game data."""
+def check(paths, unreadable=None):
+    """[(path, format)] for every regular file in `paths` that starts like game data.
+
+    A file that exists but cannot be opened or read is appended to `unreadable` (when given) as (path, error)."""
     found = []
     for path in paths:
         if os.path.islink(path) or not os.path.isfile(path):
             continue  # submodules, symlinks, files deleted in the working tree
-        name = classify_file(path)
+        try:
+            name = classify_file(path)
+        except OSError as e:
+            if unreadable is not None:
+                unreadable.append((path, e))
+            continue
         if name:
             found.append((path, name))
     return found
@@ -273,13 +286,16 @@ def display(path):
 
 def main(argv):
     paths = argv or tracked_files(os.getcwd())
-    found = check(paths)
+    unreadable = []
+    found = check(paths, unreadable)
     for path, name in found:
         print(f"{display(path)}: {name}")
+    for path, e in unreadable:
+        print(f"check_no_game_data: cannot read {display(path)}: {e.strerror or e}", file=sys.stderr)
     if found:
         print(f"{len(found)} file(s) start like game data. Remove them; see CONTRIBUTING.md.", file=sys.stderr)
         return 1
-    return 0
+    return 2 if unreadable else 0  # 2: some files could not be checked and none of the others matched
 
 
 if __name__ == "__main__":

@@ -5,13 +5,17 @@ or third-party library is involved.
 
     python -I tests/test_glb_inspect.py
 """
+import contextlib
+import io
 import json
 import os
+import stat
 import struct
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOL = os.path.join(ROOT, "tools", "glb_inspect.py")
@@ -460,6 +464,205 @@ class GlbInspectTests(unittest.TestCase):
             self.assertIn("must not overwrite the input", dotted.stderr)
             with open(source, "rb") as handle:
                 self.assertEqual(handle.read(), data)
+
+    def test_json_publishes_through_a_symlink(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "model.glb")
+            reports = os.path.join(folder, "reports")
+            os.mkdir(reports)
+            target = os.path.join(reports, "actual.json")
+            out = os.path.join(folder, "report.json")
+            with open(path, "wb") as handle:
+                handle.write(triangle_glb())
+            with open(target, "wb") as handle:
+                handle.write(b"previous report\n")
+            try:
+                os.symlink(os.path.join("reports", "actual.json"), out)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symbolic links unavailable: {exc}")
+
+            result = self.run_tool(path, "--json", out)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(os.path.islink(out), "the report symlink was replaced")
+            self.assertTrue(os.path.samefile(out, target))
+            with open(target, encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle)["meshes"][0]["name"], "Triangle")
+
+    def test_json_publishes_through_a_dangling_symlink(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "model.glb")
+            target = os.path.join(folder, "later.json")
+            out = os.path.join(folder, "report.json")
+            with open(path, "wb") as handle:
+                handle.write(triangle_glb())
+            try:
+                os.symlink("later.json", out)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symbolic links unavailable: {exc}")
+
+            result = self.run_tool(path, "--json", out)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(os.path.islink(out), "the report symlink was replaced")
+            self.assertTrue(os.path.isfile(target), "the symlink target was not created")
+            with open(out, encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle)["meshes"][0]["name"], "Triangle")
+
+    def test_json_trailing_separator_is_refused(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "model.glb")
+            out = os.path.join(folder, "report.json")
+            with open(path, "wb") as handle:
+                handle.write(triangle_glb())
+            for separator in sorted({os.sep, os.altsep} - {None}):
+                with self.subTest(separator=separator):
+                    with open(out, "wb") as handle:
+                        handle.write(b"previous report\n")
+                    result = self.run_tool(path, "--json", out + separator)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("is a directory", result.stderr)
+                    with open(out, "rb") as handle:
+                        self.assertEqual(handle.read(), b"previous report\n")
+                    self.assertEqual([name for name in os.listdir(folder) if name.startswith(".glb_inspect-")], [],
+                                     "a refused destination left its staging file behind")
+
+    def test_json_symlink_loop_is_an_error_and_keeps_both_links(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "model.glb")
+            first = os.path.join(folder, "first.json")
+            second = os.path.join(folder, "second.json")
+            with open(path, "wb") as handle:
+                handle.write(triangle_glb())
+            try:
+                os.symlink("second.json", first)
+                os.symlink("first.json", second)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symbolic links unavailable: {exc}")
+
+            result = self.run_tool(path, "--json", first)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("cannot write", result.stderr)
+            self.assertTrue(os.path.islink(first), "the report symlink was replaced")
+            self.assertTrue(os.path.islink(second), "the other symlink was replaced")
+            self.assertEqual([name for name in os.listdir(folder) if name.startswith(".glb_inspect-")], [],
+                             "a failed publication left its staging file behind")
+
+    def test_json_missing_target_directory_keeps_the_symlink(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "model.glb")
+            out = os.path.join(folder, "report.json")
+            with open(path, "wb") as handle:
+                handle.write(triangle_glb())
+            try:
+                os.symlink(os.path.join("missing", "report.json"), out)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symbolic links unavailable: {exc}")
+
+            result = self.run_tool(path, "--json", out)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("cannot write", result.stderr)
+            self.assertTrue(os.path.islink(out), "the report symlink was replaced")
+            self.assertFalse(os.path.exists(os.path.join(folder, "missing")))
+            self.assertEqual([name for name in os.listdir(folder) if name.startswith(".glb_inspect-")], [],
+                             "a failed publication left its staging file behind")
+
+    def test_json_refuses_a_symlink_to_the_input(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = os.path.join(folder, "model.glb")
+            out = os.path.join(folder, "report.json")
+            data = triangle_glb()
+            with open(source, "wb") as handle:
+                handle.write(data)
+            try:
+                os.symlink(os.path.basename(source), out)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symbolic links unavailable: {exc}")
+
+            result = self.run_tool(source, "--json", out)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("must not overwrite the input", result.stderr)
+            self.assertTrue(os.path.islink(out), "the input guard replaced the symlink")
+            with open(source, "rb") as handle:
+                self.assertEqual(handle.read(), data, "the report path overwrote the input")
+
+    def test_json_hard_link_keeps_the_other_alias(self):
+        """os.replace publishes at one name, as story_index documents: the alias keeps the old report."""
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "model.glb")
+            out = os.path.join(folder, "report.json")
+            alias = os.path.join(folder, "alias.json")
+            with open(path, "wb") as handle:
+                handle.write(triangle_glb())
+            with open(out, "wb") as handle:
+                handle.write(b"previous report\n")
+            try:
+                os.link(out, alias)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"hard links unavailable: {exc}")
+
+            result = self.run_tool(path, "--json", out)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(os.path.samefile(out, alias))
+            with open(alias, "rb") as handle:
+                self.assertEqual(handle.read(), b"previous report\n")
+            with open(out, encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle)["meshes"][0]["name"], "Triangle")
+
+    def test_json_publication_failure_preserves_the_previous_report(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "model.glb")
+            out = os.path.join(folder, "report.json")
+            with open(path, "wb") as handle:
+                handle.write(triangle_glb())
+            with open(out, "wb") as handle:
+                handle.write(b"previous report\n")
+
+            with mock.patch.object(glb_inspect.os, "replace", side_effect=PermissionError(13, "Access is denied")):
+                with contextlib.redirect_stdout(io.StringIO()) as stdout, \
+                        contextlib.redirect_stderr(io.StringIO()) as stderr:
+                    code = glb_inspect.main([path, "--json", out])
+            self.assertEqual(code, 2)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertIn("cannot write", stderr.getvalue())
+            with open(out, "rb") as handle:
+                self.assertEqual(handle.read(), b"previous report\n")
+            self.assertEqual([name for name in os.listdir(folder) if name.startswith(".glb_inspect-")], [],
+                             "a failed publication left its staging file behind")
+
+    @unittest.skipUnless(os.name == "nt", "the read-only attribute is the Windows write protection")
+    def test_json_read_only_destination_preserves_the_previous_report(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "model.glb")
+            out = os.path.join(folder, "report.json")
+            with open(path, "wb") as handle:
+                handle.write(triangle_glb())
+            with open(out, "wb") as handle:
+                handle.write(b"previous report\n")
+            os.chmod(out, stat.S_IREAD)
+            try:
+                result = self.run_tool(path, "--json", out)
+            finally:
+                os.chmod(out, stat.S_IWRITE)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("cannot write", result.stderr)
+            with open(out, "rb") as handle:
+                self.assertEqual(handle.read(), b"previous report\n")
+            self.assertEqual([name for name in os.listdir(folder) if name.startswith(".glb_inspect-")], [],
+                             "a failed publication left its staging file behind")
+
+    @unittest.skipIf(os.name == "nt", "Windows exposes only the read-only bit, not POSIX permission bits")
+    def test_json_keeps_the_reports_permission_bits(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "model.glb")
+            out = os.path.join(folder, "report.json")
+            with open(path, "wb") as handle:
+                handle.write(triangle_glb())
+            with open(out, "wb") as handle:
+                handle.write(b"previous report\n")
+            os.chmod(out, 0o640)
+
+            result = self.run_tool(path, "--json", out)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(stat.S_IMODE(os.stat(out).st_mode), 0o640)
 
     def test_json_only_glb_is_accepted(self):
         with tempfile.TemporaryDirectory() as folder:

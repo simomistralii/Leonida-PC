@@ -890,8 +890,11 @@ int main() {
         // Static samplers of a root signature (docs/d3d12_vulkan.md section 3.5): no heap slot and no root argument,
         // the shader holds the S# by value, so CreateRootSignature has to register it. One per blob version, each
         // the wrapping sampler above with its own LOD range (so its own key), and one that only the fourth has:
-        // a border sampler with the UINT white border of the static enum. None is in the hash table before its
-        // root signature is created, all are after. A version the PC serializer here does not write is skipped.
+        // a border sampler with the UINT white border of the static enum. The last is the integer border the enum has
+        // no value for: transparent black with D3D12_SAMPLER_FLAG_UINT_BORDER_COLOR, which only a 1.2 blob can say
+        // and which D3D12 serializes and creates (the flag with the float OPAQUE_BLACK or OPAQUE_WHITE is the pair it
+        // refuses). None is in the hash table before its root signature is created, all are after. A version the PC
+        // serializer here does not write is skipped.
         const auto sampler_index = [&](const g::SamplerWords& words) {
             std::uint32_t key[8]{~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u};
             std::memcpy(key, words.data(), sizeof(words));
@@ -904,10 +907,13 @@ int main() {
             bool uint_white_border;
             g::SamplerWords words;
             bool created;
+            bool uint_transparent_border = false;  // the 1.2 flag on TRANSPARENT_BLACK
         } static_cases[] = {{D3D_ROOT_SIGNATURE_VERSION_1_0, "1.0", 6.0f, false, {}, false},
                             {D3D_ROOT_SIGNATURE_VERSION_1_1, "1.1", 7.0f, false, {}, false},
                             {D3D_ROOT_SIGNATURE_VERSION_1_2, "1.2", 8.0f, false, {}, false},
-                            {D3D_ROOT_SIGNATURE_VERSION_1_1, "1.1, UINT white border", 9.0f, true, {}, false}};
+                            {D3D_ROOT_SIGNATURE_VERSION_1_1, "1.1, UINT white border", 9.0f, true, {}, false},
+                            {D3D_ROOT_SIGNATURE_VERSION_1_2, "1.2, UINT transparent border", 10.0f, false, {}, false,
+                             true}};
         std::vector<Ref<ID3D12RootSignature>> static_roots(std::size(static_cases));
         UINT static_created = 0;
         for (std::size_t c = 0; c < std::size(static_cases); ++c) {
@@ -919,18 +925,25 @@ int main() {
                 expected.border_color = g::BorderColor::opaque_white;
                 expected.integer_border = true;
             }
+            if (test.uint_transparent_border) {
+                expected.address_u = g::AddressMode::clamp_border;
+                expected.border_color = g::BorderColor::transparent_black;
+                expected.integer_border = true;
+            }
             test.words = g::encode(expected);
             EXPECT(test.words != sampler_words && sampler_index(test.words) == 0);
 
             D3D12_STATIC_SAMPLER_DESC1 fixed{};
             fixed.Filter = sampler_desc.Filter;
-            fixed.AddressU = test.uint_white_border ? D3D12_TEXTURE_ADDRESS_MODE_BORDER : sampler_desc.AddressU;
+            fixed.AddressU = test.uint_white_border || test.uint_transparent_border ? D3D12_TEXTURE_ADDRESS_MODE_BORDER
+                                                                                    : sampler_desc.AddressU;
             fixed.AddressV = sampler_desc.AddressV;
             fixed.AddressW = sampler_desc.AddressW;
             fixed.MaxAnisotropy = sampler_desc.MaxAnisotropy;
             fixed.ComparisonFunc = sampler_desc.ComparisonFunc;
             fixed.BorderColor = test.uint_white_border ? D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE_UINT
                                                        : D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+            if (test.uint_transparent_border) fixed.Flags = D3D12_SAMPLER_FLAG_UINT_BORDER_COLOR;
             fixed.MaxLOD = test.max_lod;
             fixed.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
             // D3D12_STATIC_SAMPLER_DESC is D3D12_STATIC_SAMPLER_DESC1 without the trailing Flags.
@@ -1677,10 +1690,30 @@ int main() {
 
             // The static samplers' S#s: the three wrapping ones give the texture, texel for texel, as the registered
             // literal does. Unregistered (CreateRootSignature dropping them) they would clamp like the second above.
+            // The two UINT border ones read the R8G8B8A8_UINT view one tile to the right, so every texel is their
+            // border: 1 in each channel for OPAQUE_WHITE_UINT, 0 for the 1.2 flag on TRANSPARENT_BLACK (alpha
+            // included). Unregistered, they too would clamp and read the texture's right edge.
             for (const StaticCase& test : static_cases) {
-                if (!test.created || test.uint_white_border) continue;
+                if (!test.created) continue;
                 SampleKeys key = keys[0];
                 std::memcpy(key.ssharp, test.words.data(), sizeof(key.ssharp));
+                if (test.uint_white_border || test.uint_transparent_border) {
+                    std::memcpy(key.tsharp, view_bytes(uint_slot), sizeof(key.tsharp));
+                    key.mode = 1;
+                    std::array<std::uint8_t, bytes> pixels{};
+                    EXPECT(sample_through_set(d, set0, set0_layout, {&key, 1}, pixels.data()));
+                    const std::uint8_t want = test.uint_white_border ? 1 : 0;
+                    UINT border = 0;
+                    for (UINT i = 0; i < texels; ++i) {
+                        const std::uint8_t* p = pixels.data() + 4 * i;
+                        border += p[0] == want && p[1] == want && p[2] == want && p[3] == want;
+                    }
+                    std::printf("static sampler, root signature %s: %u/%u texels read the UINT border %u, "
+                                "first RGBA %u,%u,%u,%u\n",
+                                test.name, border, texels, unsigned(want), pixels[0], pixels[1], pixels[2], pixels[3]);
+                    EXPECT(border == texels);
+                    continue;
+                }
                 std::array<std::uint8_t, bytes> pixels{};
                 EXPECT(sample_through_set(d, set0, set0_layout, {&key, 1}, pixels.data()));
                 UINT static_wrapped = 0, static_clamped = 0;

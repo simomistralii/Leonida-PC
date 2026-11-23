@@ -390,7 +390,11 @@ def scan_rpf(path, start=None, limit=None, progress=None):
         raise ValueError("empty file")
     with open(path, "rb") as fh, mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as m:
         size = len(m)
-        first = struct.unpack_from("<I", m, 4)[0] if size >= 8 else 0
+        if size < 8:
+            raise ValueError("truncated RPF9 header")
+        if m[:4] not in (b"9FPR", b"RPF9"):
+            raise ValueError("not an RPF9 archive")
+        first = struct.unpack_from("<I", m, 4)[0]
         pos = start if start is not None else first
         if not 0 <= pos <= size:
             raise ValueError("start offset is outside the archive")

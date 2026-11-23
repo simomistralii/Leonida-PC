@@ -50,14 +50,15 @@ def valid_metadata(metadata):
     """Whether one index entry is an object whose bindings and features, when present, are lists of scalars."""
     return isinstance(metadata, dict) and all(
         isinstance(metadata.get(key, []), list)
-        and all(isinstance(v, (int, str)) for v in metadata.get(key, []))
+        and all(not isinstance(v, bool) and isinstance(v, (int, str)) for v in metadata.get(key, []))
         for key in ("bindings", "features"))
 
 
 def supported_pixel_shaders(index):
     """Return sorted pixel-shader names whose bindings and features are available in the harness."""
     return sorted(name for name, metadata in index.items()
-                  if metadata.get("stage") == "ps"
+                  if valid_metadata(metadata)
+                  and metadata.get("stage") == "ps"
                   and set(metadata.get("bindings", [])) <= SUPPORTED_BINDINGS
                   and set(metadata.get("features", [])) <= HOSTED_FEATURES)
 
@@ -262,7 +263,7 @@ def main(argv=None):
     try:
         with open(index_path, encoding="utf-8") as f:
             index = json.load(f)
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         ap.error(f"cannot read {index_path}: {getattr(e, 'strerror', None) or e}")
     if a.names and not os.path.isfile(a.names):
         ap.error(f"--names {a.names} is not a file")

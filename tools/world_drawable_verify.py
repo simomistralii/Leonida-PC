@@ -1,4 +1,8 @@
-"""Verify single-offset world_drawable_lookup predictions against normal model exports."""
+"""Verify single-offset world_drawable_lookup predictions against normal model exports.
+
+Source paths may be links to the same archive. Only file metadata is checked, never archive bytes;
+offline reports still work when their normalized source paths agree.
+"""
 import argparse
 from collections import Counter, defaultdict
 import json
@@ -9,6 +13,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from world_drawable_lookup import report_rows
 import world_build
 import world_names
+
+
+def _same_archive(first, second):
+    if first == second:
+        return True
+    try:
+        return os.path.samefile(first, second)
+    except OSError:
+        return False
 
 
 def archive_path(value):
@@ -28,7 +41,7 @@ def verify(predictions, manifests):
     paths = dict.fromkeys(os.path.normcase(os.path.realpath(path)) for path in manifests)
     for path in paths:
         export = report_rows(path, "Items")
-        if archive_path(export.get("src")) != archive:
+        if not _same_archive(archive_path(export.get("src")), archive):
             raise ValueError(f"{path}: different source archive from predictions")
         scan = export.get("Scan")
         if not isinstance(scan, dict):

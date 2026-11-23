@@ -41,8 +41,8 @@ def rel32(from_end, target):
     return struct.pack("<i", target - from_end)
 
 
-def build_image(callers):
-    """A PE32+ with one import descriptor (xmem.dll: XMemFoo, XMemBar, #7) and the given `.text` callers."""
+def build_image(callers, dll=b"xmem.dll"):
+    """A PE32+ with one import descriptor (`dll`: XMemFoo, XMemBar, #7) and the given `.text` callers."""
     buf = bytearray(0x3000)
     buf[0:2] = b"MZ"
     struct.pack_into("<I", buf, 0x3C, 0x40)
@@ -74,7 +74,8 @@ def build_image(callers):
         struct.pack_into("<Q", buf, IAT_FOO + i * 8, value)
     buf[names + 2:names + 2 + 8] = b"XMemFoo\0"
     buf[names + 0x10 + 2:names + 0x10 + 2 + 8] = b"XMemBar\0"
-    buf[IDATA_RVA + 0xD0:IDATA_RVA + 0xD0 + 9] = b"xmem.dll\0"
+    assert len(dll) < 0x10  # the module name sits in 0xD0..0xDF, before OTHER_IAT_RVA
+    buf[IDATA_RVA + 0xD0:IDATA_RVA + 0xD0 + len(dll) + 1] = dll + b"\0"
 
     # .text: the thunks are `jmp qword [rip+disp32]` to the address-table slots.
     for thunk, slot in ((THUNK_FOO, IAT_FOO), (THUNK_BAR, IAT_BAR), (THUNK_ORD, IAT_ORD)):
@@ -120,6 +121,15 @@ class ImportCallSitesTest(unittest.TestCase):
         self.assertEqual(len(import_call_sites.call_sites(self.data, dlls={"XMem.dll"})["imports"]), 3)
         self.assertEqual(import_call_sites.call_sites(self.data, dlls={"other.dll"})["imports"], {})
 
+    def test_a_dll_name_with_a_bang_is_selected_whole(self):
+        # The dll and the function are kept apart, not re-split at the first '!' of "dll!name".
+        data = build_image(self.callers, dll=b"x!em.dll")
+        self.assertEqual(len(import_call_sites.call_sites(data, dlls={"x!em.dll"})["imports"]), 3)
+        self.assertEqual(import_call_sites.call_sites(data, dlls={"x"})["imports"], {})
+        out = import_call_sites.call_sites(data, wanted={"X!EM.DLL!xmemfoo"})["imports"]
+        self.assertEqual(list(out), ["x!em.dll!XMemFoo"])
+        self.assertEqual(out["x!em.dll!XMemFoo"]["call"], [TEXT_RVA + 0x100, TEXT_RVA + 0x110])
+
     def test_a_call_is_not_counted_for_a_different_thunk(self):
         data = build_image([(TEXT_RVA + 0x100, 0xE8, THUNK_BAR)])
         out = import_call_sites.call_sites(data)["imports"]
@@ -148,6 +158,45 @@ class ImportCallSitesTest(unittest.TestCase):
             report = json.loads(out.getvalue())
             self.assertEqual(report["image_base"], hex(IMAGE_BASE))
             self.assertEqual(report["imports"]["xmem.dll!XMemFoo"]["call"], [hex(TEXT_RVA + 0x100), hex(TEXT_RVA + 0x110)])
+
+    def test_cli_refuses_a_selector_that_selects_nothing(self):
+        """--import is DLL!NAME and --dll is a DLL name. A bare DLL, a bare name or the two swapped select no import
+        at all, and the run then printed "0 import(s), 0 call site(s)": a typo in half the name read as proof that
+        the image never calls it (docs/xmem_exe_calls.md)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "image.exe")
+            with open(path, "wb") as f:
+                f.write(self.data)
+            for argv in (["--import", "xmem.dll"], ["--import", "XMemFoo"], ["--import", "xmem.dll!"],
+                         ["--import", "!XMemFoo"], ["--dll", "xmem.dll!XMemFoo"], ["--dll", "!XMemFoo"]):
+                err = io.StringIO()
+                with self.assertRaises(SystemExit) as caught, contextlib.redirect_stderr(err):
+                    import_call_sites.main([path, *argv])
+                self.assertEqual(caught.exception.code, 2, argv)
+                self.assertTrue(err.getvalue().strip(), argv)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):  # the two well-formed selectors still run
+                self.assertEqual(import_call_sites.main([path, "--import", "xmem.dll!XMemFoo"]), 0)
+                self.assertEqual(import_call_sites.main([path, "--dll", "xmem.dll"]), 0)
+
+    def test_cli_refuses_a_well_formed_selector_this_image_does_not_have(self):
+        """A misspelling inside a well-formed value names no import of this image, and the run printed
+        "0 import(s), 0 call site(s)" for it: a proof of absence that was only a proof of a typo."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "image.exe")
+            with open(path, "wb") as f:
+                f.write(self.data)
+            for argv in (["--import", "xmem.dll!XMemFooo"], ["--import", "xmem!XMemFoo"],
+                         ["--dll", "xmem"], ["--dll", "other.dll"]):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    self.assertEqual(import_call_sites.main([path, *argv]), 2, argv)
+                self.assertIn(argv[0], err.getvalue(), argv)
+                self.assertIn(argv[1].lower(), err.getvalue().lower(), argv)
+            # A matching name beside a misspelled one is still refused: no partial answer.
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(import_call_sites.main([path, "--import", "xmem.dll!XMemFoo",
+                                                         "--import", "xmem.dll!XMemFooo"]), 2)
 
     def test_cli_reports_an_unreadable_or_non_pe_file_with_exit_2(self):
         with tempfile.TemporaryDirectory() as tmp:

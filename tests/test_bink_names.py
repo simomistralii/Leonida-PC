@@ -341,6 +341,18 @@ class TestCli(unittest.TestCase):
             with open(report, "rb") as f:
                 self.assertEqual(f.read(), b"previous report")
 
+    def test_json_write_failure_preserves_previous_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = '{"previous": true}\n'
+            path = os.path.join(tmp, "keep.json")
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(previous)
+            with mock.patch.object(names_mod, "replace_retry", side_effect=OSError(13, "Permission denied")):
+                with self.assertRaises(OSError):
+                    names_mod.write(path, [], [], {"streams": 0})
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(f.read(), previous)
+
     def test_rejects_negative_max_skip(self):
         with tempfile.TemporaryDirectory() as tmp:
             xml = os.path.join(tmp, "list.xml")

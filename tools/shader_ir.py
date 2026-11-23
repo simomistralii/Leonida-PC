@@ -225,13 +225,18 @@ def parse_line(line):
         parts = parts[0].split() + parts[1:]
     args = [operand(a) for a in parts]
     if op.startswith(("v_add_f64", "v_cvt_f32_f64", "v_rcp_f64", "v_rsq_f64", "v_sqrt_f64",
-                      "v_frexp_mant_f64", "v_frexp_exp_i32_f64", "v_trunc_f64", "v_ceil_f64",
-                      "v_rndne_f64", "v_floor_f64")):
+                      "v_frexp_mant_f64", "v_frexp_exp_i32_f64", "v_ldexp_f64", "v_trunc_f64",
+                      "v_ceil_f64", "v_rndne_f64", "v_floor_f64")):
         for src, spelling in zip(args[1:], parts[1:]):
             # LLVM prints inline integers in decimal and the separate literal dword in hex,
             # even for two sources with the same numeric value (e.g. 0x1 and 1).
             if src["k"] == "imm" and ("0x" in spelling or not -16 <= src["v"] <= 64):
                 src["f64_literal"] = True
+                # The hex digits are the operand's printed width: LLVM pads nothing, so a value that
+                # fits one literal dword prints in at most 8 of them (docs/design.md, f64 literal sources).
+                m = re.search(r"0x([0-9a-fA-F]+)", spelling)
+                if m:
+                    src["literal_hex_digits"] = len(m.group(1))
     return {"op": op, "args": args, "mods": mods, "enc": enc.hex() if enc else None}
 
 

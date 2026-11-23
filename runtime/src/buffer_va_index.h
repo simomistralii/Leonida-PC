@@ -30,11 +30,16 @@ public:
     void insert(std::uint64_t va, std::uint64_t size, Id id) {
         if (!va || !size) return;
         const auto [it, added] = ranges_.try_emplace({va, id}, size);
+        try {
+            sizes_.insert(size);
+        } catch (...) {
+            if (added) ranges_.erase(it);
+            throw;
+        }
         if (!added) {  // the same (va, id) again: its new size replaces the old one
             drop_size(it->second);
             it->second = size;
         }
-        sizes_.insert(size);
         longest_ = *sizes_.rbegin();
     }
 

@@ -15,6 +15,7 @@ runtime/build/generated). For those, the drive of --windows-root is pointed at -
 Every test is reported. The exit code is 1 if a test named by --require fails or is missing, else 0: the
 others show what does and doesn't work under Wine yet without failing the job.
 --timeout caps each process; a shorter positive CTest TIMEOUT takes precedence for that test.
+Relative executable paths in --wine or WINE are read from the directory where you start this runner.
 """
 import argparse
 from graphlib import CycleError, TopologicalSorter
@@ -42,7 +43,9 @@ def _make_parent(path: str) -> None:
 
 
 def norm(path: str) -> str:
-    return ntpath.normpath(path).replace("\\", "/").rstrip("/")
+    path = ntpath.normpath(path).replace("\\", "/")
+    # Removing this slash would turn an absolute drive root into a drive-relative path.
+    return path if re.fullmatch(r"[A-Za-z]:/", path) else path.rstrip("/")
 
 
 def map_path(arg: str, windows_root: str, root: str) -> str | None:
@@ -51,8 +54,9 @@ def map_path(arg: str, windows_root: str, root: str) -> str | None:
     w = norm(windows_root)
     if a.lower() == w.lower():
         return root
-    if a.lower().startswith(w.lower() + "/"):
-        return os.path.join(root, *a[len(w) + 1:].split("/"))
+    prefix = w.rstrip("/") + "/"
+    if a.lower().startswith(prefix.lower()):
+        return os.path.join(root, *a[len(prefix):].split("/"))
     return None
 
 
@@ -61,8 +65,9 @@ class DriveMap:
 
     A test that opens D:/a/Leonida/Leonida/runtime/build/generated/x.spv (a path compiled into it) then reads
     <root>/runtime/build/generated/x.spv. The drive is a dosdevices link to a scratch folder holding a/Leonida/Leonida
-    as a link to the root; both are removed afterwards. A drive the prefix already has (c:, z:, or one set up by
-    hand) is left alone, and so is a root without a drive letter.
+    as a link to the root. If the Windows checkout is the drive root itself, the drive links directly to the
+    Linux checkout. Temporary links and scratch folders are removed afterwards. A drive the prefix already has
+    (c:, z:, or one set up by hand) is left alone, and so is a root without an absolute drive path.
     """
 
     def __init__(self, windows_root: str, root: str, prefix: str):
@@ -71,7 +76,7 @@ class DriveMap:
         self.note = ""
 
     def __enter__(self):
-        m = re.fullmatch(r"([A-Za-z]):/(.+)", self.windows_root)
+        m = re.fullmatch(r"([A-Za-z]):/(.*)", self.windows_root)
         if not m:
             self.note = f"{self.windows_root} has no drive letter: no drive mapped"
             return self
@@ -85,20 +90,23 @@ class DriveMap:
         if os.path.lexists(link):
             self.note = already_set
             return self
-        self.scratch = tempfile.mkdtemp(prefix="wine-drive-")
+        target = self.root
         try:
-            parent = os.path.join(self.scratch, *rest[:-1])
-            os.makedirs(parent, exist_ok=True)
-            os.symlink(self.root, os.path.join(parent, rest[-1]))
+            if rest:
+                self.scratch = tempfile.mkdtemp(prefix="wine-drive-")
+                parent = os.path.join(self.scratch, *rest[:-1])
+                os.makedirs(parent, exist_ok=True)
+                os.symlink(self.root, os.path.join(parent, rest[-1]))
+                target = self.scratch
             try:
-                os.symlink(self.scratch, link)
+                os.symlink(target, link)
             except FileExistsError:
                 self.note = already_set
                 return self
             self.link = link
         finally:
             # __exit__ only runs after a successful __enter__.
-            if self.link is None:
+            if self.link is None and self.scratch is not None:
                 shutil.rmtree(self.scratch, ignore_errors=True)
                 self.scratch = None
         self.note = f"drive {drive}: maps {self.windows_root} to {self.root} for this run"
@@ -242,7 +250,8 @@ def run_test(test: dict, args, wine: list[str], *, failed_setups: tuple[str, ...
 
 def run_test_process(argv: list[str], *, cwd: str, env: dict[str, str],
                      timeout: float) -> subprocess.CompletedProcess:
-    options = dict(cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    options = dict(cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if os.name != "posix":
         return subprocess.run(argv, **options, timeout=timeout)
 
@@ -352,6 +361,9 @@ def main() -> int:
         print("ERROR: CTest test dependencies form a cycle", file=sys.stderr)
         return 2
     wine = args.wine
+    # Each test starts in its own CTest working directory. Keep bare commands on PATH.
+    if os.path.dirname(wine[0]) and not os.path.isabs(wine[0]):
+        wine[0] = os.path.join(os.getcwd(), wine[0])
     results = {}
     results_by_index: dict[int, str] = {}
     prefix = os.environ.get("WINEPREFIX") or os.path.join(os.path.expanduser("~"), ".wine")
@@ -368,7 +380,7 @@ def main() -> int:
                 for line in detail.rstrip().splitlines()[-40:]:
                     print(f"    {line}")
 
-    missing = [n for n in args.require if n not in results]
+    missing = list(dict.fromkeys(n for n in args.require if n not in results))
     failed_required = [n for n in args.require if results.get(n) != "pass"]
     counts = {s: sum(1 for v in results.values() if v == s) for s in ("pass", "fail", "skip")}
     print(f"\n{counts['pass']} passed, {counts['fail']} failed, {counts['skip']} skipped under Wine "
@@ -387,6 +399,9 @@ def main() -> int:
                 f.write("| Test | Result | Required |\n|---|---|---|\n")
                 for name, status in results.items():
                     f.write(f"| `{name}` | {status} | {'yes' if name in args.require else ''} |\n")
+                for name in missing:
+                    # The job fails on these, so the table must name them, not only the log.
+                    f.write(f"| `{name}` | missing: not listed by the Windows build | yes |\n")
                 f.write("\n")
         except OSError as e:
             print(f"ERROR: cannot write the summary {args.summary}: {e.strerror or e}", file=sys.stderr)

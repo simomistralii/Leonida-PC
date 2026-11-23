@@ -249,6 +249,32 @@ class Freshness(unittest.TestCase):
         self.assertEqual((metric["numerator"], metric["denominator"]), (2, 6))
 
 
+    def test_local_ctest_junit_replaces_log_and_keeps_independent_run(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(pd, "ROOT", tmp), \
+                mock.patch.object(pd, "last_commit_time", return_value=0):
+            log = Path(tmp, "runtime/build/Testing/Temporary/LastTest.log")
+            log.parent.mkdir(parents=True)
+            log.write_text("1/1 Test: probe\nTest Passed.\n", encoding="utf-8")
+            local = Path(tmp, "local.xml")
+            local.write_text('<testsuite disabled="0" hostname="host"><testcase name="probe">'
+                             '<skipped/></testcase></testsuite>', encoding="utf-8")
+            other = Path(tmp, "other.xml")
+            other.write_text('<testsuites><testsuite><testcase name="probe"/></testsuite></testsuites>', encoding="utf-8")
+            col = pd.Collector()
+            pd.collect_ctest(col, SimpleNamespace(ctest_junit=str(local), junit=[str(local), str(other)]))
+            self.assertEqual([(c["group"], c["status"]) for c in col.components],
+                             [("ctest", "unknown"), ("junit:other.xml", "verified")])
+            metric = next(m for m in col.metrics if m["id"] == "runtime.current")
+            self.assertEqual((metric["numerator"], metric["denominator"]), (1, 2))
+
+            for path, status in [(other, "invalid"), (Path(tmp, "absent.xml"), "missing")]:
+                with self.subTest(status=status):
+                    col = pd.Collector()
+                    pd.collect_ctest(col, SimpleNamespace(ctest_junit=str(path), junit=[]))
+                    self.assertEqual(col.components, [])
+                    self.assertEqual([(s["id"], s["status"]) for s in col.sources], [("ctest_junit", status)])
+
+
 class GpuLog(unittest.TestCase):
     LOG = "\n".join([
         "using runtime/build/RelWithDebInfo",
@@ -441,6 +467,15 @@ class Scrub(unittest.TestCase):
 
 
 class Outputs(unittest.TestCase):
+    def test_login_without_github_is_an_argument_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "out")
+            cmd = [sys.executable, "-I", TOOL, "--out", out, "--login", "fixture-reviewer"]
+            result = subprocess.run(cmd, capture_output=True, cwd=ROOT, timeout=120)
+            self.assertEqual(result.returncode, 2, result.stderr.decode("utf-8", "replace"))
+            self.assertIn(b"--login requires --github", result.stderr)
+            self.assertFalse(os.path.exists(out))
+
     def test_nonpositive_test_options_are_argument_errors(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = os.path.join(tmp, "out")

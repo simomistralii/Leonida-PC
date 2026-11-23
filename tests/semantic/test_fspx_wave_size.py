@@ -21,9 +21,11 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.environ.get("LEONIDA_TOOLS_DIR") or os.path.join(ROOT, "tools"))
 sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(ROOT, "tests"))
 
 import rdna2spirv  # noqa: E402
 import spirv_mini_interp as si  # noqa: E402
+from test_fssm_unpack import make_dxbc, make_xbch, make_xdat_list  # noqa: E402
 
 STUB_DXBC = b"DXBC" + bytes(24) + struct.pack("<I", 0) + bytes(4)
 # 4 user SGPRs (the output V# in s[0:3]) and the workgroup id X; 64 threads.
@@ -33,14 +35,14 @@ VSHARP = [0, 0, 0x1000, 0x31016FAC]
 VCC_AS_DATA = ["s_mov_b64 vcc, s[2:3]", "s_mov_b32 s6, vcc_lo"]
 
 
-def translate(body, wave32=None, fssm=None, name="cs_wave"):
+def translate(body, wave32=None, fssm=None, name="cs_wave", container=STUB_DXBC):
     """Translate `body` as an FSPX program whose dispatch state says `wave32` (True, False, or None: field absent),
     optionally with an FSSM sidecar too. Returns (spvasm text, wave64 chosen)."""
     with tempfile.TemporaryDirectory() as tmp:
         for d in ("disasm", "fspx", "fssm"):
             os.mkdir(os.path.join(tmp, d))
         with open(os.path.join(tmp, name + ".dxbc"), "wb") as f:
-            f.write(STUB_DXBC)
+            f.write(container)
         meta = {"rsrc2": RSRC2, "threads": [64, 1, 1]}
         if wave32 is not None:
             meta["wave32"] = wave32
@@ -136,6 +138,22 @@ class TheChoiceMatters(unittest.TestCase):
         asm64, wave64 = translate(READLANE_40, wave32=False)
         self.assertTrue(wave64)
         self.assertEqual(run(asm64, 64), 3 * 40 + 1)
+
+
+class LibraryGraphicsWaveSize(unittest.TestCase):
+    def test_source_wave32_corroborates_a_32_bit_exec_instruction(self):
+        body = [
+            "s_bfm_b64 s[8:9], 3, 1",
+            "s_and_saveexec_b32 s10, -1",
+            "v_mov_b32_e32 v20, 0",
+            "exp pos0 v20, v20, v20, v20 done",
+        ]
+        for flags, expected_wave64 in (([True], False), ([False], True), ([True, False], True), ([], True)):
+            with self.subTest(flags=flags):
+                payloads = [(0x0D, make_xbch(fssm_header(flag))) for flag in flags]
+                source = make_dxbc([(b"DXIL", make_xdat_list(payloads))])
+                _, wave64 = translate(body, name="vs_wave", container=source)
+                self.assertEqual(wave64, expected_wave64)
 
 
 if __name__ == "__main__":

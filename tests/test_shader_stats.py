@@ -173,6 +173,13 @@ class ShaderStats(unittest.TestCase):
                 self.assertNotIn("Traceback", r.stderr)
                 self.assertEqual(self.detail(r)[column], "-")
 
+    def test_integral_decimal_counters_keep_all_digits(self):
+        for raw in ("9007199254740993.0", "9.007199254740993e15"):
+            with self.subTest(raw=raw):
+                result = self.run_stats([f"ps_flat,ps,Instructions,{raw}"])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.detail(result)[3], "9007199254740993")
+
     def test_missing_required_header_is_rejected_with_path_and_line(self):
         r = self.run_stats(["ps_flat,ps,Instructions,16"], header="name,stage,statistic")
         self.assertNotEqual(r.returncode, 0)

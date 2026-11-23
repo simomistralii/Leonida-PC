@@ -187,7 +187,7 @@ class Session:
 
     def run(self, name: str, mode: str, package: Path, overlay: Path) -> tuple[int, list[bytes], bytes]:
         a, wine = self.args, bool(self.args.wine)
-        cmd = ([a.wine] if wine else []) + [str(a.loader), "--run", guest_path(a.guest, wine), "--game-dir",
+        cmd = ([a.wine, *a.wine_arg] if wine else []) + [str(a.loader), "--run", guest_path(a.guest, wine), "--game-dir",
                                             guest_path(package, wine), "--overlay", guest_path(overlay, wine),
                                             "--", guest_path(a.shaders, wine)]
         env_set = {"LEONIDA_SCENE_MODE": mode,
@@ -256,7 +256,11 @@ def negative_controls(session: Session, out: Path) -> dict:
 
 
 def execute(args: argparse.Namespace, out: Path, temporary: bool) -> int:
-    out.mkdir(parents=True, exist_ok=True)  # parse_args has checked that it is new or empty
+    try:
+        out.mkdir(parents=True, exist_ok=True)  # parse_args has checked that it is new or empty
+    except OSError as exc:
+        print(f"error: could not create output directory {out}: {exc}", file=sys.stderr)
+        return 1
     session = Session(args, out)
     report: dict = {"status": "fail", "frames": FRAMES, "headless": True, "wine": args.wine, "temporary": temporary,
                     "audio_mode": "winmm" if args.play_audio else "offline", "report": str(out / "report.json")}
@@ -321,9 +325,12 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--shaders", type=Path, required=True, help="shader root containing spirv/")
     ap.add_argument("--out", type=Path, help="new or empty folder (default: a temporary folder, removed afterwards)")
     ap.add_argument("--wine", help="run the loader through this Wine binary")
+    ap.add_argument("--wine-arg", action="append", default=[], help="argument to the Wine launcher (repeatable)")
     ap.add_argument("--play-audio", action="store_true", help="LEONIDA_SCENE_AUDIO=winmm instead of offline")
     ap.add_argument("--negative-controls", action="store_true", help="also run a bad scene.bin and checkpoint")
     args = ap.parse_args()
+    if args.wine_arg and not args.wine:
+        ap.error("--wine-arg requires --wine")
     for name in ("loader", "guest"):
         if not getattr(args, name).is_file():
             ap.error(f"--{name}: no such file")

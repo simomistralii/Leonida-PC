@@ -1,4 +1,4 @@
-// Milestone M0 (docs/d3d12_vulkan.md section 6): a window shows a stable clear colour for 60 frames, through the
+// Milestone M0 (docs/d3d12_vulkan.md section 6): a window shows clear colours for 60 frames, through the
 // Vulkan-backed device behind the Xbox-ABI proxy, with no Vulkan validation errors. Each frame resets the list,
 // moves the back buffer PRESENT -> RENDER_TARGET, clears it, moves it back, executes, presents and signals a fence.
 // The window is then resized, which recreates the swapchain and scales the blit. The presented images are copied
@@ -19,9 +19,13 @@
 
 #include <dxgi1_6.h>
 
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <string>
 #include <functional>
 #include <string_view>
 #include <vector>
@@ -304,6 +308,22 @@ void install(PFN_vkGetInstanceProcAddr instance_proc, VkInstance instance, VkDev
 
 int main() {
     vktest::Device d;
+    // LEONIDA_CAPTURE writes every presented frame to disk. Turn it on here so the path is exercised with the rest of
+    // the presenter, and check its files against the colour this test clears to.
+    wchar_t capture_dir[MAX_PATH]{};
+    {
+        wchar_t temp[MAX_PATH]{};
+        if (GetTempPathW(MAX_PATH, temp))
+            swprintf_s(capture_dir, L"%sleonida_present_capture_%lu", temp, GetCurrentProcessId());
+        if (capture_dir[0]) {
+            CreateDirectoryW(capture_dir, nullptr);
+            // The presenter reads these with std::getenv, so they have to go into the CRT's environment too, which
+            // SetEnvironmentVariableW alone does not update.
+            _wputenv_s(L"LEONIDA_CAPTURE", capture_dir);
+            _wputenv_s(L"LEONIDA_CAPTURE_EVERY", L"1");
+            _wputenv_s(L"LEONIDA_CAPTURE_LIMIT", L"4");
+        }
+    }
     const auto device_status = d.initialize(true);
     if (device_status == vktest::DeviceStatus::unavailable) {
         std::fprintf(stderr, "SKIP: no usable Vulkan presentation device\n");
@@ -339,6 +359,7 @@ int main() {
     UpdateWindow(window);
     pump();
 
+    const FLOAT alternate[4] = {1.f, 0.f, 0.f, 1.f};
     const FLOAT colour[4] = {0.2f, 0.6f, 0.9f, 1.0f};
     bool screen_checked = false;
     {
@@ -429,7 +450,9 @@ int main() {
             barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
             barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
             list->ResourceBarrier(1, &barrier);
-            list->ClearRenderTargetView(rtv, colour, 0, nullptr);
+            const auto next = presenter->presented() + 1;
+            const bool red = next <= 4 && next % 2 == 1;
+            list->ClearRenderTargetView(rtv, red ? alternate : colour, 0, nullptr);
             barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
             barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
             list->ResourceBarrier(1, &barrier);
@@ -621,6 +644,51 @@ int main() {
             }
         } else {
             std::printf("the window is not in front: on-screen colour check skipped\n");
+        }
+
+        // The capture files must hold the colour the presented images hold: the frame written is the swapchain image
+        // as the presentation engine got it, so a capture that reads the wrong buffer shows up here.
+        if (capture_dir[0]) {
+            char narrow[MAX_PATH * 3]{};
+            WideCharToMultiByte(CP_ACP, 0, capture_dir, -1, narrow, static_cast<int>(sizeof narrow), nullptr, nullptr);
+            char path[MAX_PATH * 3 + 32]{};
+            int exact_files = 0;
+            for (int i = 1; i <= 4; ++i) {
+                std::snprintf(path, sizeof path, "%s\\frame_%05d.ppm", narrow, i);
+                std::ifstream ppm(path, std::ios::binary);
+                std::string magic, dimensions, max_value;
+                std::getline(ppm, magic);
+                std::getline(ppm, dimensions);
+                std::getline(ppm, max_value);
+                const int expected[] = {i % 2 ? 255 : 51, i % 2 ? 0 : 153, i % 2 ? 0 : 230};
+                bool exact = magic == "P6" && dimensions == std::to_string(width) + " " + std::to_string(height) &&
+                             max_value == "255";
+                for (size_t n = 0; exact && n < size_t(width) * height * 3; ++n) {
+                    const int sample = ppm.get();
+                    exact = sample != EOF && std::abs(sample - expected[n % 3]) <= 1;
+                }
+                if (exact && ppm.get() == EOF) ++exact_files;
+                ppm.close();
+                DeleteFileA(path);
+            }
+            int lines = 0, matching = 0;
+            std::ifstream index(std::string(narrow) + "\\index.txt");
+            for (std::string line; std::getline(index, line);) {
+                const auto at = line.find("mean rgb ");
+                double r = -1, g = -1, b = -1;
+                if (at == std::string::npos || std::sscanf(line.c_str() + at, "mean rgb %lf %lf %lf", &r, &g, &b) != 3)
+                    continue;
+                ++lines;
+                const bool red = lines % 2 == 1;
+                if (line.starts_with("frame " + std::to_string(lines) + " ") &&
+                    std::fabs(r - (red ? 255 : 51)) <= 3.0 && std::fabs(g - (red ? 0 : 153)) <= 3.0 &&
+                    std::fabs(b - (red ? 0 : 230)) <= 3.0) ++matching;
+            }
+            std::printf("capture: %d correct images, %d index rows, %d matching frame colours\n", exact_files, lines, matching);
+            index.close();
+            DeleteFileA((std::string(narrow) + "\\index.txt").c_str());
+            RemoveDirectoryA(narrow);
+            EXPECT(exact_files == 4 && lines == 4 && matching == 4);
         }
 
         presenter.reset();  // before the device's queue and resources go

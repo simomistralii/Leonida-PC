@@ -993,6 +993,16 @@ class CameraTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             fl.project(behind, world, viewproj)
 
+    def test_image_size_is_at_least_one_pixel(self):
+        # camera_matrices divides by the width. 0 used to raise ZeroDivisionError once a model was loaded.
+        err = io.StringIO()
+        for argv in (["--width", "0", "--list"], ["--height", "0", "--list"], ["--width", "-3", "--height", "4", "--list"]):
+            with self.subTest(argv=argv), contextlib.redirect_stderr(err):
+                with self.assertRaises(SystemExit) as caught:
+                    fl.main(argv)
+                self.assertEqual(caught.exception.code, 2)
+        self.assertIn("--width and --height must be at least 1", err.getvalue())
+
     def test_camera_flags_are_checked(self):
         for argv in (
             ["--camera", "--vs", fl.DEFAULT_VS],  # another VS reads other constants

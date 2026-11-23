@@ -312,11 +312,8 @@ class NameDictionary:
             added += int(self.add(base, source=source + "_filename"))
             if "." in base:
                 added += int(self.add(base.rsplit(".", 1)[0], source=source + "_filename"))
-        for match in re.finditer(r"<(?:[A-Za-z0-9_]+:)?(?:name|Name|locationName)>(.*?)</", text, re.S):
-            raw = match.group(1)
-            if "<" in raw:
-                continue
-            value = _xml_unescape(raw).strip()
+        for match in re.finditer(r"<((?:[A-Za-z0-9_]+:)?(?:name|Name|locationName))>([^<]*)</\1[ \t\r\n]*>", text):
+            value = _xml_unescape(match.group(2)).strip()
             if value and len(value) <= 120:
                 added += int(self.add(value, source=source + "_name"))
         return added

@@ -298,3 +298,21 @@ test('half-float coordinates follow the selected mip and late reads cannot repla
     await older;
     assert.equal(output.textContent, 'R = -2.5');
 });
+
+test('single-mip single-layer DDS still shows dimensions without adding inputs', async () => {
+    const { context, elements, run } = loadStudio();
+    const info = {width: 32, height: 16, mip_count: 1, array_size: 1, format: 'BC1_UNORM'};
+    const requests = [];
+    context.fetch = async url => {
+        requests.push(url);
+        return {ok: true, json: async () => info};
+    };
+    await run("openModal({name:'a', preview:'/a.png', ddsPreview:'/api/dds/a.dds'})");
+    const image = elements.get('modal-img');
+    const controls = elements.get('dds-controls');
+    assert.deepEqual(requests, ['/api/dds/a.dds?info']);
+    assert.equal(controls.children.length, 1);
+    assert.equal(controls.children[0].textContent, '32 \u00d7 16');
+    assert.equal(controls.children[0].children.length, 0);
+    assert.equal(image.src, '/a.png');
+});

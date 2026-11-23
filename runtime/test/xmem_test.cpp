@@ -11,6 +11,7 @@
 #include <windows.h>
 #include <psapi.h>
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -18,9 +19,12 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include "shims.h"
 #include "startup_trace.h"
+#include "xmem.h"
 
 namespace {
 
@@ -440,6 +444,222 @@ void test_physical_pages(const PhysicalApi& api) {
     // The windows were split into one placeholder per page; the process exit releases them.
 }
 
+bool access_faults(volatile uint32_t* address, bool write) {
+    __try {
+        if (write) {
+            *address = 1;
+        } else {
+            const uint32_t value = *address;
+            (void)value;
+        }
+    } __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER
+                                                                  : EXCEPTION_CONTINUE_SEARCH) {
+        return true;
+    }
+    return false;
+}
+
+int64_t commit_growth(const PERFORMANCE_INFORMATION& from, const PERFORMANCE_INFORMATION& to) {
+    return (static_cast<int64_t>(to.CommitTotal) - static_cast<int64_t>(from.CommitTotal)) *
+           static_cast<int64_t>(to.PageSize);
+}
+
+void test_physical_pages_commit_on_touch(const PhysicalApi& api) {
+    PERFORMANCE_INFORMATION before{};
+    if (!GetPerformanceInfo(&before, sizeof(before))) {
+        check(false, "GetPerformanceInfo reads the system commit charge");
+        return;
+    }
+    const uint64_t free_commit = static_cast<uint64_t>(before.CommitLimit - before.CommitTotal) * before.PageSize;
+    const uint64_t count = (free_commit + (uint64_t{1} << 30)) / kPage64k;
+    if (count >= (uint64_t{1} << 20)) {
+        std::printf("SKIP physical pages past the free commit: %llu MiB of commit is free\n",
+                    static_cast<unsigned long long>(free_commit >> 20));
+        return;
+    }
+    std::vector<uint64_t> pages(static_cast<size_t>(count));
+    uint64_t got = count;
+    check(api.allocate(0x380, &got, pages.data()) == TRUE && got == count,
+          "XMemAllocatePhysicalPages gives 1 GiB more pages than the system has commit free");
+    if (got != count) return;
+    PERFORMANCE_INFORMATION allocated{};
+    GetPerformanceInfo(&allocated, sizeof(allocated));
+    check(commit_growth(before, allocated) < static_cast<int64_t>(count * kPage64k / 8),
+          "allocating those pages does not charge them");
+
+    constexpr uint64_t kMapped = 1024;
+    constexpr uint64_t kTouched = 512;
+    auto* const window = static_cast<uint8_t*>(
+        api.virtual_alloc(nullptr, kMapped * kPage64k, MEM_RESERVE | kXmem64kPages, 0x21, PAGE_READWRITE));
+    auto* const second = static_cast<uint8_t*>(
+        api.virtual_alloc(nullptr, 2 * kPage64k, MEM_RESERVE | kXmem64kPages, 0x21, PAGE_READWRITE));
+    check(window != nullptr && second != nullptr, "XMemVirtualAlloc reserves windows for them");
+    if (!window || !second) {
+        api.free_pages(count, pages.data());
+        return;
+    }
+    check(api.map(window, kMapped, pages.data()) == window, "1,024 of them map into one window");
+    PERFORMANCE_INFORMATION mapped{};
+    GetPerformanceInfo(&mapped, sizeof(mapped));
+    check(commit_growth(allocated, mapped) < static_cast<int64_t>(kMapped * kPage64k / 2),
+          "mapping them does not charge them");
+
+    for (uint64_t i = 0; i < kTouched; ++i) {
+        static_cast<volatile uint32_t*>(static_cast<void*>(window + i * kPage64k))[0] =
+            0xc0de0000u | static_cast<uint32_t>(i);
+    }
+    PERFORMANCE_INFORMATION touched{};
+    GetPerformanceInfo(&touched, sizeof(touched));
+    const int64_t touched_growth = commit_growth(mapped, touched);
+    check(touched_growth >= static_cast<int64_t>(kTouched * kPage64k / 2) &&
+              touched_growth < static_cast<int64_t>(kMapped * kPage64k),
+          "writing to 512 of them charges about those 512 pages");
+    bool written = true;
+    for (uint64_t i = 0; i < kTouched; ++i) written &= read_u32(window + i * kPage64k, 0) == (0xc0de0000u | i);
+    check(written, "each touched page keeps what was written to it");
+    check(read_u32(window + kTouched * kPage64k, 0) == 0, "an untouched page reads as zero");
+
+    check(api.map(second, 2, pages.data()) == second, "two of the pages map into a second window");
+    check(read_u32(second, 0) == 0xc0de0000u && read_u32(second + kPage64k, 0) == 0xc0de0001u,
+          "the second window sees what was written through the first");
+    static_cast<volatile uint32_t*>(static_cast<void*>(second))[1] = 0x5ca1ab1e;
+    check(read_u32(window, 4) == 0x5ca1ab1e, "and the first window sees what is written through the second");
+
+    DWORD old = 0;
+    check(VirtualProtect(window, kPage64k, PAGE_READONLY, &old) != FALSE &&
+              access_faults(static_cast<volatile uint32_t*>(static_cast<void*>(window)), true),
+          "a write to a committed read-only page still faults to the next handler");
+    VirtualProtect(window, kPage64k, PAGE_READWRITE, &old);
+    check(VirtualProtect(window + 4096, 4096, PAGE_READONLY, &old) != FALSE &&
+              access_faults(static_cast<volatile uint32_t*>(static_cast<void*>(window + 4096)), true),
+          "a write to a read-only 4 KiB part of a read-write page still faults to the next handler");
+    check(!access_faults(static_cast<volatile uint32_t*>(static_cast<void*>(window + 8192)), true),
+          "the rest of that page stays writable");
+    VirtualProtect(window + 4096, 4096, PAGE_READWRITE, &old);
+    void* const elsewhere = VirtualAlloc(nullptr, kPage64k, MEM_RESERVE, PAGE_READWRITE);
+    check(elsewhere != nullptr && access_faults(static_cast<volatile uint32_t*>(elsewhere), false),
+          "a fault outside the mapped pages still reaches the next handler");
+    if (elsewhere) VirtualFree(elsewhere, 0, MEM_RELEASE);
+
+    uint8_t* const target = window + (kTouched + 1) * kPage64k;
+    check(rt::xmem::commit_physical_range(target, kPage64k), "commit_physical_range commits an untouched page");
+    uint32_t local = 0;
+    check(rt::xmem::commit_physical_range(&local, sizeof(local)), "commit_physical_range skips memory it does not own");
+    wchar_t directory[MAX_PATH]{};
+    wchar_t path[MAX_PATH]{};
+    bool read_ok = false;
+    if (GetTempPathW(MAX_PATH, directory) && GetTempFileNameW(directory, L"xpg", 0, path)) {
+        std::vector<uint32_t> pattern(kPage64k / sizeof(uint32_t));
+        for (size_t i = 0; i < pattern.size(); ++i) pattern[i] = 0x7e570000u + static_cast<uint32_t>(i);
+        const HANDLE out =
+            CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, nullptr);
+        DWORD bytes = 0;
+        const bool wrote = out != INVALID_HANDLE_VALUE &&
+                           WriteFile(out, pattern.data(), static_cast<DWORD>(kPage64k), &bytes, nullptr) &&
+                           bytes == kPage64k;
+        if (out != INVALID_HANDLE_VALUE) CloseHandle(out);
+        const HANDLE in = wrote ? CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr)
+                                : INVALID_HANDLE_VALUE;
+        if (in != INVALID_HANDLE_VALUE) {
+            read_ok = ReadFile(in, target, static_cast<DWORD>(kPage64k), &bytes, nullptr) && bytes == kPage64k &&
+                      std::memcmp(target, pattern.data(), kPage64k) == 0;
+            CloseHandle(in);
+        }
+        DeleteFileW(path);
+    }
+    check(read_ok, "ReadFile fills a page that commit_physical_range committed");
+
+    check(api.map(second, 2, nullptr) == second && api.map(window, kMapped, nullptr) == window, "they unmap");
+    check(api.free_pages(count, pages.data()) == TRUE, "XMemFreePhysicalPages frees them");
+}
+
+void test_commit_physical_pages(const PhysicalApi& api) {
+    constexpr uint64_t kPages = 3;
+    uint64_t pages[kPages]{};
+    uint64_t count = kPages;
+    check(api.allocate(0x280, &count, pages) == TRUE && count == kPages, "three physical pages for commit by number");
+    if (count != kPages) return;
+    check(rt::xmem::commit_physical_pages(pages, 0), "committing no pages succeeds");
+    check(!rt::xmem::commit_physical_pages(nullptr, 1), "committing from a null page array fails");
+    const uint64_t unknown = 0x1fffff0;
+    check(!rt::xmem::commit_physical_pages(&unknown, 1), "committing a page number that was never allocated fails");
+    check(rt::xmem::commit_physical_pages(pages, 2), "commit_physical_pages commits two pages that were never mapped");
+
+    auto* const window = static_cast<uint8_t*>(
+        api.virtual_alloc(nullptr, kPages * kPage64k, MEM_RESERVE | kXmem64kPages, 0x21, PAGE_READWRITE));
+    check(window != nullptr, "XMemVirtualAlloc reserves a window for them");
+    if (window) {
+        check(api.map(window, kPages, pages) == window, "the three pages map");
+        MEMORY_BASIC_INFORMATION info[kPages]{};
+        bool queried = true;
+        for (uint64_t i = 0; i < kPages; ++i)
+            queried &= VirtualQuery(window + i * kPage64k, &info[i], sizeof(info[i])) == sizeof(info[i]);
+        check(queried && info[0].State == MEM_COMMIT && info[1].State == MEM_COMMIT && info[2].State == MEM_RESERVE,
+              "the two committed by number are committed in the window and the third is not yet");
+        check(read_u32(window, 0) == 0 && read_u32(window + kPage64k, 0) == 0,
+              "pages committed by number read as zero");
+        api.map(window, kPages, nullptr);
+    }
+    check(api.free_pages(kPages, pages) == TRUE, "XMemFreePhysicalPages frees them");
+}
+
+void test_first_touch_during_remap(const PhysicalApi& api) {
+    constexpr uint64_t kSlice = 16;
+    constexpr uint64_t kSlices = 256;
+    std::vector<uint64_t> pages(kSlice * kSlices);
+    uint64_t count = pages.size();
+    check(api.allocate(0x280, &count, pages.data()) == TRUE && count == pages.size(),
+          "4,096 physical pages for the remap race");
+    if (count != pages.size()) return;
+    auto* const window = static_cast<uint8_t*>(
+        api.virtual_alloc(nullptr, kSlice * kPage64k, MEM_RESERVE | kXmem64kPages, 0x21, PAGE_READWRITE));
+    check(window != nullptr, "XMemVirtualAlloc reserves a window for the remap race");
+    if (!window) {
+        api.free_pages(count, pages.data());
+        return;
+    }
+    std::atomic<bool> stop{false};
+    std::atomic<uint64_t> touches{0};
+    std::atomic<uint64_t> unmapped_faults{0};
+    std::vector<std::thread> writers;
+    for (int t = 0; t < 4; ++t) {
+        writers.emplace_back([&, t] {
+            uint64_t i = static_cast<uint64_t>(t);
+            while (!stop.load(std::memory_order_relaxed)) {
+                auto* const word =
+                    static_cast<volatile uint32_t*>(static_cast<void*>(window + (i % kSlice) * kPage64k)) + t;
+                if (access_faults(word, true)) {
+                    unmapped_faults.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    touches.fetch_add(1, std::memory_order_relaxed);
+                }
+                ++i;
+            }
+        });
+    }
+    const ULONGLONG started = GetTickCount64();
+    bool remapped = true;
+    for (uint64_t s = 0; s < kSlices; ++s) {
+        remapped &= api.map(window, kSlice, pages.data() + s * kSlice) == window;
+        Sleep(0);
+        remapped &= api.map(window, kSlice, nullptr) == window;
+    }
+    remapped &= api.map(window, kSlice, pages.data() + (kSlices - 1) * kSlice) == window;
+    stop.store(true);
+    for (auto& writer : writers) writer.join();
+    const ULONGLONG elapsed = GetTickCount64() - started;
+    check(remapped, "256 slices map and unmap while 4 threads write into the window");
+    check(elapsed < 30000, "first-touch faults during map and unmap finish without hanging");
+    check(touches.load() > 0, "writes land while the pages are mapped");
+    std::printf("remap race: %llu writes landed, %llu hit an unmapped page, %llu ms\n",
+                static_cast<unsigned long long>(touches.load()),
+                static_cast<unsigned long long>(unmapped_faults.load()), static_cast<unsigned long long>(elapsed));
+    static_cast<volatile uint32_t*>(static_cast<void*>(window))[8] = 0x600dcafe;
+    check(read_u32(window, 32) == 0x600dcafe, "the last slice is still mapped and writable");
+    api.map(window, kSlice, nullptr);
+    check(api.free_pages(count, pages.data()) == TRUE, "XMemFreePhysicalPages frees the remap race pages");
+}
+
 // The placeholder flags pass through: reserve a placeholder, carve windows and committed memory out of it.
 void test_placeholders(const PhysicalApi& api) {
     auto* const base = static_cast<uint8_t*>(
@@ -718,6 +938,9 @@ int main() {
     if (tools_mem) check(tools_mem() == FALSE, "XMemIsToolsMemAvailable returns FALSE (no devkit tools memory)");
     if (virtual_alloc && physical.allocate && physical.free_pages && physical.map && physical.scatter) {
         test_physical_pages(physical);
+        test_physical_pages_commit_on_touch(physical);
+        test_commit_physical_pages(physical);
+        test_first_touch_during_remap(physical);
         test_placeholders(physical);
     }
 

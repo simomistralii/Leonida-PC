@@ -43,8 +43,14 @@ import csv
 import json
 import os
 import re
+import stat
 import struct
 import sys
+import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from file_mode import published_mode  # noqa: E402
+from replace_retry import replace as replace_retry  # noqa: E402
 
 M32 = 0xFFFFFFFF
 M29 = 0x1FFFFFFF
@@ -377,6 +383,56 @@ def positive_int(text):
     return value
 
 
+def _publish_text(path, write_body, *, newline, prefix):
+    """Publish a complete regular file via a temp sibling, or write a non-regular destination directly."""
+    destination = os.path.realpath(path)
+    parent = os.path.dirname(destination) or "."
+    try:
+        mode = os.stat(destination).st_mode
+    except FileNotFoundError:
+        mode = None
+    if mode is not None and not stat.S_ISREG(mode):
+        with open(path, "w", encoding="utf-8", newline=newline) as fh:
+            write_body(fh)
+        return
+    if mode is not None:
+        # Retain the direct writer's permission check without truncating the report.
+        os.close(os.open(destination, os.O_WRONLY))
+
+    staged = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", newline=newline, delete=False,
+        dir=parent, prefix=prefix, suffix=".tmp",
+    )
+    try:
+        with staged:
+            write_body(staged)
+        if os.name != "nt":
+            os.chmod(staged.name, published_mode(destination))
+        replace_retry(staged.name, destination)
+    finally:
+        try:
+            os.unlink(staged.name)
+        except FileNotFoundError:
+            pass
+
+
+def write_json_report(path, doc):
+    def write_body(fh):
+        json.dump(doc, fh, indent=1)
+
+    _publish_text(path, write_body, newline="\n", prefix=".awc_names-")
+
+
+def write_csv_report(path, rows):
+    def write_body(fh):
+        w = csv.DictWriter(fh, fieldnames=["source", "bank", "stream_id", "name", "rule"],
+                           lineterminator="\n")
+        w.writeheader()
+        w.writerows(rows)
+
+    _publish_text(path, write_body, newline="", prefix=".awc_names-")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("banks", nargs="+", help="an .awc file, a bank directory, or JSON from awc_manifest.py or rpf9dump audio")
@@ -438,14 +494,9 @@ def main(argv=None) -> int:
     if a.out:
         try:
             if a.out.lower().endswith(".json"):
-                with open(a.out, "w", encoding="utf-8", newline="\n") as fh:
-                    json.dump({"summary": summary, "streams": rows}, fh, indent=1)
+                write_json_report(a.out, {"summary": summary, "streams": rows})
             else:
-                with open(a.out, "w", encoding="utf-8", newline="") as fh:
-                    w = csv.DictWriter(fh, fieldnames=["source", "bank", "stream_id", "name", "rule"],
-                                       lineterminator="\n")
-                    w.writeheader()
-                    w.writerows(rows)
+                write_csv_report(a.out, rows)
         except OSError as error:
             print(f"awc_names: error: cannot write {a.out}: {error}", file=sys.stderr)
             return 2

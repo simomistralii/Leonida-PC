@@ -13,7 +13,10 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "semantic"))
 import fssm_header  # noqa: E402
+import shader_ir  # noqa: E402
+import support  # noqa: E402
 import wave32_pixel_scan as scan  # noqa: E402
 
 
@@ -171,6 +174,109 @@ class ScanTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as cm, contextlib.redirect_stderr(io.StringIO()):
             scan.main(["no_such_shaders_dir_xyz"])
         self.assertNotEqual(cm.exception.code, 0)
+
+    def _scan_lines(self, lines):
+        return dict(scan.scan_shader([shader_ir.parse_line(line) for line in lines]))
+
+    def test_bfm_b64_is_data_in_wave32(self):
+        lines = [
+            "s_bfm_b64 s[4:5], 2, 54",
+            "s_bcnt1_i32_b64 s6, s[4:5]",
+            "s_cmp_eq_u64 s[4:5], 0",
+            "s_cselect_b32 s7, 1, 0",
+            "s_endpgm",
+        ]
+        self.assertEqual(self._scan_lines(lines), {})
+
+    def test_flbit_cmpk_movrels_mask_word_and_data_controls(self):
+        cases = [
+            ("flbit_b32_mask", ["v_cmp_gt_f32_e64 s4, v0, v1", "s_flbit_i32_b32 s5, s4", "s_endpgm"],
+             {"mask_word": 1}, True),
+            ("flbit_b32_data", ["s_load_dword s6, s[0:1], 0x0", "s_flbit_i32_b32 s5, s6", "s_endpgm"],
+             {}, False),
+            ("flbit_i32_mask", ["v_cmp_gt_f32_e64 s4, v0, v1", "s_flbit_i32 s5, s4", "s_endpgm"],
+             {"mask_word": 1}, True),
+            ("flbit_i32_data", ["s_load_dword s6, s[0:1], 0x0", "s_flbit_i32 s5, s6", "s_endpgm"],
+             {}, False),
+            ("cmpk_mask", ["v_cmp_gt_f32_e64 s4, v0, v1", "s_cmpk_eq_u32 s4, 0", "s_endpgm"],
+             {"mask_word": 1}, True),
+            ("cmpk_data", ["s_load_dword s6, s[0:1], 0x0", "s_cmpk_eq_u32 s6, 0", "s_endpgm"],
+             {}, False),
+            ("movrels_b32_mask", ["v_cmp_gt_f32_e64 s4, v0, v1", "s_mov_b32 m0, 0", "s_movrels_b32 s5, s4", "s_endpgm"],
+             {"mask_word": 1}, True),
+            ("movrels_b32_data", ["s_load_dword s4, s[0:1], 0x0", "s_mov_b32 m0, 0", "s_movrels_b32 s5, s4", "s_endpgm"],
+             {}, False),
+            ("movrels_b64_mask", ["v_cmp_gt_f32_e64 s4, v0, v1", "s_mov_b32 m0, 0",
+                                  "s_movrels_b64 s[6:7], s[4:5]", "s_endpgm"],
+             {"mask_word": 1}, True),
+            ("movrels_b64_data", ["s_load_dwordx2 s[4:5], s[0:1], 0x0", "s_mov_b32 m0, 0",
+                                  "s_movrels_b64 s[6:7], s[4:5]", "s_endpgm"],
+             {}, False),
+        ]
+        for label, lines, expected, expect_subgroup in cases:
+            with self.subTest(case=label):
+                self.assertEqual(self._scan_lines(lines), expected)
+                spv = support.translate_lines("ps_" + label, lines)
+                self.assertEqual("OpGroupNonUniform" in spv, expect_subgroup)
+
+    def test_saveexec_wrexec_vcc_wqm_and_explicit_scc_votes(self):
+        cases = [
+            ("saveexec_data_vote", ["s_load_dword s2, s[0:1], 0x0", "s_and_saveexec_b32 s0, s2",
+                                    "s_cselect_b32 s3, 1, 0", "s_endpgm"],
+             {"vote": 1}, True),
+            ("wrexec_data_vote", ["s_load_dword s2, s[0:1], 0x0", "s_andn2_wrexec_b32 s0, s2",
+                                  "s_cselect_b32 s3, 1, 0", "s_endpgm"],
+             {"vote": 1}, True),
+            ("vcc_lo_data_vote", ["s_load_dword s2, s[0:1], 0x0", "s_and_b32 vcc_lo, s2, 0xff",
+                                  "s_cselect_b32 s1, 1, 0", "s_endpgm"],
+             {"vote": 1}, True),
+            ("vcc_hi_data_no_vote", ["s_load_dword s2, s[0:1], 0x0", "s_and_b32 vcc_hi, s2, 0xff",
+                                     "s_cselect_b32 s1, 1, 0", "s_endpgm"],
+             {}, False),
+            ("wqm_mask_vote", ["s_wqm_b32 exec_lo, exec_lo", "s_cselect_b32 s1, 1, 0", "s_endpgm"],
+             {"quad": 1, "vote": 1}, True),
+            ("wqm_data_no_vote", ["s_load_dword s2, s[0:1], 0x0", "s_wqm_b32 s4, s2",
+                                  "s_cselect_b32 s1, 1, 0", "s_endpgm"],
+             {"quad": 1}, False),
+            ("explicit_scc_vote", ["v_cmp_gt_f32_e32 vcc_lo, v0, v1", "s_and_saveexec_b32 s0, vcc_lo",
+                                   "s_mov_b32 s2, scc", "s_endpgm"],
+             {"vote": 1}, True),
+            ("explicit_src_scc_vote", ["v_cmp_gt_f32_e32 vcc_lo, v0, v1", "s_and_saveexec_b32 s0, vcc_lo",
+                                       "v_mov_b32_e32 v0, src_scc", "s_endpgm"],
+             {"vote": 1}, True),
+            ("explicit_scc_data", ["s_add_i32 s2, 0, 1", "s_mov_b32 s3, scc", "s_endpgm"],
+             {}, False),
+        ]
+        for label, lines, expected, expect_subgroup in cases:
+            with self.subTest(case=label):
+                self.assertEqual(self._scan_lines(lines), expected)
+                spv = support.translate_lines("ps_" + label, lines)
+                self.assertEqual("OpGroupNonUniform" in spv, expect_subgroup)
+
+    def test_non_scc_writers_preserve_mask_vote(self):
+        non_scc_ops = (
+            "s_bfm_b32 s2, 4, 0",
+            "s_brev_b32 s2, s3",
+            "s_bitset0_b32 s2, 0",
+            "s_bitset1_b32 s2, 1",
+            "s_ff0_i32_b32 s2, s3",
+            "s_ff1_i32_b32 s2, s3",
+            "s_flbit_i32_b32 s2, s3",
+            "s_flbit_i32 s2, s3",
+        )
+        for idx, mid in enumerate(non_scc_ops):
+            with self.subTest(mid=mid):
+                lines = [
+                    "s_load_dword s3, s[0:1], 0x0",
+                    "v_cmp_gt_f32_e32 vcc_lo, v0, v1",
+                    "s_and_saveexec_b32 s0, vcc_lo",
+                    mid,
+                    "s_cselect_b32 s1, 1, 0",
+                    "s_endpgm",
+                ]
+                self.assertEqual(self._scan_lines(lines), {"vote": 1})
+                spv = support.translate_lines(f"ps_preserve_{idx}", lines)
+                self.assertIn("OpGroupNonUniform", spv)
 
 
 if __name__ == "__main__":

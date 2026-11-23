@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 import zlib
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
@@ -243,6 +244,17 @@ class ScanTest(unittest.TestCase):
         open(empty, "wb").close()
         rows, summary = bvh_groups.scan(empty)
         self.assertEqual((rows, summary["streams"]), ([], 0))
+
+    def test_json_write_failure_preserves_previous_report(self):
+        previous = '{"previous": true}\n'
+        path = os.path.join(self.tmp.name, "keep.json")
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(previous)
+        with mock.patch.object(bvh_groups, "replace_retry", side_effect=OSError(13, "Permission denied")):
+            with self.assertRaises(OSError):
+                bvh_groups.write_json_report(path, {"source": "x", "summary": {}, "rows": []})
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), previous)
 
 
 if __name__ == "__main__":

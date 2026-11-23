@@ -145,6 +145,10 @@ private:
     void initialize_tls(Module& m);
     void bind_imports(Module& m);
     void* resolve(Module& m, const std::string& dll, const std::string& name, uint16_t ordinal, bool by_ordinal);
+    // The compat-module step of resolve(): true when `key` (lower-case DLL name) is a file in compat_dir_, which then
+    // owns every import of that DLL; `out` is the export, or null when the DLL lacks it. Caller holds mutex_.
+    bool resolve_compat(const std::string& key, const std::string& dll, const std::string& name, uint16_t ordinal,
+                        bool by_ordinal, void*& out);
     void* resolve_forwarder(const std::string& spec, Binding& binding, int depth);
     void parse_exports(Module& m);
     void protect_sections(Module& m);
@@ -152,6 +156,10 @@ private:
 
     mutable std::recursive_mutex mutex_;
     std::filesystem::path game_dir_;
+    // LEONIDA_COMPAT_DIR, read when the Loader is made; empty = no compat step. Drop-in DLLs named like console
+    // modules (runtime/README.md, "Compat modules"), loaded by Windows from there and kept for the process lifetime.
+    std::filesystem::path compat_dir_;
+    std::map<std::string, void*> compat_modules_;  // lower-case DLL name -> HMODULE
     std::map<std::filesystem::path::string_type, Module*> by_name_;  // native basename, ASCII case folded
     std::vector<Module*> order_;       // mapping order; owns the modules
     std::vector<Module*> init_order_;  // dependencies first, see initialisation_order()

@@ -55,7 +55,9 @@ SEM_DIR = os.path.join(os.path.dirname(HERE), "tests", "semantic")
 if SEM_DIR not in sys.path:
     sys.path.insert(0, SEM_DIR)
 
-import rdna2spirv  # noqa: E402
+# The translator is imported where it is used (run_translated, main), not here: rdna2spirv.py takes seconds to
+# compile, and with dont_write_bytecode the compiled code is never cached, so --help and a usage error would wait
+# for it on every run.
 from spirv_mini_interp import run_fragment  # noqa: E402
 
 M32 = 0xFFFFFFFF
@@ -687,6 +689,7 @@ def listing(op, vals, srcs, e64, out_mods):
 
 
 def run_translated(text, name="ps_f32_fuzz"):
+    import rdna2spirv  # here, not at the top of the file: see the note above the imports
     with tempfile.TemporaryDirectory(prefix="f32-fuzz-") as tmp:
         dis = os.path.join(tmp, "disasm")
         os.mkdir(dis)
@@ -1666,6 +1669,7 @@ def main(argv=None):
     if not argv:
         ap.error("no arguments given; pass --help for the available options")
     a = ap.parse_args(argv)
+    import rdna2spirv  # after the arguments are parsed, so --help and usage errors don't wait for it to compile
     rdna2spirv.FMA_KHR = a.fma == "khr"
     if a.programs < 1:
         ap.error("--programs must be at least 1")

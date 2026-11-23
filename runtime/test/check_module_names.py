@@ -30,7 +30,9 @@ def main() -> int:
         parser.error("this comparison needs native Windows")
     args.work_dir.mkdir(parents=True, exist_ok=True)
     page = ctypes.windll.kernel32.GetACP()
-    acp_char = next((c for c in "\u00e9\u03b4\u0436\u6f22" if exact_acp(c)), None)
+    # The guest also looks up the upper-case spelling through GetModuleHandleA.
+    # ACP 936 can spell U+00E9 but not U+00C9, so require both forms to round-trip.
+    acp_char = next((c for c in "\u00e9\u03b4\u0436\u6f22" if exact_acp(c) and exact_acp(c.upper())), None)
     unicode_char = next((c for c in "\u6f22\u5b57\u0436\u03b4\u00e9" if exact_acp(c) is None), "\u6f22")
     rows: list[dict] = []
     failures: list[str] = []

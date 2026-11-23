@@ -63,6 +63,7 @@ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES = 53
 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR = 1000044003
 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES_KHR = 1000314007
 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES = 1000225000
+VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT = 1000225002
 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES = 1000196000
 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR = 1000203000
 VK_DRIVER_ID_MOLTENVK = 14
@@ -281,11 +282,13 @@ def query(*, stage_caps=False) -> dict:
             if version < VK_API_VERSION_1_2 or (wanted and wanted not in dev_name.lower()):
                 continue
             core13 = version >= VK_API_VERSION_1_3
-            if not core13 and not VULKAN_12_REQUIRED_EXTENSIONS.issubset(device_extensions(vk, d)):
+            extensions = set() if core13 else device_extensions(vk, d)
+            if not core13 and not VULKAN_12_REQUIRED_EXTENSIONS.issubset(extensions):
                 continue
             f13 = block(F13_SIZE, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES)
             f12 = block(F12_SIZE, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES)
             bary = block(BARY_FEATURES_SIZE, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR)
+            sg_features = None
             if core13:
                 set_next(f12, f13)
                 set_next(f13, bary)
@@ -294,12 +297,20 @@ def query(*, stage_caps=False) -> dict:
                 sync2 = block(24, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES_KHR)
                 set_next(f12, rendering)
                 set_next(rendering, sync2)
-                set_next(sync2, bary)
+                if b"VK_EXT_subgroup_size_control" in extensions:
+                    sg_features = block(24, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT)
+                    set_next(sync2, sg_features)
+                    set_next(sg_features, bary)
+                else:
+                    set_next(sync2, bary)
             f2 = block(FEATURES2_SIZE, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2)
             set_next(f2, f12)
             vk.vkGetPhysicalDeviceFeatures2(d, f2)
             dynamic_rendering = u32(f13, F13_DYNAMIC_RENDERING) if core13 else u32(rendering, 16)
             synchronization2 = u32(f13, F13_SYNCHRONIZATION2) if core13 else u32(sync2, 16)
+            sgc = bool(u32(f13, F13_SUBGROUP_SIZE_CONTROL)) if core13 else (
+                sg_features is not None and bool(u32(sg_features, 16))
+            )
             if not (dynamic_rendering and synchronization2
                     and u32(f12, F12_TIMELINE_SEMAPHORE) and u32(f12, F12_SEPARATE_DEPTH_STENCIL_LAYOUTS)
                     and u32(f12, F12_BUFFER_DEVICE_ADDRESS)):
@@ -319,7 +330,7 @@ def query(*, stage_caps=False) -> dict:
                 chosen = (dev_name,
                           subgroup.subgroupSize, subgroup.supportedStages, sg.minSubgroupSize, sg.maxSubgroupSize,
                           sg.requiredSubgroupSizeStages, sg.maxComputeWorkgroupSubgroups,
-                          bool(u32(f13, F13_SUBGROUP_SIZE_CONTROL)),
+                          sgc,
                           bool(u32(bary, 16)) and u32(drv, 16) != VK_DRIVER_ID_MOLTENVK,
                           int.from_bytes(raw[PROPS_MAX_PUSH_CONSTANTS_SIZE:PROPS_MAX_PUSH_CONSTANTS_SIZE + 4], "little"),
                           int.from_bytes(raw[PROPS_VENDOR_ID:PROPS_VENDOR_ID + 4], "little"),

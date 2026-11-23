@@ -613,12 +613,13 @@ int main() {
     if (sc->GetCoreWindow(IID_IUnknown, &cw_out) != DXGI_ERROR_INVALID_CALL || cw_out != nullptr)
         return fail("GetCoreWindow on HWND swapchain should return DXGI_ERROR_INVALID_CALL and set null out");
 
-    // SwapChain::GetRestrictToOutput: unrestricted swapchain returns DXGI_ERROR_NOT_FOUND
+    // SwapChain::GetRestrictToOutput: an unrestricted swapchain answers S_OK with a null output (host-measured,
+    // dxgi_host_parity_test)
     IDXGIOutput* restrict_out = reinterpret_cast<IDXGIOutput*>(1);
-    if (sc->GetRestrictToOutput(nullptr) != E_INVALIDARG)
-        return fail("GetRestrictToOutput with null out should return E_INVALIDARG");
-    if (sc->GetRestrictToOutput(&restrict_out) != DXGI_ERROR_NOT_FOUND || restrict_out != nullptr)
-        return fail("GetRestrictToOutput on unrestricted swapchain should return DXGI_ERROR_NOT_FOUND and set null out");
+    if (sc->GetRestrictToOutput(nullptr) != DXGI_ERROR_INVALID_CALL)
+        return fail("GetRestrictToOutput with null out should return DXGI_ERROR_INVALID_CALL");
+    if (sc->GetRestrictToOutput(&restrict_out) != S_OK || restrict_out != nullptr)
+        return fail("GetRestrictToOutput on unrestricted swapchain should return S_OK and set null out");
 
     D3D12_DESCRIPTOR_HEAP_DESC rtv_hd{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
     ID3D12DescriptorHeap* rtv_heap = nullptr;
@@ -1026,8 +1027,8 @@ int main() {
             return fail("DXGI_PRESENT_TEST should not increment GetLastPresentCount");
         if (sc->Present(5, 0) != DXGI_ERROR_INVALID_CALL || sc->GetCurrentBackBufferIndex() != before)
             return fail("Present(5, 0) should be DXGI_ERROR_INVALID_CALL and present nothing");
-        if (sc->GetLastPresentCount(nullptr) != E_INVALIDARG)
-            return fail("GetLastPresentCount(nullptr) should return E_INVALIDARG");
+        if (sc->GetLastPresentCount(nullptr) != DXGI_ERROR_INVALID_CALL)
+            return fail("GetLastPresentCount(nullptr) should return DXGI_ERROR_INVALID_CALL");
 
         if (!check_statistics_disjoint(sc)) return fail("post-resize frame-statistics disjoint notification");
         DXGI_FRAME_STATISTICS stats{};

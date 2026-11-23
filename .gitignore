@@ -4,6 +4,7 @@ reports/
 work/
 /assets/*
 !/assets/logo.png
+!/assets/logo.svg
 carve/
 *.rpf
 *.ttpf
@@ -28,6 +29,7 @@ build-*/
 bin/
 obj/
 __pycache__/
+.pytest_cache/
 *.pyc
 *.exe
 *.dll

@@ -135,6 +135,27 @@ class Wave32PixelSubgroupTests(unittest.TestCase):
                                  resources={"%desc_map": desc_map, "%images": images}, helpers=helpers)
                     self.assertEqual([got[i] for i in judged], expected)
 
+    def test_readfirstlane_with_zero_exec_falls_back_to_first_running_lane(self):
+        # When EXEC == 0 across a wave32 fragment half and lane 0 of that half is absent (e.g. uncovered
+        # first quad), v_readfirstlane_b32 must fall back to wave32_first_running_lane() rather than
+        # shuffling from absent lane 0 (SPIR-V / Vulkan UB, SHADER-1016).
+        spv = support.translate_lines("ps_wave32_readfirstlane_zero_exec", [
+            "v_interp_mov_f32_e32 v2, p0, attr0.x",
+            "s_mov_b32 exec_lo, 0",
+            "v_readfirstlane_b32 s20, v2",
+            "s_mov_b32 exec_lo, -1",
+            "v_mov_b32_e32 v6, s20",
+            "exp mrt0 v6, v6, v6, v6 done vm",
+            "s_endpgm",
+        ])
+        lanes = [lane for lane in range(64) if lane % 32 >= 4]
+        inputs = [float(lane + 1) for lane in lanes]
+        # Lowest running lane is 4 (value 5.0) in half 0 and 36 (value 37.0) in half 1.
+        expected = [(fbits(5.0 if lane < 32 else 37.0),) * 4 for lane in lanes]
+        for subgroup_size in (32, 64):
+            with self.subTest(subgroup_size=subgroup_size):
+                self.assertEqual(run_ps(spv, subgroup_size, inputs, lanes), expected)
+
 
 if __name__ == "__main__":
     unittest.main()

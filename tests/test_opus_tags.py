@@ -367,6 +367,19 @@ class TestFolder(unittest.TestCase):
         self.assertIn("ambiguous name", r.stdout)
         self.assertIn("1", r.stdout.split("ambiguous name")[1].split()[0])
 
+    def test_cli_checks_the_names_header_even_without_rows(self):
+        path = Path(self.names)
+        for header, code in (("", 2), ("wave,text_en", 2), ("bank,stream_id,name", 0)):
+            with self.subTest(header=header):
+                path.write_text(header + "\n" if header else "", encoding="utf-8")
+                r = subprocess.run([sys.executable, "-I", TOOL, self.opus, "--names", self.names],
+                                   capture_output=True, text=True)
+                self.assertEqual(r.returncode, code, r.stderr)
+                if code:
+                    self.assertIn("missing columns in names CSV header: bank, stream_id, name", r.stderr)
+                else:
+                    self.assertEqual(r.stderr, "")
+
     def test_cli_names_row_cut_short_is_one_error_line(self):
         with open(self.names, "a", encoding="utf-8", newline="") as fh:
             fh.write("story,bank_01\n")          # an interrupted write: stream_id and later columns missing

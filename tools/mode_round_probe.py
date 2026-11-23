@@ -17,12 +17,16 @@ tools/hw_oracle is unavailable or the GPU is not GFX10. Standard library only; n
 import argparse
 import json
 import os
+import stat
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.dont_write_bytecode = True
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
+from file_mode import published_mode  # noqa: E402
+from replace_retry import replace as replace_retry  # noqa: E402
 
 RNE = "s_setreg_imm32_b32 hwreg(HW_REG_MODE, 2, 2), 0"
 RTZ = "s_setreg_imm32_b32 hwreg(HW_REG_MODE, 2, 2), 3"
@@ -187,16 +191,57 @@ def validate_json_path(path):
 
 
 def write_json_report(path, data):
-    """Create missing parent directories and write `data` as LF-terminated JSON, or return an error string."""
+    """Create missing parent directories and stage `data` as LF-terminated JSON via a sibling temp file,
+    so a write or replace failure keeps any previous report intact, or return an error string."""
     parent = os.path.dirname(os.path.abspath(path))
     if parent:
         try:
             os.makedirs(parent, exist_ok=True)
         except OSError as exc:
             return f"cannot create directory for --json {path}: {exc.strerror or exc}"
+    destination = os.path.realpath(path)
+    dest_parent = os.path.dirname(destination) or "."
+    if dest_parent != parent:
+        try:
+            os.makedirs(dest_parent, exist_ok=True)
+        except OSError as exc:
+            return f"cannot create directory for --json {path}: {exc.strerror or exc}"
     try:
-        with open(path, "w", encoding="utf-8", newline="\n") as f:
-            json.dump(data, f, indent=2)
+        try:
+            mode = os.stat(destination).st_mode
+        except FileNotFoundError:
+            mode = None
+        if mode is not None and not stat.S_ISREG(mode):
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                json.dump(data, f, indent=2)
+            return None
+        if mode is not None:
+            # Keep the direct writer's permission check without truncating the previous report.
+            os.close(os.open(destination, os.O_WRONLY))
+        fd = None
+        tmp = None
+        try:
+            fd, tmp = tempfile.mkstemp(dir=dest_parent, prefix=".mode_round_probe-", suffix=".tmp")
+            with open(fd, "w", encoding="utf-8", newline="\n") as f:
+                fd = None
+                json.dump(data, f, indent=2)
+            if os.name != "nt":
+                os.chmod(tmp, published_mode(destination))
+            replace_retry(tmp, destination)
+        except BaseException:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            if tmp is not None:
+                try:
+                    if os.path.lexists(tmp):
+                        os.chmod(tmp, 0o600)
+                        os.unlink(tmp)
+                except OSError:
+                    pass
+            raise
     except OSError as exc:
         return f"cannot write --json {path}: {exc.strerror or exc}"
     return None

@@ -1187,6 +1187,8 @@ def main(argv=None) -> int:
     ap.add_argument("-o", "--out", required=True, help="output .spvasm file")
     ap.add_argument("--passes", type=int, default=4, help="max optimization passes (default: 4)")
     args = ap.parse_args(argv)
+    if args.passes < 1:
+        ap.error("--passes must be at least 1")
     with open(args.src, encoding="utf-8") as f:
         text = f.read()
     opt = optimize(text, max_passes=args.passes)

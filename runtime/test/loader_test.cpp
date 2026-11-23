@@ -1308,6 +1308,122 @@ std::string written_images_blocked() {
     return {};
 }
 
+// A DLL Windows' own loader accepts (LEONIDA_COMPAT_DIR loads with LoadLibraryExW, not with rt::Loader): no entry
+// point, no imports, one export "Answer" (ordinal 1) whose code returns 42.
+std::vector<uint8_t> make_os_dll(uint64_t image_base) {
+    auto img = make_image();
+    std::fill(img.begin() + 0x200, img.begin() + 0x400, uint8_t{0});
+    auto* nt = nt_of(img);
+    nt->FileHeader.Characteristics = IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_DLL | IMAGE_FILE_LARGE_ADDRESS_AWARE;
+    auto& oh = nt->OptionalHeader;
+    oh.ImageBase = leonida_test::free_image_base(image_base);
+    oh.SectionAlignment = 0x1000;
+    oh.FileAlignment = 0x200;
+    oh.MajorOperatingSystemVersion = 6;
+    oh.MajorSubsystemVersion = 6;
+    oh.AddressOfEntryPoint = 0;
+    oh.BaseOfCode = 0x1000;
+    oh.SizeOfCode = 0x200;
+    oh.Subsystem = IMAGE_SUBSYSTEM_WINDOWS_GUI;
+    oh.DllCharacteristics = IMAGE_DLLCHARACTERISTICS_NX_COMPAT;
+    oh.SizeOfStackReserve = oh.SizeOfHeapReserve = 0x100000;
+    oh.SizeOfStackCommit = oh.SizeOfHeapCommit = 0x1000;
+    auto* ed = reinterpret_cast<IMAGE_EXPORT_DIRECTORY*>(img.data() + 0x200);
+    ed->Base = 1;
+    ed->NumberOfFunctions = 1;
+    ed->AddressOfFunctions = 0x1100;
+    ed->NumberOfNames = 1;
+    ed->AddressOfNames = 0x1120;
+    ed->AddressOfNameOrdinals = 0x1140;
+    *reinterpret_cast<uint32_t*>(img.data() + 0x300) = 0x1180;  // code, outside the export directory
+    *reinterpret_cast<uint32_t*>(img.data() + 0x320) = 0x1160;
+    *reinterpret_cast<uint16_t*>(img.data() + 0x340) = 0;
+    std::memcpy(img.data() + 0x360, "Answer\0", 7);
+    const uint8_t code[] = {0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3};  // mov eax, 42; ret
+    std::memcpy(img.data() + 0x380, code, sizeof(code));
+    auto& dir = oh.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    dir.VirtualAddress = 0x1000;
+    dir.Size = 0x170;
+    return img;
+}
+
+// An importer of `dll`!`symbol` bound under LEONIDA_COMPAT_DIR = `compat` (empty = unset). Returns its one record and
+// writes the IAT slot to `bound`.
+rt::ImportRecord bind_with_compat(const std::filesystem::path& compat, const char* dll, const char* symbol,
+                                  void*& bound) {
+    if (compat.empty()) SetEnvironmentVariableW(L"LEONIDA_COMPAT_DIR", nullptr);
+    else SetEnvironmentVariableW(L"LEONIDA_COMPAT_DIR", compat.c_str());
+    struct Reset {
+        ~Reset() { SetEnvironmentVariableW(L"LEONIDA_COMPAT_DIR", nullptr); }
+    } reset;
+    rt::Loader loader(g_dir);
+    rt::Module& m = loader.load(write_image(make_import_image(dll, symbol)));
+    if (m.imports.size() != 1) throw std::runtime_error("expected one import record");
+    bound = *reinterpret_cast<void**>(m.base + 0x1180);
+    return m.imports[0];
+}
+
+void test_compat_modules() {
+    const std::filesystem::path compat = g_dir / "compat";
+    std::filesystem::create_directories(compat);
+    const auto dll_path = compat / "testcompat.dll";
+    write_image_as(make_os_dll(0x1A0000000), "compat/testcompat.dll");
+    write_image_as(make_os_dll(0x1B0000000), "compat/testshim.dll");  // has Answer, not the shim's F
+    try {
+        void* bound = nullptr;
+        {
+            const char* what = "without LEONIDA_COMPAT_DIR an import with no shim stays unimplemented";
+            auto r = bind_with_compat({}, "testcompat.dll", "Answer", bound);
+            if (r.binding != rt::Binding::Unimplemented) failed(what, "it was bound");
+            else pass(what);
+        }
+        {
+            const char* what = "LEONIDA_COMPAT_DIR binds an import to the drop-in DLL's export, and it runs";
+            auto r = bind_with_compat(compat, "TestCompat.dll", "Answer", bound);
+            HMODULE h = GetModuleHandleW(dll_path.c_str());
+            auto expected = h ? reinterpret_cast<void*>(GetProcAddress(h, "Answer")) : nullptr;
+            if (r.binding != rt::Binding::Host) failed(what, "the import was not bound as Host");
+            else if (!expected || bound != expected) failed(what, "the IAT does not hold the DLL's export");
+            else if (reinterpret_cast<int (*)()>(bound)() != 42) failed(what, "the export did not return 42");
+            else pass(what);
+        }
+        {
+            const char* what = "a compat DLL owns its module: a symbol it lacks is unimplemented, not shimmed";
+            auto r = bind_with_compat(compat, "testshim.dll", "F", bound);
+            if (r.binding != rt::Binding::Unimplemented) failed(what, "F was not left unimplemented");
+            else if (!bound || bound == reinterpret_cast<void*>(&test_shim_function)) failed(what, "F reached the shim");
+            else pass(what);
+        }
+        {
+            const char* what = "a DLL that is not in the compat folder still binds to its shim";
+            std::filesystem::path empty = g_dir / "compat_empty";
+            std::filesystem::create_directories(empty);
+            auto r = bind_with_compat(empty, "testshim.dll", "F", bound);
+            if (r.binding != rt::Binding::Shim || bound != reinterpret_cast<void*>(&test_shim_function))
+                failed(what, "F did not bind to the test shim");
+            else pass(what);
+        }
+        {
+            const char* what = "a compat file Windows cannot load is reported, not skipped";
+            std::filesystem::path bad = g_dir / "compat_bad";
+            std::filesystem::create_directories(bad);
+            write_image_as(std::vector<uint8_t>(64, 0x5A), "compat_bad/testcompat.dll");
+            try {
+                bind_with_compat(bad, "testcompat.dll", "Answer", bound);
+                failed(what, "the load succeeded");
+            } catch (const std::exception& e) {
+                if (std::string(e.what()).find("LEONIDA_COMPAT_DIR") == std::string::npos) failed(what, e.what());
+                else pass(what);
+            }
+        }
+    } catch (const std::exception& e) {
+        failed("LEONIDA_COMPAT_DIR", e.what());
+    }
+    // Loaders keep compat DLLs for the process lifetime; drop the references so the work folder can be removed.
+    for (const auto& p : {dll_path, compat / "testshim.dll"})
+        while (HMODULE h = GetModuleHandleW(p.c_str())) FreeLibrary(h);
+}
+
 }  // namespace
 
 int main() {
@@ -1354,6 +1470,7 @@ int main() {
         test_tls_directory_count();
         test_unwind_registration();
         test_lookup_during_loads();
+        test_compat_modules();
     } catch (const std::exception& e) {
         // A write that fails (write_image throws) ends the run with the reason, instead of terminating the process.
         failed("writing the test images", e.what());

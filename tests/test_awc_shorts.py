@@ -226,6 +226,18 @@ class ShortsTest(unittest.TestCase):
             self.assertEqual(f.read(), b"previous catalog\n")
         self.assertEqual(sorted(os.listdir(self.out)), ["good", "shorts.csv"])
 
+    def test_replace_retry_failure_preserves_catalog(self):
+        previous = "bank,stream,duration_s,channels,packets,file\n"
+        os.makedirs(self.out, exist_ok=True)
+        index = os.path.join(self.out, "shorts.csv")
+        with open(index, "w", encoding="utf-8", newline="\n") as f:
+            f.write(previous)
+        with mock.patch.object(shorts, "replace_retry", side_effect=OSError(13, "Permission denied")):
+            with self.assertRaises(OSError):
+                shorts._write_catalog(index, [])
+        with open(index, encoding="utf-8") as f:
+            self.assertEqual(f.read(), previous)
+
     def test_nan_duration_bounds(self):
         path = self.write("good.awc", 0x78, 960)
         for option in ("--min-seconds", "--max-seconds"):

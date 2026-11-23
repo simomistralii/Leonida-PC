@@ -122,9 +122,11 @@ def is_gfx1170_or_later(arch):
 
 
 def rdna23_skip_reason(arch):
-    """Why a fuzzer or test written for RDNA2 and RDNA3 cannot run on this GPU, or None. AMD clang (rocm-sdk-core 10.0.0)
-    rejects s_barrier and some 16-bit and memory operands for gfx1201 (TEST-873, found by @PeterGrieffindor in #3918),
-    which fails every program of a chunk; on gfx1170+ the caller reports a skip instead."""
+    """Why a hardware suite whose kernels set the MODE fields gfx1170+ cannot encode cannot run on this GPU, or
+    None. Remaining users: the OnHardware guards of f32_fuzz and f16_trans_sweep, whose MODE probes set IEEE and
+    DX10_CLAMP, which AMD clang (rocm-sdk-core 10.0.0) rejects for gfx1170+ (FUZZ-43) so the probe cannot run there.
+    The fuzzers whose kernels do assemble there gate per family (valu_fuzz.hw_family_skip_reason) or per program
+    (lds_fuzz.hw_skip_reason) instead of taking this blanket reason."""
     if not is_gfx1170_or_later(arch):
         return None
     return f"{arch} (GFX11.7 or GFX12) is not RDNA2 or RDNA3: the kernels here do not assemble for it"

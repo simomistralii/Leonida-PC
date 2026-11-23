@@ -221,8 +221,30 @@ def defines_a_test(source, require_test_case=False):
     though pytest would collect it.
     """
     tree = ast.parse(source)
-    bases = {node.name: [ast.unparse(b).rsplit(".", 1)[-1] for b in node.bases]
-             for node in tree.body if isinstance(node, ast.ClassDef)}
+    bases, case_aliases = {}, set()
+    # Recognize bare aliases introduced by a direct import; this is not a general name resolver.
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            bases[node.name] = [
+                "TestCase" if isinstance(b, ast.Name) and b.id in case_aliases else ast.unparse(b).rsplit(".", 1)[-1]
+                for b in node.bases
+            ]
+            case_aliases.discard(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for item in node.names:
+                name = item.asname or item.name.split(".", 1)[0]
+                if (isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == "unittest"
+                        and item.name == "TestCase" and item.asname):
+                    case_aliases.add(name)
+                else:
+                    case_aliases.discard(name)
+        elif isinstance(node, ast.Assign):
+            case_aliases.difference_update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and node.value is not None and isinstance(node.target, ast.Name):
+            # A bare annotation does not change the imported binding.
+            case_aliases.discard(node.target.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            case_aliases.discard(node.name)
 
     def is_test_case(name):
         seen, stack = set(), [name]
@@ -347,6 +369,29 @@ class RepositoryRegistrationTest(unittest.TestCase):
                          "no CI job runs these test files: " + ", ".join(unselected) + "\n"
                          "Rename them to tests/test_*.py (or tests/test_*.cjs), put them under tests/semantic/ "
                          "as test*.py with an __init__.py in each nested directory, or add the pattern to ci.yml.")
+
+    def test_direct_testcase_import_alias(self):
+        import_alias = "from unittest import TestCase as Parent\n"
+        test_class = "class Example({base}):\n    def test_one(self): pass\n"
+        direct = test_class.format(base="Parent")
+        cases = (
+            ("direct", import_alias + direct, True),
+            ("local subclass", import_alias + "class Middle(Parent): pass\n"
+             + test_class.format(base="Middle"), True),
+            ("empty", import_alias + "class Example(Parent): pass\n", False),
+            ("unrelated import", "from types import SimpleNamespace as Parent\n" + direct, False),
+            ("relative import", "from .unittest import TestCase as Parent\n" + direct, False),
+            ("qualified name", import_alias + test_class.format(base="other.Parent"), False),
+            ("reassigned", import_alias + "Parent = object\n" + direct, False),
+            ("annotated assignment before class", import_alias + "Parent: type = object\n" + direct, False),
+            ("annotation only", import_alias + "Parent: type\n" + direct, True),
+            ("annotated assignment after class", import_alias + direct + "Parent: type = object\n", True),
+            ("local shadow", import_alias + "class Parent: pass\n" + direct, False),
+            ("reimported", import_alias + "from types import SimpleNamespace as Parent\n" + direct, False),
+        )
+        for kind, source, expected in cases:
+            with self.subTest(kind=kind):
+                self.assertEqual(defines_a_test(source, require_test_case=True), expected)
 
     def test_every_selected_file_exposes_a_test_to_its_runner(self):
         # Selection is not execution: pytest imports a file it is handed and reports zero items without

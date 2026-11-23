@@ -104,45 +104,58 @@ def duplicates(repo, main, tree, min_length, block=3):
     table or function body merged twice. A single repeated line is not reported: code and tables repeat lines
     legitimately."""
     found = {}
-    hunks, path, added = {}, None, None
+    additions, path, added = {}, None, None
+    new_file = False
+    # Gitlink updates describe submodule commits and have no file text to compare.
     patch = git(repo, "-c", "core.quotePath=true", "diff", "--unified=0", "--no-color", "--no-renames",
-                "--src-prefix=a/", "--dst-prefix=b/", "--no-relative", "--no-ext-diff", "--no-textconv",
+                "--inter-hunk-context=0", "--src-prefix=a/", "--dst-prefix=b/", "--no-relative",
+                "--no-ext-diff", "--no-textconv", "--ignore-submodules=all",
                 main, tree).stdout
     for line in patch.split("\n"):
         if line.startswith("diff --git "):
             path, added = None, None
+            new_file = False
+        elif added is None and line == "--- /dev/null":
+            new_file = True
         elif added is None and line.startswith("+++ "):
-            path = patch_destination(line)
+            path = None if new_file else patch_destination(line)
         elif line.startswith("@@ ") and path:
-            added = []
-            hunks.setdefault(path, []).append(added)
+            # The new-file range is +start[,count]. With zero context, only added lines advance it.
+            line_number = int(line.split()[2][1:].split(",")[0])
+            added = additions.setdefault(path, set())
         elif added is not None and line.startswith("+"):
-            text = line[1:].strip()
-            if text:
-                added.append(text)
+            added.add(line_number)
+            line_number += 1
+
     def windows(rev, path):
         r = git(repo, "show", f"{rev}:{path}", check=False)
-        lines = [l.strip() for l in r.stdout.split("\n") if l.strip()] if r.returncode == 0 else []
-        return r.returncode == 0, Counter(tuple(lines[i:i + block]) for i in range(len(lines) - block + 1))
+        if r.returncode:
+            return None, Counter()
+        lines = [(number, text) for number, raw in enumerate(r.stdout.split("\n"), 1) if (text := raw.strip())]
+        content = [text for _, text in lines]
+        return lines, Counter(tuple(content[i:i + block]) for i in range(len(content) - block + 1))
 
-    for path, groups in hunks.items():
-        exists, before = windows(main, path)
-        if not exists:
+    for path, added in additions.items():
+        if not added:
+            continue
+        before_lines, before = windows(main, path)
+        if before_lines is None:
             continue  # a new file: nothing to duplicate
-        _, after = windows(tree, path)
-        same = []
-        for added in groups:
-            marked = [False] * len(added)
-            for i in range(len(added) - block + 1):
-                run = tuple(added[i:i + block])
-                # Doubled: on main already, and more copies after the merge. A block the PR moves (deleted where
-                # it was, added elsewhere) keeps its count and is not reported.
-                if all(len(x) >= min_length for x in run) and before[run] and after[run] > before[run]:
-                    for j in range(i, i + block):
-                        marked[j] = True
-            same += [x for x, m in zip(added, marked) if m]
-        if same:
-            found[path] = same
+        after_lines, after = windows(tree, path)
+        if after_lines is None:
+            continue
+        marked = set()
+        for i in range(len(after_lines) - block + 1):
+            window = after_lines[i:i + block]
+            # Blank lines are skipped, but each nonblank line in the window must be new.
+            if not all(number in added and len(text) >= min_length for number, text in window):
+                continue
+            run = tuple(text for _, text in window)
+            # Moving a block instead of duplicating it keeps the count unchanged.
+            if before[run] and after[run] > before[run]:
+                marked.update(number for number, _ in window)
+        if marked:
+            found[path] = [text for number, text in after_lines if number in marked]
     return found
 
 

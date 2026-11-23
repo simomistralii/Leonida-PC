@@ -1139,9 +1139,11 @@ async function openModal(texture) {
       };
     }
     if (controls.childElementCount) {
-      controls.appendChild(dimensions);
       updatePreview();
+    } else {
+      dimensions.textContent = info.width + ' × ' + info.height;
     }
+    controls.appendChild(dimensions);
   } catch (error) {
     console.error('Failed to inspect DDS texture', error);
   }

@@ -106,16 +106,18 @@ SIGNED_ZERO_NAN = [0x80000000, 0x80000000, 0x80008000, 0x00008000, 1, 1, 1, 0x00
 WAVE32_DUMPS = ("cs_store", "cs_signed_zero_nan", "cs_smem_soffset_imm", "cs_wqm_w32", "cs_w32_lane_wrap", "cs_movrelsd_2", "cs_w32_permute",
                 "cs_barrier_divergent", "cs_barrier_early_end", "cs_barrier_loop", "cs_w32_lds_u8_d16", "cs_bpermute32",
                 "cs_w32_lds_subdword", "cs_w32_lds_wide",
-                "cs_w32_partial_scmp", "cs_exec_const", "cs_w32_mask_imm", "cs_w32_int_ext",
-                "cs_w32_salu64", "cs_w32_misc_ext", "cs_w32_new_ops", "cs_w32_sincos", "cs_lds_b64_cmpst", "cs_w32_andn2_exec",
-                "cs_mask_vgpr_exec", "cs_w32_buffer_sub16", "cs_w32_buffer_store_sub", "cs_w32_fcmpswap", "cs_w32_permlane_fi")
+                "cs_w32_partial_scmp", "cs_w32_partial_permute", "cs_exec_const", "cs_w32_mask_imm", "cs_w32_int_ext",
+                "cs_w32_salu64", "cs_w32_misc_ext", "cs_w32_new_ops", "cs_w32_sincos", "cs_lds_b64_cmpst", "cs_lds_xchg64_ext", "cs_lds_atomics_ext", "cs_w32_andn2_exec",
+                "cs_mask_vgpr_exec", "cs_w32_buffer_sub16", "cs_w32_buffer_store_sub", "cs_w32_fcmpswap", "cs_w32_permlane_fi",
+                "cs_w32_exec_computed")
 # Wave32 lane-mask dumps: their EXEC/VCC masks and lane selects cover 32 lanes, so a device whose widest subgroup is
 # narrower (Mesa llvmpipe: 8) can't produce their words. They are skipped there, as ps_bitmask_perm is. They run with
 # 32 lanes requested (WAVE32_LANE_ENV), as run_gpu_tests.py does: a device with a range like 8..32 (Intel ANV) may
 # otherwise pick a narrower size and return different words (#774).
 WAVE32_LANE_ENV = {"VKC_SUBGROUP_SIZE": "32"}
-WAVE32_LANE_DUMPS = ("cs_wqm_w32", "cs_w32_lane_wrap", "cs_w32_permute", "cs_bpermute32", "cs_w32_partial_scmp", "cs_exec_const",
-                     "cs_w32_mask_imm", "cs_lds_b64_cmpst", "cs_w32_andn2_exec", "cs_mask_vgpr_exec", "cs_w32_permlane_fi")
+WAVE32_LANE_DUMPS = ("cs_wqm_w32", "cs_w32_lane_wrap", "cs_w32_permute", "cs_bpermute32", "cs_w32_partial_scmp", "cs_w32_partial_permute", "cs_exec_const",
+                     "cs_w32_mask_imm", "cs_lds_b64_cmpst", "cs_lds_xchg64_ext", "cs_lds_atomics_ext", "cs_w32_andn2_exec", "cs_mask_vgpr_exec", "cs_w32_permlane_fi",
+                     "cs_w32_exec_computed")
 CS_DPP = [("cs_dpp", [1, 0, 3, 2, 5, 4, 7, 6]),
           ("cs_dpp_row", [0, 0, 1, 2, 3, 4, 5, 6]),
           ("cs_dpp_mask", [1, 0, 3, 2, 0xeeeeeeee, 0xeeeeeeee, 0xeeeeeeee, 0xeeeeeeee]),
@@ -156,6 +158,12 @@ CS_DUMPS = [*CS_DPP, ("cs_store", CS_STORE), ("cs_smem_soffset_imm", CS_SMEM),
             # ds_cmpst_b32 and the b64 2-address forms (cs_lds_b64_cmpst.asm header)
             ("cs_lds_b64_cmpst", [0x11110001, 0x22220002, 0x33330003, 0x44440004,
                                   0xCCCC000C, 0x44440004, 0xBBBB000B, 0x3579BADC]),
+            # ds_wrxchg*_rtn_b64, ds_or_rtn_b64, ds_min_f32, ds_max_rtn_f32 (cs_lds_xchg64_ext.asm header)
+            ("cs_lds_xchg64_ext", [0x11110003, 0x33333333, 0xF00FF000, 0x04030201,
+                               0x40302010, 0x70500705, 0x3FC00000, 0x80000000]),
+            # ds_mskor, ds_and/xor_b64, ds_add_rtn_f32, ds_inc/dec/rsub_u32 (cs_lds_atomics_ext.asm header)
+            ("cs_lds_atomics_ext", [0xF0F11234, 0xAB34CD78, 0x12345678, 0xF0F00F0F,
+                                    0xA5A55A5A, 0x00AA00AA, 0x7FB00000, 0xFE090700]),
             # constant EXEC: each lane takes its own bit (Intel got 16-bit constants wrong for lanes 16-31)
             ("cs_exec_const", [16, 8, 2, 16, 0, 16]),
             # a constant lane mask (saveexec, wrexec, s_and/s_not/s_mov_b64 into EXEC or VCC) gives lane L its bit L,
@@ -166,6 +174,10 @@ CS_DUMPS = [*CS_DPP, ("cs_store", CS_STORE), ("cs_smem_soffset_imm", CS_SMEM),
             ("cs_signed_zero_nan", SIGNED_ZERO_NAN),
             # s_andn2_saveexec_b32 / s_andn2_wrexec_b32: EXEC = S0 & ~EXEC, D old / new EXEC, SCC (cs_w32_andn2_exec.asm)
             ("cs_w32_andn2_exec", [1, 8, 16, 2064, 2068, 3, 20, 1544]),
+            # SHADER-1264: a computed value written to exec_lo / exec_hi gives each lane its own bit, not the
+            # whole half for a non-zero value (cs_w32_exec_computed.asm / cs_w64_exec_computed.asm headers)
+            ("cs_w32_exec_computed", [259, 1028, 3088, 7682, 512, 4100, 0, 3]),
+            ("cs_w64_exec_computed", [291, 1028, 11264, 771, 8192, 4132, 0, 3]),
             ("cs_wave64_ballot", [32, 16, 24, 40, 8, 48]),
             ("cs_wm_half_ops", [32, 16, 16, 0, 16]), ("cs_wm_half_cmp", [1, 0, 1, 1]),
             ("cs_wm_bfm64", [16, 8, 8, 40]), ("cs_wm_scc_rfl", [55, 48]),
@@ -174,6 +186,8 @@ CS_DUMPS = [*CS_DPP, ("cs_store", CS_STORE), ("cs_smem_soffset_imm", CS_SMEM),
             ("cs_wqm_w64", [20, 4, 12, 8, 1, 0, 15728895, 20]), ("cs_wqm_w32", [12, 1, 4, 0, 8, 15728880, 4, 32]),
             ("cs_bpermute32", [0, 50, 162, 99, 36, 218, 183, 15]),
             ("cs_w32_partial_scmp", [0, 1, 1, 0, 1, 1, 1, 1]),   # a 20-thread wave32: s_cmp mask, -1
+            # ds_permute_b32 in a 20-thread wave32: a source lane that was never launched sends nothing
+            ("cs_w32_partial_permute", [0, 29, 127, 0, 1, 0, 134, 113]),
             # SHADER-88: v_sin/v_cos reduce the angle in turns (a regression guard, tolerance 1e-3)
             ("cs_w32_sincos", [1, 1, 1, 1, 1, 1]),
             # SHADER-74: v_permlane16/x16 with the source lane off in EXEC (FI / BOUND_CTRL)
@@ -542,7 +556,7 @@ NAN_PAYLOAD_TEST = "ps_nan_payload"
 # One definition: a later assignment used to drop ps_texoff (and any entry added by an earlier assignment) from
 # the standalone run. Keep every pixel fixture in this tuple.
 PIXEL_TESTS = sorted((*PIXEL_BITS, "ps_bary", "ps_persp_bary", "ps_flat", "ps_bitmask_perm", "ps_texoff",
-                      "ps_texoff_implicit", "ps_texoff_forms",
+                      "ps_texoff_implicit", "ps_texoff_forms", "ps_cbv_modulate",
                       "ps_uniform_branch", "ps_wqm", "ps_scc_mask32", "ps_interp_f16_high", "ps_ij_computed",
                       "ps_mandelbrot", NAN_PAYLOAD_TEST))
 # Pixel fixtures drawn with another vertex shader than vs_ids.
@@ -1302,13 +1316,15 @@ def bary_persp_problem(px):
     return f"{wrong} pixels off the perspective-correct reference ({covered} covered); {first}" if wrong else ""
 
 
-def pixels(tools, spirv, name, fmt, vertex="vs_ids"):
+def pixels(tools, spirv, name, fmt, vertex="vs_ids", *, settings=None):
     # Draw at the shader's own wave size, as run_gpu_tests.py does (#146): a wave32 pixel shader run as wave64
     # (RADV's default on RDNA1) reads lanes it was never written for.
     sg = subgroup_size(spirv, name)
     env = dict(os.environ, VKH_SUBGROUP_SIZE=str(sg)) if sg else None
-    if name in PIXEL_ENV:
-        env = dict(env or os.environ, **PIXEL_ENV[name])
+    if settings is None:
+        settings = PIXEL_ENV.get(name)
+    if settings:
+        env = dict(env or os.environ, **settings)
     gs = os.path.join(spirv, name + ".bary_gs.spv")
     if BARY_FALLBACK and os.path.isfile(gs):
         env = dict(env or os.environ, VKH_GS=gs, VKH_GS_HELPER="1")
@@ -1324,6 +1340,30 @@ def pixels(tools, spirv, name, fmt, vertex="vs_ids"):
     if len(data) != 64 * 64 * 16:  # default harness viewport, four 32-bit components per pixel
         return None, out
     return list(struct.iter_unpack(fmt, data)), out
+
+
+def cbv_modulate_test(tools, spirv):
+    # Both buffers are in bounds. Word zero of each is a decoy for a lost member offset.
+    # A third buffer (gain 2) makes reading descriptor 0 observable in either draw.
+    heap = ("0x1000=0x4000,0x1008=32,0x1018=32,"
+            "0x2000=0x3f800000,0x2010=0x3f000000,"
+            "0x3000=0x3f800000,0x3010=0,0x4010=0x40000000")
+    for address, gain in ((0x2000, 0.5), (0x3000, 0.0)):
+        settings = {"VKH_SGPRS": "0x1000,0", "VKH_HEAP": f"{heap},0x1010={address}"}
+        px, out = pixels(tools, spirv, "ps_cbv_modulate", "<4f", settings=settings)
+        if isinstance(px, Skip):
+            return Skip(out.strip() or "unsupported device")
+        if not px:
+            return f"gain {gain}: {out.strip() or 'no complete readback'}"
+        for i, rgba in enumerate(px):
+            y, x = divmod(i, 64)
+            expected = ((x + 0.5) / 64 * gain, (y + 0.5) / 64 * gain, gain, 1.0)
+            # Interpolated colors use the same tolerance as ps_flat. Black, gain and alpha are exact.
+            tolerance = 1e-6 if gain else 0.0
+            if not (abs(rgba[0] - expected[0]) <= tolerance and abs(rgba[1] - expected[1]) <= tolerance
+                    and rgba[2:] == expected[2:]):
+                return f"gain {gain} at ({x},{y}): got {rgba}, expected {expected}"
+    return ""
 
 
 def texture_constant_test(tools, spirv, name):
@@ -1669,6 +1709,8 @@ def pixel_test(tools, spirv, name):
         return Skip("SKIP (computed I/J pairs need PerVertexKHR inputs: no --bary-fallback / --f16-interp-fallback)")
     if not os.path.isfile(path):
         return f"missing {name}.spv"
+    if name == "ps_cbv_modulate":
+        return cbv_modulate_test(tools, spirv)
     if name in ("ps_texoff", "ps_texoff_implicit", "ps_texoff_forms"):
         return texoff_test(tools, spirv, name)
     if name == "ps_interp_f16_high" and BARY_FALLBACK and not F16_HALVES:   # with F16_HALVES it reads decoded halves
@@ -1811,7 +1853,8 @@ def main():
     results.append(("ms_wave_info_s3", mesh_w64x_test(tools, spirv, "ms_wave_info_s3")))
     with tempfile.TemporaryDirectory(prefix="leonida-mesh-") as tmp:
         results.append(("ms_v5_workgroup", mesh_v5_test(tools, spirv, Path(tmp) / "groups.raw")))
-    for name, args in (("cs_imgstore", []), ("cs_imgload", ["load"]), ("cs_imgload_d16", ["load-d16"]),
+    for name, args in (("cs_imgstore", []), ("cs_imgload", ["load"]), ("cs_imgload_tfe", ["load"]),
+                       ("cs_imgload_d16", ["load-d16"]), ("cs_imgload_d16_tfe", ["load-d16"]),
                        ("cs_sample_lz_int_d16", ["load-d16"])):
         code, out = run(os.path.join(tools, "vk_store_test" + EXE), os.path.join(spirv, name + ".spv"), *args)
         if code == UNSUPPORTED:   # vk_store_test: the device lacks a feature this test needs

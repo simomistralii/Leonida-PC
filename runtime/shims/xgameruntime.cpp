@@ -487,8 +487,7 @@ std::filesystem::path persistent_storage_dir() {
     return ec ? std::filesystem::path{} : dir;
 }
 
-std::string utf8_of(const std::filesystem::path& path) {
-    const std::wstring& wide = path.native();
+std::string utf8_of(const std::wstring& wide) {
     const int n = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr);
     if (n <= 0) return {};
     std::string utf8(static_cast<size_t>(n), '\0');
@@ -512,7 +511,7 @@ uint64_t folder_bytes(const std::filesystem::path& dir) {
 HRESULT STDMETHODCALLTYPE pls_get_path_size(void*, size_t* path_size) {
     if (!path_size) return E_POINTER;
     *path_size = 0;
-    const std::string path = utf8_of(persistent_storage_dir());
+    const std::string path = utf8_of(persistent_storage_dir().native());
     if (path.empty()) return HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
     *path_size = path.size() + 1;  // with the terminating NUL
     return S_OK;
@@ -521,7 +520,7 @@ HRESULT STDMETHODCALLTYPE pls_get_path_size(void*, size_t* path_size) {
 HRESULT STDMETHODCALLTYPE pls_get_path(void*, size_t path_size, char* path, size_t* path_used) {
     if (path_used) *path_used = 0;
     if (!path) return E_POINTER;
-    const std::string folder = utf8_of(persistent_storage_dir());
+    const std::string folder = utf8_of(persistent_storage_dir().native());
     if (folder.empty()) return HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
     if (path_size < folder.size() + 1) return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
     std::memcpy(path, folder.c_str(), folder.size() + 1);
@@ -867,8 +866,7 @@ static std::unordered_map<uint64_t, std::string> s_active_mounts;
 // Resolves the installation path for a specific content package identifier.
 // GDK specifies that XPackageMount is only for content packages; mounting the main game returns E_ACCESSDENIED.
 // Returns HRESULT_FROM_WIN32(ERROR_NOT_FOUND) if the package identifier is not installed.
-static HRESULT resolve_package_path(const char* packageIdentifier, char* out, size_t out_cap) {
-    if (!packageIdentifier || !out || out_cap == 0) return E_INVALIDARG;
+static std::string resolve_package_path(const char* packageIdentifier, HRESULT& result) {
 
     // Check against configured process/game package identifier; mounting the game itself is denied
     char game_id[XPACKAGE_IDENTIFIER_MAX_LENGTH] = {};
@@ -876,14 +874,25 @@ static HRESULT resolve_package_path(const char* packageIdentifier, char* out, si
     const char* process_id = (n > 0 && n < sizeof(game_id)) ? game_id : kDefaultPackageIdentifier;
 
     if (std::strcmp(packageIdentifier, process_id) == 0) {
-        return E_ACCESSDENIED;
+        result = E_ACCESSDENIED;
+        return {};
     }
 
     // Check optional installed content packages mapping: "id1=path1;id2=path2"
-    char mapping[1024] = {};
-    const DWORD map_len = GetEnvironmentVariableA("LEONIDA_CONTENT_PACKAGES", mapping, sizeof(mapping));
-    if (map_len > 0 && map_len < sizeof(mapping)) {
-        char* token = mapping;
+    DWORD capacity = GetEnvironmentVariableW(L"LEONIDA_CONTENT_PACKAGES", nullptr, 0);
+    std::wstring wide_mapping;
+    DWORD map_len = 0;
+    while (capacity > 0) {
+        wide_mapping.resize(capacity);
+        map_len = GetEnvironmentVariableW(L"LEONIDA_CONTENT_PACKAGES", wide_mapping.data(), capacity);
+        if (map_len < capacity) break;
+        capacity = map_len;
+    }
+    if (map_len > 0 && map_len < capacity) {
+        // The GDK returns UTF-8 bytes even when Windows uses a legacy ANSI code page.
+        wide_mapping.resize(map_len);
+        std::string mapping = utf8_of(wide_mapping);
+        char* token = mapping.data();
         while (token && *token) {
             char* sep = std::strchr(token, ';');
             if (sep) *sep = '\0';
@@ -891,18 +900,16 @@ static HRESULT resolve_package_path(const char* packageIdentifier, char* out, si
             if (eq) {
                 *eq = '\0';
                 if (std::strcmp(token, packageIdentifier) == 0) {
-                    const char* val = eq + 1;
-                    const size_t vlen = std::strlen(val);
-                    if (vlen + 1 > out_cap) return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
-                    std::memcpy(out, val, vlen + 1);
-                    return S_OK;
+                    result = S_OK;
+                    return eq + 1;
                 }
             }
             token = sep ? sep + 1 : nullptr;
         }
     }
 
-    return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+    result = HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+    return {};
 }
 
 // HRESULT XPackageMount(const char* packageIdentifier, XPackageMountHandle* mount)
@@ -912,14 +919,14 @@ HRESULT __stdcall XPackageMount(const char* packageIdentifier, XPackageMountHand
     if (!packageIdentifier || !mount) return E_INVALIDARG;
     mount->handle = 0;
 
-    char buf[MAX_PATH] = {};
-    const HRESULT hr = resolve_package_path(packageIdentifier, buf, sizeof(buf));
+    HRESULT hr;
+    const std::string path = resolve_package_path(packageIdentifier, hr);
     if (FAILED(hr)) return hr;
 
     const uint64_t id = s_next_mount_id.fetch_add(1);
     {
         std::lock_guard lock(s_mount_mutex);
-        s_active_mounts[id] = buf;
+        s_active_mounts[id] = path;
     }
     mount->handle = id;
     return S_OK;
@@ -1005,8 +1012,6 @@ HRESULT STDMETHODCALLTYPE pkg_identifier(void*, size_t size, char* buffer) {
     return XPackageGetCurrentProcessPackageIdentifier(size, buffer);
 }
 bool STDMETHODCALLTYPE pkg_is_packaged(void*) { return XPackageIsPackagedProcess(); }
-// The locales the package declares: <Resources><Resource Language="xx-YY"/> in MicrosoftGame.Config, read from
-// the game folder (LEONIDA_GAME_DIR, else --game-dir). Empty when there is no config or it declares none.
 // The package's MicrosoftGame.Config as text, from the game folder (LEONIDA_GAME_DIR, else --game-dir); empty when
 // there is no folder or no config. Wide on purpose: a game folder named outside the ANSI code page must reach the file
 // intact.
@@ -1020,19 +1025,47 @@ std::string package_config() {
     return std::string{std::istreambuf_iterator<char>(f), {}};
 }
 
+// The locales the package declares: <Resources><Resource Language="xx-YY"/> in MicrosoftGame.Config, read from
+// the game folder (LEONIDA_GAME_DIR, else --game-dir). Empty when there is no config or it declares none.
+// A <Resource> inside an XML comment is not declared (Microsoft's config template ships commented-out entries), XML
+// allows whitespace around an attribute's '=', and only an attribute named exactly Language on an element named
+// exactly Resource counts.
 std::vector<std::string> package_locales() {
     std::vector<std::string> out;
-    const std::string xml = package_config();
-    if (xml.empty()) return out;
+    const std::string raw = package_config();
+    if (raw.empty()) return out;
+    std::string xml;   // the config without its comments; an unterminated comment runs to the end of the file
+    xml.reserve(raw.size());
+    for (size_t at = 0; at < raw.size();) {
+        const size_t open = raw.find("<!--", at);
+        xml.append(raw, at, open == std::string::npos ? std::string::npos : open - at);
+        if (open == std::string::npos) break;
+        const size_t close = raw.find("-->", open + 4);
+        if (close == std::string::npos) break;
+        at = close + 3;
+    }
+    const auto space = [](char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
+    const auto skip_space = [&](size_t p) {
+        while (p < xml.size() && space(xml[p])) ++p;
+        return p;
+    };
     for (size_t at = 0; (at = xml.find("<Resource", at)) != std::string::npos; ++at) {
-        if (xml.compare(at, 10, "<Resources") == 0) continue;
-        const size_t end = xml.find('>', at);
-        const size_t key = xml.find("Language=", at);
-        if (end == std::string::npos || key == std::string::npos || key + 10 > end) continue;
-        const char quote = xml[key + 9];
-        const size_t close = xml.find(quote, key + 10);
-        if ((quote == '"' || quote == '\'') && close != std::string::npos && close < end)
-            out.push_back(xml.substr(key + 10, close - key - 10));
+        size_t p = at + 9;
+        if (p < xml.size() && !space(xml[p]) && xml[p] != '/' && xml[p] != '>') continue;   // <Resources>, ...
+        // The attributes, name = "value" or name = 'value', up to the tag's end; a malformed one ends the tag.
+        for (p = skip_space(p); p < xml.size() && xml[p] != '>' && xml[p] != '/'; p = skip_space(p)) {
+            const size_t name = p;
+            while (p < xml.size() && !space(xml[p]) && xml[p] != '=' && xml[p] != '>' && xml[p] != '/') ++p;
+            const size_t name_end = p;
+            p = skip_space(p);
+            if (p >= xml.size() || xml[p] != '=') break;
+            p = skip_space(p + 1);
+            if (p >= xml.size() || (xml[p] != '"' && xml[p] != '\'')) break;
+            const size_t close = xml.find(xml[p], p + 1);
+            if (close == std::string::npos) break;
+            if (xml.compare(name, name_end - name, "Language") == 0) out.push_back(xml.substr(p + 1, close - p - 1));
+            p = close + 1;
+        }
     }
     return out;
 }
@@ -1044,7 +1077,10 @@ std::vector<std::string> package_locales() {
 HRESULT STDMETHODCALLTYPE pkg_user_locale(void*, size_t size, char* locale) {
     if (!locale || !size) return E_INVALIDARG;
     const std::vector<std::string> declared = package_locales();
-    if (declared.empty()) return S_OK;
+    if (declared.empty()) {
+        locale[0] = '\0';
+        return S_OK;
+    }
     wchar_t wide[LOCALE_NAME_MAX_LENGTH] = {};
     char user[LOCALE_NAME_MAX_LENGTH * 4] = "";
     if (GetUserDefaultLocaleName(wide, LOCALE_NAME_MAX_LENGTH) > 0)

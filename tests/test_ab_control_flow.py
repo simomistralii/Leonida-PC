@@ -324,6 +324,40 @@ class CandidateSelectionTest(unittest.TestCase):
         self.assertEqual(AB.supported_pixel_shaders(index), ["valid"])
         self.assertEqual(AB.select_candidates(index, self.disasm, self.spirv, count=10), ["valid"])
 
+    def test_valid_metadata_and_supported_pixel_shaders_reject_malformed_and_bool_entries(self):
+        self.assertFalse(AB.valid_metadata({"stage": "ps", "bindings": [True], "features": []}))
+        self.assertFalse(AB.valid_metadata({"stage": "ps", "bindings": [False], "features": []}))
+        self.assertFalse(AB.valid_metadata({"stage": "ps", "bindings": [], "features": [True]}))
+        self.assertTrue(AB.valid_metadata({"stage": "ps", "bindings": [0, 1], "features": ["shaderInt64"]}))
+
+        index = {
+            "valid": self.shader(bindings=[0, 1]),
+            "bool_binding": {"stage": "ps", "bindings": [True], "features": []},
+            "bool_feature": {"stage": "ps", "bindings": [], "features": [False]},
+            "non_dict": "not-an-object",
+            "non_list_bindings": {"stage": "ps", "bindings": 0, "features": []},
+            "unhashable_binding": {"stage": "ps", "bindings": [[0]], "features": []},
+            "unhashable_feature": {"stage": "ps", "bindings": [], "features": [{"k": "v"}]},
+        }
+        for name in index:
+            self.add_shader(name, "\ts_cbranch_scc0 12\n\ts_branch 24\n")
+        self.assertEqual(AB.supported_pixel_shaders(index), ["valid"])
+        self.assertEqual(AB.select_candidates(index, self.disasm, self.spirv, count=10), ["valid"])
+
+    def test_main_reports_recursion_error_when_loading_index(self):
+        import json
+        shaders = os.path.join(self.tmp.name, "shaders_rec")
+        os.makedirs(os.path.join(shaders, "spirv"), exist_ok=True)
+        with open(os.path.join(shaders, "spirv", "index.json"), "w", encoding="utf-8", newline="\n") as f:
+            f.write("{}")
+        stderr = io.StringIO()
+        with patch.object(json, "load", side_effect=RecursionError("maximum recursion depth exceeded")), \
+             contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as cm:
+                AB.main([ROOT, shaders, os.path.join(self.tmp.name, "out_rec")])
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("cannot read", stderr.getvalue())
+
     def test_backward_branch_detection_and_loops_filter(self):
         self.assertFalse(AB.is_backward_branch("\ts_cbranch_scc0 12\n\ts_branch 40\n"))
         self.assertTrue(AB.is_backward_branch("\ts_cbranch_scc0 32768\n\ts_branch 40\n"))

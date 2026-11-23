@@ -15,8 +15,9 @@
 //   XGameStreamingImpl  the game is never streamed: initialising succeeds, IsStreaming is false, there are no
 //                       clients, the connection-state registration hands out a token that never fires.
 //   XDisplayImpl        XDisplayTryEnableHdrMode: Disabled (the host output is SDR), Enabled with LEONIDA_HDR=1.
-//   XUserDeviceImpl     every device belongs to the offline user; associations and audio endpoints never change; the
-//                       user has no audio endpoint of its own; finding a controller shows no UI (as on desktop).
+//   XUserDeviceImpl     every device belongs to the offline user; associations and audio endpoints never change, so
+//                       their change registrations are kept until unregistered and never called back; the user has
+//                       no audio endpoint of its own; finding a controller shows no UI (as on desktop).
 //   XAccessibilityImpl  high contrast is Off, closed captions can't be configured, no voice is installed (enumerating
 //                       calls back zero times), XSpeechSynthesizerCreate fails (E_FAIL) with a null handle, the other
 //                       speech calls refuse the handle they were never given (E_INVALIDARG), speech-to-text display
@@ -34,6 +35,7 @@
 #include <cstring>
 #include <iterator>
 #include <mutex>
+#include <vector>
 
 #include <XAsync.h>
 #include <XAsyncProvider.h>
@@ -455,18 +457,74 @@ HRESULT STDMETHODCALLTYPE device_find_user(void*, const APP_LOCAL_DEVICE_ID* dev
 
 // 4: HRESULT XUserRegisterForDeviceAssociationChanged(XTaskQueueHandle queue, void* context,
 //        XUserDeviceAssociationChangedCallback* callback, XTaskQueueRegistrationToken* token)
-// 7: HRESULT XUserRegisterForDefaultAudioEndpointUtf16Changed(XTaskQueueHandle, void*, callback, token*)
-// Associations and endpoints never change offline: a token, no callback.
-HRESULT STDMETHODCALLTYPE device_register(void*, XTaskQueueHandle, void*, void* callback,
+// 5: bool XUserUnregisterForDeviceAssociationChanged(XTaskQueueRegistrationToken token, bool wait)
+// 7: HRESULT XUserRegisterForDefaultAudioEndpointUtf16Changed(XTaskQueueHandle queue, void* context,
+//        XUserDefaultAudioEndpointUtf16ChangedCallback* callback, XTaskQueueRegistrationToken* token)
+// 8: bool XUserUnregisterForDefaultAudioEndpointUtf16Changed(XTaskQueueRegistrationToken token, bool wait)
+//
+// Each registration is kept (its kind, a duplicate of its queue, its context and callback) under a token unique
+// across both kinds and never 0, until the title unregisters it with the matching function. Offline, the device
+// association and the default audio endpoint never change, so no event is ever raised: no callback is queued or
+// run, and nothing here calls one. Unregistering therefore never has to wait, whatever `wait` says, and removes the
+// registration at once. It returns true for every token, as XUserUnregisterForChangeEvent does: a token already
+// unregistered, never handed out or of the other kind is left alone (a title polling with wait = false would spin
+// on false). queue and context are _In_opt_; a null queue stays null (the process queue, if an event ever came);
+// callback and token are required (E_INVALIDARG).
+//
+// The state is namespace-scope and the lock a constinit SRW lock, not function-local statics: these calls run on
+// the title's threads.
+enum class DeviceEvent : uint32_t { Association = 0, AudioEndpoint = 1 };
+
+struct DeviceRegistration {
+    uint64_t token;
+    DeviceEvent kind;
+    XTaskQueueHandle queue;   // our duplicate, closed on unregister; null for the process queue
+    void* context;
+    void* callback;
+};
+
+constinit SRWLOCK g_device_lock = SRWLOCK_INIT;
+std::vector<DeviceRegistration> g_device_registrations;   // guarded by g_device_lock
+constinit uint64_t g_device_next_token = 1;               // guarded by g_device_lock
+
+template <DeviceEvent Kind>
+HRESULT STDMETHODCALLTYPE device_register(void*, XTaskQueueHandle queue, void* context, void* callback,
                                           XTaskQueueRegistrationToken* token) {
     if (!callback || !token) return E_INVALIDARG;
-    std::lock_guard<std::mutex> lock(g_streaming_mutex);
-    token->token = g_next_token++;
+    XTaskQueueHandle kept = nullptr;
+    if (queue) {
+        const HRESULT hr = XTaskQueueDuplicateHandle(queue, &kept);
+        if (FAILED(hr)) return hr;
+    }
+    uint64_t issued = 0;
+    AcquireSRWLockExclusive(&g_device_lock);
+    try {
+        g_device_registrations.push_back({g_device_next_token, Kind, kept, context, callback});
+        issued = g_device_next_token++;
+    } catch (...) {   // out of memory: no exception reaches the title
+    }
+    ReleaseSRWLockExclusive(&g_device_lock);
+    if (!issued) {
+        if (kept) XTaskQueueCloseHandle(kept);
+        return E_OUTOFMEMORY;
+    }
+    token->token = issued;
     return S_OK;
 }
 
-// 5, 8: bool ...Unregister...(XTaskQueueRegistrationToken token, bool wait): never pending.
-bool STDMETHODCALLTYPE device_unregister(void*, XTaskQueueRegistrationToken, bool) { return true; }
+template <DeviceEvent Kind> bool STDMETHODCALLTYPE device_unregister(void*, XTaskQueueRegistrationToken token, bool) {
+    XTaskQueueHandle queue = nullptr;
+    AcquireSRWLockExclusive(&g_device_lock);
+    for (auto it = g_device_registrations.begin(); it != g_device_registrations.end(); ++it)
+        if (it->token == token.token && it->kind == Kind) {
+            queue = it->queue;
+            g_device_registrations.erase(it);
+            break;
+        }
+    ReleaseSRWLockExclusive(&g_device_lock);
+    if (queue) XTaskQueueCloseHandle(queue);
+    return true;
+}
 
 // 6: HRESULT XUserGetDefaultAudioEndpointUtf16(XUserLocalId user, XUserDefaultAudioEndpointKind kind,
 //        size_t endpointIdUtf16Count, wchar_t* endpointIdUtf16, size_t* endpointIdUtf16Used)
@@ -512,11 +570,11 @@ HRESULT STDMETHODCALLTYPE device_query_interface(void*, REFIID iid, void** out);
 const void* const kUserDeviceVtable[] = {
     FN(device_query_interface), FN(object_add_ref), FN(object_release),   // 0-2 IUnknown
     FN(device_find_user),                   // 3  XUserFindForDevice
-    FN(device_register),                    // 4  XUserRegisterForDeviceAssociationChanged
-    FN(device_unregister),                  // 5  XUserUnregisterForDeviceAssociationChanged
-    FN(device_audio_endpoint),              // 6  XUserGetDefaultAudioEndpointUtf16
-    FN(device_register),                    // 7  XUserRegisterForDefaultAudioEndpointUtf16Changed
-    FN(device_unregister),                  // 8  XUserUnregisterForDefaultAudioEndpointUtf16Changed
+    FN(device_register<DeviceEvent::Association>),     // 4  XUserRegisterForDeviceAssociationChanged
+    FN(device_unregister<DeviceEvent::Association>),   // 5  XUserUnregisterForDeviceAssociationChanged
+    FN(device_audio_endpoint),                         // 6  XUserGetDefaultAudioEndpointUtf16
+    FN(device_register<DeviceEvent::AudioEndpoint>),   // 7  XUserRegisterForDefaultAudioEndpointUtf16Changed
+    FN(device_unregister<DeviceEvent::AudioEndpoint>), // 8  XUserUnregisterForDefaultAudioEndpointUtf16Changed
     FN(device_find_controller_async),       // 9  XUserFindControllerForUserWithUiAsync
     FN(device_find_controller_result),      // 10 XUserFindControllerForUserWithUiResult
 };
@@ -684,5 +742,16 @@ bool xgameruntime_offline_query(const GUID& class_id, REFIID interface_id, void*
 
 // For tests: how many game events were written.
 long xgameruntime_offline_game_events() { return g_events.load(); }
+
+// For tests: how many XUserDeviceImpl registrations of one kind (0 device association, 1 default audio endpoint)
+// are kept.
+long xgameruntime_offline_device_registrations(uint32_t kind) {
+    long n = 0;
+    AcquireSRWLockShared(&g_device_lock);
+    for (const auto& registration : g_device_registrations)
+        if (static_cast<uint32_t>(registration.kind) == kind) ++n;
+    ReleaseSRWLockShared(&g_device_lock);
+    return n;
+}
 
 }  // namespace rt::shims

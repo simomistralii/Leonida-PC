@@ -34,10 +34,15 @@ import mmap
 import os
 import re
 import shutil
+import stat
 import struct
 import subprocess
 import sys
 import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from file_mode import published_mode  # noqa: E402
+from replace_retry import replace as replace_retry  # noqa: E402
 
 SIG = re.compile(rb"KB2[a-z]")
 HDR = 0x2C
@@ -296,21 +301,60 @@ def _flat(row, fields):
     return out
 
 
+def _publish_text(path, write_body, *, newline, prefix):
+    """Publish a complete regular file via a temp sibling, or write a non-regular destination directly."""
+    destination = os.path.realpath(path)
+    parent = os.path.dirname(destination) or "."
+    try:
+        mode = os.stat(destination).st_mode
+    except FileNotFoundError:
+        mode = None
+    if mode is not None and not stat.S_ISREG(mode):
+        with open(path, "w", encoding="utf-8", newline=newline) as fh:
+            write_body(fh)
+        return
+    if mode is not None:
+        # Retain the direct writer's permission check without truncating the report.
+        os.close(os.open(destination, os.O_WRONLY))
+
+    staged = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", newline=newline, delete=False,
+        dir=parent, prefix=prefix, suffix=".tmp",
+    )
+    try:
+        with staged:
+            write_body(staged)
+        if os.name != "nt":
+            os.chmod(staged.name, published_mode(destination))
+        replace_retry(staged.name, destination)
+    finally:
+        try:
+            os.unlink(staged.name)
+        except FileNotFoundError:
+            pass
+
+
 def write_csv(path, rows, probe):
     fields = BASE_FIELDS + (PROBE_FIELDS if probe else [])
-    with open(path, "w", encoding="utf-8", newline="") as fh:
+
+    def write_body(fh):
         writer = csv.DictWriter(fh, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
         for row in rows:
             writer.writerow(_flat(row, fields))
 
+    _publish_text(path, write_body, newline="", prefix=".bink_index-")
+
 
 def write_json(path, target, rows, summary, probe):
     fields = BASE_FIELDS + (PROBE_FIELDS if probe else [])
     streams = [_flat(row, fields) for row in rows]
-    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+
+    def write_body(fh):
         json.dump({"target": target, "summary": summary, "streams": streams},
                   fh, indent=1)
+
+    _publish_text(path, write_body, newline="\n", prefix=".bink_index-")
 
 
 def is_rpf_archive(path):

@@ -55,7 +55,9 @@ if SEM_DIR not in sys.path:
 
 import cf_ref  # noqa: E402
 import cpu_ref  # noqa: E402
-import rdna2spirv  # noqa: E402
+# The translator is imported where it is used (run_case), not here: rdna2spirv.py takes seconds to compile, and
+# with dont_write_bytecode the compiled code is never cached, so --help and a usage error would wait for it on
+# every run.
 from spirv_wave_interp import UnsupportedConstruct, run_wave  # noqa: E402
 
 STUB_DXBC = b"DXBC" + bytes(24) + struct.pack("<I", 0) + bytes(4)
@@ -434,6 +436,7 @@ def build(body, wave):
 
 def run_case(name, body, wave, structured=True):
     """Returns (status, detail): status in {"match", "mismatch", "skip"}."""
+    import rdna2spirv  # here, not at the top of the file: see the note above the imports
     lines = build(body, wave)
     text = listing_text(lines, name)
     with tempfile.TemporaryDirectory(prefix="cf-diff-") as tmp:

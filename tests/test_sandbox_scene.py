@@ -161,6 +161,18 @@ class TestCliErrors(unittest.TestCase):
         self.assertEqual(len(err.strip().splitlines()), 1)
         self.assertTrue(err.startswith("ERROR:"))
 
+    def test_nonfinite_or_overflowing_center_is_usage_error(self):
+        for x, y in (("nan", "0"), ("inf", "0"), ("0", "-inf"), ("1e40", "0"), ("0", "-1e40")):
+            with self.subTest(center=(x, y)):
+                out = os.path.join(self.tmp.name, f"bad_{x}_{y}.bin")
+                err = io.StringIO()
+                with redirect_stderr(err), self.assertRaises(SystemExit) as cm:
+                    sandbox_scene.main(["--entities", self.entities, "--models", self.models,
+                                        "--center", x, y, "--out", out])
+                self.assertEqual(cm.exception.code, 2)
+                self.assertIn("--center", err.getvalue())
+                self.assertFalse(os.path.exists(out))
+
     def test_writable_out_still_builds(self):
         out = os.path.join(self.tmp.name, "o.bin")
         err = io.StringIO()

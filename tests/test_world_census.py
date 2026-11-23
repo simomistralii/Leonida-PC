@@ -680,6 +680,17 @@ class ShardFileTest(unittest.TestCase):
                     with open(path0, "w", encoding="utf-8") as f:
                         json.dump(doc, f)
                     self.assertEqual(WC._read_shard(tmp, want[0], source_id), doc if valid else None)
+            row = {"offset": 64, "stored": 10, "entities": 3, "sha1": "ab"}
+            for rows, valid in (([row], True), ([{**row, "entities": None}], False),
+                                ([{**row, "entities": True}], False), ([{**row, "offset": False}], False),
+                                ([{**row, "stored": "10"}], False), ([{k: v for k, v in row.items() if k != "sha1"}], False),
+                                ([True], False), ([None], False), (["row"], False), ([[]], False),
+                                ([row, 5], False)):
+                with self.subTest(rows=rows):
+                    doc = {**good, "rows": rows}
+                    with open(path0, "w", encoding="utf-8") as f:
+                        json.dump(doc, f)
+                    self.assertEqual(WC._read_shard(tmp, want[0], source_id), doc if valid else None)
             with open(path0, "w", encoding="utf-8") as f:
                 f.write("{")
             self.assertIsNone(WC._read_shard(tmp, want[0], source_id))

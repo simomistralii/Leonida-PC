@@ -52,6 +52,11 @@ argument is null (explicit unload). A map-only load receives no detach notificat
 `--dry-run`, `--init` and `--run` are separate modes: give exactly one. Two together (`--dry-run --run`)
 print the usage and exit 2 before anything is mapped.
 
+`--init` and `--run` first check that the host can run the game's AVX code (CPUID.1 AVX and OSXSAVE, XCR0 YMM
+state; `src/host_cpu.h`). Without it they print one line naming what is missing and exit 4 before anything is
+mapped. In a virtual machine, pass the host CPU through (QEMU `-cpu host`); under Rosetta on macOS, set
+`ROSETTA_ADVERTISE_AVX=1`. `LEONIDA_SKIP_CPU_CHECK=1` skips the check; `--dry-run` never runs it.
+
 The report line is:
 
 ```
@@ -96,6 +101,28 @@ The thunk keeps the Win64 argument registers and the return address intact (it i
 reaches a shared stub that saves them, so a floating-point caller still reads 0.0 from xmm0 and a debugger can unwind
 through it.
 
+### Compat modules: `LEONIDA_COMPAT_DIR`
+
+Opt-in. When `LEONIDA_COMPAT_DIR` names a folder, an import whose DLL is a file in that folder (matched by file name,
+any case) is served by that DLL: Windows loads it from the full path with `LoadLibraryExW`
+(`LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32`, never the game folder), so its CRT, TLS and SEH
+work as for any host DLL and it takes no slot of the mapper's static TLS. This step comes before the shims, the
+bundled package DLLs and the host, and the DLL owns all of its module's imports: a symbol it does not export binds to
+the unimplemented thunk, not to a shim, so one console DLL is never served by two implementations that do not share
+state. The binding is reported as `host`, and `[rt] compat: <dll> -> <path>` is printed once per DLL. A file in the
+folder that Windows refuses to load stops the run with the error code. Unset or empty: no change. The DLLs stay
+loaded for the process lifetime. Only static imports go through this step; a run-time `LoadLibrary` of the same name
+does not yet.
+
+It exists for drop-in implementations of console DLLs that have no shim here, such as the `AcpHal`, `chad`, `xapu`
+and `XCRDAPI` crates of [omonkeyz/xbox-emulator](https://github.com/omonkeyz/xbox-emulator) (GPL-3.0-or-later).
+Measured on the 1.0.2.1 executable at `867d922`: without the folder, `--dry-run` leaves 20 imports unimplemented
+(AcpHal 9, chad 5, xapu 5, XCRDAPI 1); with those four DLLs built from `f89e410`, it leaves 0, with the four
+package DLLs still mapped (`module=72`). Those DLLs run static initializers when Windows loads them, and with the
+defaults one of them hooks the process: the package DLLs mapped after it then fail to map. With
+`TOMBOX_GDK_EARLY=0 TOMBOX_GDK_RUNTIME=0 TOMBOX_OSHOST=0 TOMBOX_PAD=0 TOMBOX_TIMER_1MS=0` they map; their network
+guard stays on and denies all traffic. `loader_test` covers the step with a synthetic DLL (no game data).
+
 ## PE loader
 
 `src/pe_loader.cpp` maps x86-64 images at their preferred base, or elsewhere (with relocations) when
@@ -136,11 +163,15 @@ clone of the helper from `%TEMP%\leonida_tls_host_<pid>_<slot>.dll`, so up to 16
 once and a further one is rejected with an error instead of sharing a slot. Images without a TLS
 directory (or with an all-zero one) load normally.
 
-An EXE built with `/GA` reads its TLS as `ThreadLocalStoragePointer[0]` directly, without `_tls_index`, because the
-process EXE always owns index 0. Mapped into `gta6rt`, index 0 is `gta6rt.exe`'s, so `load()` rewrites every
-`mov r64, gs:[58h]` in such an EXE's executable sections to read a `TlsAlloc` slot instead (`TEB->TlsSlots`, same
-instruction length). Each thread's value there is a small view with the image's TLS block at `[0]` and at its own
-index. DLLs and images whose index is already 0 are left alone. `LEONIDA_TLS_GA_PATCH=0` turns the rewrite off.
+A `/GA` executable's code reaches its static TLS directly at index 0 (`mov r64, gs:[58h]`), but the
+loader can only get that image an index from the OS, and it need not be 0. Before the image's sections
+are protected and before any of its code runs, TLS callbacks included, the loader rewrites each such
+slot-0 read in an executable section to the same instruction reading `TEB->TlsSlots[slot]` instead
+(`patch_ga_tls_reads`), with one `TlsAlloc` slot per image; the rewrite is the same length, so nothing
+else in the image moves. It applies only to an EXE whose own TLS index is not 0 and that has a TLS
+directory; the loader's log names the image, the number of rewritten reads and the slot. Set
+`LEONIDA_TLS_GA_PATCH=0` to turn the rewrite off, for measuring what the image does without it; any other
+value, or leaving it unset, keeps it on.
 
 Current limits, by design:
 
@@ -281,6 +312,52 @@ readings, plays each motor and trigger, and holds a constant force on a pad that
 16-byte aligned at the call into the runtime, that rbx/rbp/rdi/rsi/r12-r15 and xmm6-xmm15 survive a call
 (`test/fixtures/abi_probe.asm`, MASM; skipped without `ml64`), and that `RtlVirtualUnwind` from inside the call walks
 back to the caller.
+
+### PE-loader fuzzer: `pe_loader_fuzz`
+
+`pe_loader_fuzz` (RT-388) is a deterministic mutation fuzzer for `Loader::load`. Each case builds three small
+synthetic DLLs in the test itself (headers and four sections, base relocations, import and delay-import tables, exports
+with forwarders and ordinal-only entries, a TLS directory with template, index and callbacks, and an exception
+directory with `UNWIND_INFO`), mutates their fields and bytes, writes them to a scratch folder and loads the first one.
+A case passes when `load()` returns or throws a `std::exception`, the `Loader` is destroyed again, and after a
+successful load every export and unwind table lies inside its image. It fails on a crash, an AddressSanitizer report,
+a non-`std::exception` throw, or a case that runs past `--timeout-ms` (30 s). No image code runs (it never calls
+`initialise()`), and nothing is read from the game.
+
+CTest runs the first 120 cases of the fixed seed. Case `N` of a seed is the same everywhere, so a failure reproduces
+with `--case N` and shrinks with `--minimize N`, which retries in child processes with each mutation left out and
+prints the ones the failure needs. `--dump N DIR` writes the case's images for a closer look. A process memory limit
+(`--mem-mb`, 1024 by default) turns a mutated size of several gigabytes into a failed allocation. On a machine
+with many threads, most of each case is the loader's snapshot of every thread in the system for a TLS module
+(`install_on_existing_threads`); expect a few cases per second.
+
+```powershell
+pe_loader_fuzz --iters 20000                 # or --seconds 3600; LEONIDA_LOADER_FUZZ_ITERS/_SECONDS/_SEED
+pe_loader_fuzz --seed 0x4C454F4E49444131 --case 1234 --verbose
+pe_loader_fuzz --minimize 1234
+pe_loader_fuzz --start 10000000 --seconds 3600   # a second process on another range of cases
+```
+
+For AddressSanitizer, configure a separate build with `-DLEONIDA_LOADER_FUZZ_ASAN=ON` and `RelWithDebInfo`
+(`/fsanitize=address` does not combine with Debug's `/RTC1`). That instruments the fuzzer and the loader sources
+compiled into it, and copies `clang_rt.asan_dynamic-x86_64.dll` beside the test. MSVC needs the Visual Studio
+component "C++ AddressSanitizer". clang-cl from an official LLVM release works with the MSVC headers and libraries
+(LLVM 23.1.5 with MSVC 14.44 was tested). Run it from an x64 Developer prompt:
+
+```powershell
+cmake -S runtime -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DLEONIDA_LOADER_FUZZ_ASAN=ON `
+  -DCMAKE_C_COMPILER=<llvm>/bin/clang-cl.exe -DCMAKE_CXX_COMPILER=<llvm>/bin/clang-cl.exe `
+  -DCMAKE_LINKER=<llvm>/bin/lld-link.exe -DCMAKE_AR=<llvm>/bin/llvm-lib.exe -DCMAKE_RC_COMPILER=<llvm>/bin/llvm-rc.exe `
+  -DCMAKE_MT=<llvm>/bin/llvm-mt.exe
+cmake --build build-asan --target pe_loader_fuzz
+build-asan/pe_loader_fuzz --seconds 3600
+```
+
+With clang-cl the target is built with `-fsanitize-address-use-after-return=never`: clang-cl 23's
+stack-use-after-return frames make MSVC C++ exception dispatch fault in `_C_specific_handler_noexcept` at `/O2`, and
+every rejected image is a thrown exception. STL container annotations are off (`_DISABLE_STRING_ANNOTATION`,
+`_DISABLE_VECTOR_ANNOTATION`), because they need the component's `stl_asan.lib` and the libraries linked in are
+built without ASan.
 
 The PE-loader and Bink-decode tests that need the retail package are optional: when
 `LEONIDA_GAME_DIR` (and, for Bink, `LEONIDA_MOVIE`) is unset they print `SKIP` and exit 0. They read
@@ -539,7 +616,13 @@ python -I scripts/run_guest_scene.py --loader path/to/gta6rt.exe --guest path/to
     --shaders path/to/m15_shaders --out new-scene-run --negative-controls
 ```
 
-For Wine, add `--wine path/to/wine`. The runner launches the mapped guest for an
+For Wine, add `--wine path/to/wine`. With a Linux cross-build, CTest also registers
+`d3d12_guest_scene` when CMake finds the shader tools and has a Wine command in
+`CMAKE_CROSSCOMPILING_EMULATOR`. Build the `tiny_guest_draw` target, then run
+`ctest --test-dir <build> -R '^d3d12_guest_scene$' --output-on-failure`.
+On a headless host, prefix that CTest command with `xvfb-run -a` so the scene runner
+keeps guest stdout and stderr separate while checking the frame-count marker.
+The runner launches the mapped guest for an
 uninterrupted 600-frame run, a 300-frame save, and a fresh process that restores the
 checkpoint. This opt-in build links a fixture input source into the loader. Scripted keyboard changes feed the SDL virtual pad. GameInput readings
 drive the position of one quad. The guest streams ten 16-byte synthetic palette pages from

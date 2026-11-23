@@ -235,7 +235,7 @@ class StoreHelperUnsupported(unittest.TestCase):
             return suite_rc, output.getvalue()
 
     def test_unsupported_is_a_skip_with_its_reason(self):
-        for shader in ("cs_imgstore", "cs_imgload", "cs_imgload_d16"):
+        for shader in ("cs_imgstore", "cs_imgload", "cs_imgload_tfe", "cs_imgload_d16", "cs_imgload_d16_tfe"):
             with self.subTest(shader=shader):
                 rc, out = self.run_store(shader, 77, "unsupported: shaderStorageImageWriteWithoutFormat=0\ndevice: X")
                 self.assertEqual(rc, 0, out)

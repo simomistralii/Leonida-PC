@@ -1,7 +1,7 @@
 #include <windows.h>
 
 #include <cstdio>
-#include <cstdlib>
+#include <cwchar>
 #include <filesystem>
 #include <string>
 
@@ -60,47 +60,50 @@ void PrintUsage() {
 
 // Parses argv into options. Returns false on any malformed argument; the caller prints
 // usage, so this function prints only the reason.
-bool ParseCommandLine(int argument_count, char** arguments, CommandLineOptions& options) {
+bool ParseCommandLine(int argument_count, wchar_t** arguments, CommandLineOptions& options) {
     for (int index = 1; index < argument_count; ++index) {
-        const std::string argument = arguments[index];
-        if (argument == "--help" || argument == "-h") {
+        const std::wstring argument = arguments[index];
+        if (argument == L"--help" || argument == L"-h") {
             options.show_help = true;
             continue;
         }
-        if (argument == "--debug-layer") {
+        if (argument == L"--debug-layer") {
             options.enable_debug_layer = true;
             continue;
         }
-        if (argument == "--adapter" || argument == "--shaders") {
+        if (argument == L"--adapter" || argument == L"--shaders") {
             if (index + 1 >= argument_count) {
                 ReportFailure(__FILE__, __LINE__, "ParseCommandLine",
-                              argument + " needs a value", "see --help for the argument list");
+                              TextFromWide(argument) + " needs a value",
+                              "see --help for the argument list");
                 return false;
             }
-            const std::string value = arguments[++index];
-            if (argument == "--shaders") {
+            const std::wstring value = arguments[++index];
+            if (argument == L"--shaders") {
                 options.shader_directory = std::filesystem::path(value);
                 continue;
             }
-            char* end_of_number = nullptr;
-            const long parsed = std::strtol(value.c_str(), &end_of_number, 10);
-            if (end_of_number == value.c_str() || *end_of_number != '\0' || parsed < 0) {
+            wchar_t* end_of_number = nullptr;
+            const long parsed = std::wcstol(value.c_str(), &end_of_number, 10);
+            if (end_of_number == value.c_str() || *end_of_number != L'\0' || parsed < 0) {
                 ReportFailure(__FILE__, __LINE__, "ParseCommandLine",
-                              "--adapter expects a non-negative index, got \"" + value + "\"",
+                              "--adapter expects a non-negative index, got \"" +
+                                  TextFromWide(value) + "\"",
                               "the adapter list printed at startup numbers the adapters");
                 return false;
             }
             options.adapter_index = static_cast<int>(parsed);
             continue;
         }
-        if (!argument.empty() && argument[0] == '-') {
-            ReportFailure(__FILE__, __LINE__, "ParseCommandLine", "unknown option " + argument,
+        if (!argument.empty() && argument[0] == L'-') {
+            ReportFailure(__FILE__, __LINE__, "ParseCommandLine",
+                          "unknown option " + TextFromWide(argument),
                           "see --help for the argument list");
             return false;
         }
         if (!options.output_directory.empty()) {
             ReportFailure(__FILE__, __LINE__, "ParseCommandLine",
-                          "more than one output directory: " + argument,
+                          "more than one output directory: " + TextFromWide(argument),
                           "pass exactly one output directory");
             return false;
         }
@@ -152,8 +155,8 @@ bool EnsureOutputDirectory(const std::filesystem::path& directory) {
     std::filesystem::create_directories(directory, error);
     if (error) {
         ReportFailure(__FILE__, __LINE__, "std::filesystem::create_directories",
-                      TrimTrailingPeriod("could not create " + directory.string() + ": " +
-                                         error.message()),
+                      TrimTrailingPeriod("could not create " + TextFromWide(directory.native()) +
+                                         ": " + error.message()),
                       "the path is a directory the process can write to, not an existing file and "
                       "not a read-only volume");
         return false;
@@ -203,8 +206,8 @@ bool RunOneScene(GpuContext& gpu, Renderer& renderer,
     }
     if (decoded.width != rendered.width || decoded.height != rendered.height) {
         ReportFailure(__FILE__, __LINE__, "ReadPngFile",
-                      png_path.string() + " decoded to " + std::to_string(decoded.width) + "x" +
-                          std::to_string(decoded.height),
+                      TextFromWide(png_path.native()) + " decoded to " +
+                          std::to_string(decoded.width) + "x" + std::to_string(decoded.height),
                       "the encoder wrote a full 256x256 image");
         return false;
     }
@@ -230,7 +233,9 @@ bool RunAllScenes(GpuContext& gpu, Renderer& renderer,
 
 }  // namespace
 
-int main(int argument_count, char** arguments) {
+// wmain, because main() receives the command line converted to the ANSI code page, where a
+// folder name outside that page has already become question marks.
+int wmain(int argument_count, wchar_t** arguments) {
     // stdout unbuffered so PASS/FAIL lines stay in order with FAIL diagnostics, which
     // stderr prints immediately. A reordered transcript invites a wrong conclusion.
     std::setvbuf(stdout, nullptr, _IONBF, 0);
@@ -265,8 +270,8 @@ int main(int argument_count, char** arguments) {
     if (!EnsureOutputDirectory(options.output_directory)) {
         return 1;
     }
-    std::printf("output:  %s\n", options.output_directory.string().c_str());
-    std::printf("shaders: %s\n", shader_directory.string().c_str());
+    std::printf("output:  %s\n", TextFromWide(options.output_directory.native()).c_str());
+    std::printf("shaders: %s\n", TextFromWide(shader_directory.native()).c_str());
 
     GpuContext gpu;
     if (!CreateGpuContext(gpu, options.adapter_index, options.enable_debug_layer)) {

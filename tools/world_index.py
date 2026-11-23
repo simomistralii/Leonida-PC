@@ -36,9 +36,15 @@ import stat
 import struct
 import sys
 import tempfile
-import unicodedata
 import zlib
 from contextlib import contextmanager
+
+# -I keeps the script directory off sys.path, so add it explicitly before importing the sibling module.
+_TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _TOOLS_DIR not in sys.path:
+    sys.path.insert(0, _TOOLS_DIR)
+
+from report_paths import same_report_path  # noqa: E402
 
 SIGNATURE = b"0DRP"
 VERSION = 0x7A
@@ -724,14 +730,6 @@ def _count(minimum):
     return parse
 
 
-def _file_identity(path):
-    try:
-        stat = os.stat(path)
-    except (FileNotFoundError, NotADirectoryError):
-        return None
-    return stat.st_dev, stat.st_ino
-
-
 def _resolve_report_path(path):
     if os.name != "nt":
         return os.path.realpath(path)
@@ -751,72 +749,21 @@ def _resolve_report_path(path):
     return os.path.join(os.path.realpath(path), *reversed(missing))
 
 
-_PC_CASE_SENSITIVE = 11  # <sys/unistd.h> on macOS; os.pathconf_names doesn't list it
-
-
-def _case_insensitive_volume(path):
-    """True when the volume that will hold `path` ignores letter case, as macOS's default APFS volume does.
-    os.path.normcase folds case only on Windows, so on macOS `out/R.json` and `out/r.json` would pass as two
-    reports and the second write would replace the first."""
-    if sys.platform != "darwin":
-        return False
-    while not os.path.exists(path):
-        parent = os.path.dirname(path)
-        if parent == path:
-            break
-        path = parent
-    try:
-        return os.pathconf(path, _PC_CASE_SENSITIVE) == 0
-    except (OSError, ValueError):
-        return True  # the macOS default; folding can only refuse a pair, never overwrite one
-
-
-def _pending_path_key(path):
-    path = os.path.normcase(_resolve_report_path(path))
-    if os.name != "nt":
-        if _case_insensitive_volume(path):
-            # APFS and HFS+ also treat composed and decomposed accents as one name.
-            path = unicodedata.normalize("NFD", path.casefold())
-        return path
-
-    # Drive and UNC paths can also be spelled using the extended-length prefix.
-    extended_prefix = "\\\\?\\"
-    unc_prefix = extended_prefix + "unc\\"
-    if path.startswith(unc_prefix):
-        return "\\\\" + path[len(unc_prefix):]
-    drive, _ = os.path.splitdrive(path)
-    if drive.startswith(extended_prefix) and len(drive) == len(extended_prefix) + 2 and drive.endswith(":"):
-        return path[len(extended_prefix):]
-    return path
-
-
 def _check_report_paths(parser, reports, source, directory_files):
-    existing, pending = {}, {}
-    for flag, path in reports:
+    for i, (flag, path) in enumerate(reports):
         if not path:
             continue
-        key = _file_identity(path)
-        if key is None:
-            key = _pending_path_key(path)
-            destinations = pending
-        else:
-            destinations = existing
-        if other := destinations.get(key):
-            parser.error(f"{other} and {flag} must use different paths")
-        destinations[key] = flag
+        for other_flag, other_path in reports[:i]:
+            if other_path and same_report_path(other_path, path):
+                parser.error(f"{other_flag} and {flag} must use different paths")
+        if same_report_path(source, path):
+            parser.error(f"{flag} would overwrite the input {source}")
 
-    source_id = _file_identity(source)
-    if source_id is None:
-        flag = pending.get(_pending_path_key(source))
-    else:
-        flag = existing.get(source_id)
-    if flag:
-        parser.error(f"{flag} would overwrite the input {source}")
-
-    if existing and directory_files is not None:
-        for path in directory_files:
-            if flag := existing.get(_file_identity(path)):
-                parser.error(f"{flag} would overwrite the input {path}")
+    if directory_files is not None:
+        for dfile in directory_files:
+            for flag, path in reports:
+                if path and same_report_path(dfile, path):
+                    parser.error(f"{flag} would overwrite the input {dfile}")
 
 
 @contextmanager

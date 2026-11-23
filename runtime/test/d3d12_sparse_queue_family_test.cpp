@@ -148,8 +148,15 @@ int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     try {
         ComPtr<ID3D12Device> device;
-        ok(rt::d3d12::create_vulkan_device_standalone(IID_PPV_ARGS(&device)),
-           "Leonida create_vulkan_device_standalone");
+        // A host without a Vulkan device (a Windows CI runner has no GPU driver) must skip, not fail: the sibling
+        // d3d12 tests report 77 through vktest::Device, and check_sparse_queue_family.py reads 77 as "Vulkan device
+        // unavailable". create_vulkan_device_standalone prints why it returned E_FAIL on stderr.
+        const HRESULT created = rt::d3d12::create_vulkan_device_standalone(IID_PPV_ARGS(&device));
+        if (FAILED(created)) {
+            std::printf("SKIP Leonida create_vulkan_device_standalone hr=0x%08lx\n",
+                        static_cast<unsigned long>(created));
+            return 77;
+        }
         if (!rt::d3d12::device_sparse_buffer_tiles(device.Get())) {
             std::puts("SKIP Leonida sparse_buffer_tiles not supported");
             return 77;

@@ -709,6 +709,45 @@ void run_checks(const std::filesystem::path& root) {
               "and the new folder is empty: only . and ..");
     }
 
+    // Recreating a removed package directory clears its own marker, but not nested deletion markers.
+    {
+        std::filesystem::create_directories(package / "recreate_dir");
+        const auto mark = overlay / ".gta6rt-deleted" / "recreate_dir" / ".gta6rt-dir";
+        check(rmdir_w(L"GAME:\\recreate_dir") != FALSE && std::filesystem::exists(mark),
+              "removing a package directory creates its marker");
+        check(mkdir_w(L"GAME:\\recreate_dir", nullptr) != FALSE, "recreating the package directory succeeds");
+        const DWORD attrs = attributes_w(L"GAME:\\recreate_dir");
+        check(attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY), "recreated directory has directory attributes");
+        check(count(list(first_w, next_w, find_close, L"GAME:\\*"), L"recreate_dir") == 1,
+              "recreated directory is listed once");
+        check(!std::filesystem::exists(mark), "recreated directory has no removal marker");
+        check(mkdir_w(L"GAME:\\never_removed_dir", nullptr) != FALSE &&
+                  std::filesystem::is_directory(overlay / "never_removed_dir") &&
+                  !std::filesystem::exists(overlay / ".gta6rt-deleted" / "never_removed_dir"),
+              "creating a never-removed directory is unchanged");
+    }
+
+    // A marker held without delete sharing makes recreation fail and rolls back the overlay directory.
+    {
+        std::filesystem::create_directories(package / "held_marker_dir");
+        const auto mark = overlay / ".gta6rt-deleted" / "held_marker_dir" / ".gta6rt-dir";
+        check(rmdir_w(L"GAME:\\held_marker_dir") != FALSE, "removing the directory creates a marker to hold");
+        const HANDLE held = ::CreateFileW(mark.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                          FILE_ATTRIBUTE_NORMAL, nullptr);
+        check(held != INVALID_HANDLE_VALUE, "opened the removal marker without delete sharing");
+        if (held != INVALID_HANDLE_VALUE) {
+            const BOOL created = mkdir_w(L"GAME:\\held_marker_dir", nullptr);
+            const DWORD error = GetLastError();
+            check(!created && (error == ERROR_SHARING_VIOLATION || error == ERROR_ACCESS_DENIED),
+                  "recreating a directory reports the marker deletion error");
+            check(!std::filesystem::exists(overlay / "held_marker_dir") && std::filesystem::exists(mark),
+                  "failed recreation removes the overlay directory and keeps the marker");
+            ::CloseHandle(held);
+            check(mkdir_w(L"GAME:\\held_marker_dir", nullptr) != FALSE,
+                  "recreating the directory succeeds after releasing the marker");
+        }
+    }
+
     // MoveFile: the destination is in the overlay; a moved package file is deleted by a marker.
     {
         check(move_w(L"GAME:\\misc\\one.txt", L"GAME:\\misc\\moved.txt") != FALSE, "MoveFileW moves a package file");
@@ -832,6 +871,19 @@ void run_checks(const std::filesystem::path& root) {
             BOOL cancel = TRUE;
             block.dwCopyFlags = 0;
             block.pfCancel = &cancel;
+            const auto parent = fallback ? "copy2_package_fallback" : "copy2_package_host";
+            const auto destination = fallback ? L"GAME:\\copy2_package_fallback\\copy.txt" :
+                                                L"GAME:\\copy2_package_host\\copy.txt";
+            std::filesystem::create_directories(package / parent);
+            check(copy2(L"GAME:\\misc\\keep.txt", destination, &block) ==
+                          HRESULT_FROM_WIN32(ERROR_REQUEST_ABORTED) &&
+                      !std::filesystem::exists(overlay / parent),
+                  ("a cancelled copy does not create its overlay parent" + mode).c_str());
+            cancel = FALSE;
+            check(copy2(L"GAME:\\misc\\keep.txt", destination, &block) == S_OK &&
+                      read_path(overlay / parent / "copy.txt") == "keep",
+                  ("an uncancelled copy creates its overlay parent" + mode).c_str());
+            cancel = TRUE;
             check(copy2(L"GAME:\\misc\\keep.txt", to(L"cancelled.txt").c_str(), &block) ==
                           HRESULT_FROM_WIN32(ERROR_REQUEST_ABORTED) &&
                       !std::filesystem::exists(out / "cancelled.txt"),
@@ -1385,6 +1437,122 @@ void run_checks(const std::filesystem::path& root) {
         SetLastError(0);
         check(move_w(L"GAME:\\moves", L"GAME:\\MOVES") == FALSE && GetLastError() == ERROR_ACCESS_DENIED,
               "a case rename of a package folder is refused like any other move of one");
+    }
+
+    // The guest can reach a deeply nested file even when its executable and the configured roots are short.
+    // Use the explicit Win32 namespace to set up the fixtures, independently of the shim under test.
+    {
+        const auto extended = [](const std::filesystem::path& path) {
+            const auto& native = path.native();
+            if (native.starts_with(L"\\\\?\\")) return path;
+            if (native.starts_with(L"\\\\")) return std::filesystem::path(L"\\\\?\\UNC\\" + native.substr(2));
+            return std::filesystem::path(L"\\\\?\\" + native);
+        };
+        const auto fixture = root / "long_paths";
+        const auto long_package = fixture / "package";
+        const auto long_overlay = fixture / "overlay";
+        const std::wstring first(105, L'a'), second(105, L'b');
+        const auto relative = std::filesystem::path(first) / second;
+        const auto package_dir = extended(long_package / relative);
+        const auto overlay_dir = extended(long_overlay / relative);
+        const auto leaf = L"pr\u00f8be.bin";
+        const std::wstring guest_dir = L"GAME:\\" + relative.native() + L"\\";
+        const std::wstring guest_file = guest_dir + leaf;
+        check((long_package / relative / leaf).native().size() > MAX_PATH,
+              "the fixture resolves to a host path beyond MAX_PATH");
+        write_path(package_dir / leaf, "package");
+        write_path(package_dir / "legacy.bin", "legacy");
+        std::filesystem::create_directories(package_dir / "empty");
+        check(read_path(package_dir / leaf) == "package", "native extended paths can provision the deep fixture");
+
+        rt::fs::configure(long_package, long_overlay);
+        const auto read_guest = [&](const std::wstring& name) {
+            const HANDLE h = create_w(name.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+            if (h == INVALID_HANDLE_VALUE) return std::string{};
+            auto bytes = read_handle(h);
+            ::CloseHandle(h);
+            return bytes;
+        };
+        check(read_guest(guest_file) == "package", "GAME: reads a deeply nested Unicode path from the package");
+        check(read_guest(guest_file + L". ") == "package",
+              "a long resolved name retains Win32 trailing-dot and trailing-space normalization");
+        check(attributes_w(guest_file.c_str()) != INVALID_FILE_ATTRIBUTES, "attributes resolve the same long path");
+        const std::string guest_ansi = "G:\\" + std::string(first.size(), 'a') + "\\" + std::string(second.size(), 'b') +
+                                       "\\legacy.bin";
+        HANDLE h = create_a(guest_ansi.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        check(h != INVALID_HANDLE_VALUE && read_handle(h) == "legacy", "the G: alias opens a long path through CreateFileA");
+        if (h != INVALID_HANDLE_VALUE) ::CloseHandle(h);
+
+        h = create_w(guest_file.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+        DWORD written = 0;
+        check(h != INVALID_HANDLE_VALUE && ::WriteFile(h, "overlay", 7, &written, nullptr) && written == 7,
+              "the write-open copies up and writes a long path");
+        if (h != INVALID_HANDLE_VALUE) ::CloseHandle(h);
+        check(read_guest(guest_file) == "overlay" && read_path(overlay_dir / leaf) == "overlay" &&
+                  read_path(package_dir / leaf) == "package",
+              "long paths prefer the overlay copy and keep the original package immutable");
+
+        const std::wstring copy = guest_dir + L"copy.bin", moved = guest_dir + L"moved.bin";
+        check(copy_w(guest_file.c_str(), copy.c_str(), TRUE) && move_w(copy.c_str(), moved.c_str()) &&
+                  read_guest(moved) == "overlay", "copy and move use the same long resolved overlay paths");
+        check(delete_w((guest_dir + L"legacy.bin").c_str()) && rmdir_w((guest_dir + L"empty").c_str()) &&
+                  read_path(package_dir / "legacy.bin") == "legacy",
+              "long file and directory deletions create markers and preserve the package");
+        const auto names = list(first_w, next_w, find_close, (guest_dir + L"*").c_str());
+        check(count(names, leaf) == 1 && contains(names, L"moved.bin") &&
+                  !contains(names, L"legacy.bin") && !contains(names, L"empty"),
+              "listing long paths merges both roots and honors file and directory markers");
+        check(attributes_w((guest_dir + L"legacy.bin").c_str()) == INVALID_FILE_ATTRIBUTES,
+              "a read-only query respects the long file's delete marker");
+
+        // Compare the same merged listing against the short-path Win32 search, including the names
+        // hidden by package deletion markers.
+        const wchar_t* const masks[] = {L"*.", L"?.", L"mesh*.", L"mesh*..", L"mesh?.", L"mesh.*.",
+                                        L"*.?.", L"*. ", L"*.*", L"mesh?.txt"};
+        const auto list_masks = [&](const std::filesystem::path& pack, const std::filesystem::path& layer,
+                                    const std::filesystem::path& subdir) {
+            for (const wchar_t* name : {L"a", L"a.txt", L"mesh", L"mesh1", L"mesh.txt", L"mesh-old", L".dot"})
+                write_path(extended(pack / subdir / name), "package");
+            for (const wchar_t* name : {L"mesh", L"mesh-cache", L"mesh-cache.tmp"})
+                write_path(extended(layer / subdir / name), "overlay");
+            rt::fs::configure(pack, layer);
+            const auto guest = L"GAME:\\" + subdir.native() + L"\\";
+            check(delete_w((guest + L"mesh-old").c_str()), "the wildcard fixture hides an extensionless package file");
+            std::vector<std::vector<std::wstring>> results;
+            for (const wchar_t* mask : masks) {
+                auto entries = list(first_w, next_w, find_close, (guest + mask).c_str());
+                std::sort(entries.begin(), entries.end());
+                results.push_back(std::move(entries));
+            }
+            return results;
+        };
+        const auto short_matches = list_masks(fixture / "short_package", fixture / "short_overlay", L"masks");
+        const auto long_matches = list_masks(long_package, long_overlay, relative / L"masks");
+        check(count(short_matches[0], L"mesh") == 1 && contains(short_matches[0], L"mesh-cache") &&
+                  !contains(short_matches[0], L"mesh.txt") && !contains(short_matches[0], L"mesh-old"),
+              "the short *. control merges extensionless entries and hides the deleted name");
+        for (size_t i = 0; i < short_matches.size(); ++i) {
+            char detail[96];
+            std::snprintf(detail, sizeof detail, "the long listing matches short Win32 for %ls", masks[i]);
+            check(long_matches[i] == short_matches[i], detail);
+        }
+
+        // The scratch drive is usable with a short guest name and a long configured overlay root.
+        const auto scratch_overlay = fixture / relative / "scratch_overlay";
+        rt::fs::configure(long_package, scratch_overlay);
+        h = create_a("T:\\scratch.bin", GENERIC_WRITE, 0, nullptr, CREATE_NEW, 0, nullptr);
+        written = 0;
+        check(h != INVALID_HANDLE_VALUE && ::WriteFile(h, "test", 4, &written, nullptr) && written == 4,
+              "T: creates and writes its scratch directory under a long overlay root");
+        if (h != INVALID_HANDLE_VALUE) ::CloseHandle(h);
+        check(read_guest(L"T:\\scratch.bin") == "test" &&
+                  read_path(extended(scratch_overlay / ".gta6rt-temp" / "scratch.bin")) == "test",
+              "T: reads from the same long backing directory");
+        rt::fs::configure(package, overlay);
+
+        std::error_code cleanup_error;
+        std::filesystem::remove_all(extended(fixture), cleanup_error);
+        check(!cleanup_error, "the synthetic long paths are removed after the test");
     }
 }
 

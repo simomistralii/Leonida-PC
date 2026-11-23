@@ -62,9 +62,11 @@ method, scope and caveats. No game data is included.
 | Document | Measured content |
 |---|---|
 | [d3d12_vulkan.md](d3d12_vulkan.md) | Xbox D3D12 to Vulkan plan and status; device proxy, queues, command lists, barriers, copies. |
+| [mobile.md](mobile.md) | arm64/mobile path: the x86-64 → arm64 static-recompiler groundwork (`tools/x64_recomp.py`), the `.pdata` coverage census (`tools/recomp_census.py`), and what still blocks iOS. |
 | [boot.md](boot.md) | The first real boot: the `gta6rt --trace`/`--trace-d3d12` runbook, the startup + D3D12 trace summary (`tools/boot_trace.py`), the triage order and the Q1–Q22 checklist. |
 | [retail_boot_chain.md](retail_boot_chain.md) | How far `gta6rt --run` gets with the retail executable: the stops in order and what clears each, the physical-page export shapes, and device slots 26, 48 and 73. |
-| [modding.md](modding.md) | The mod format: a `mods/<folder>/mod.json` next to `gta6rt.exe` or under `--mods DIR`, swapping a named (or `joaat`) archetype for another; load order, the start-up log, and the fact that a swap waits for the executable's archetype lookup address (RT-5). |
+| [retail_boot_intel_host.md](retail_boot_intel_host.md) | The retail boot on an Intel host with 16 GB: which stops of the two boot pages hold there with #7111, the commit-limit stop at the 6.1 GiB physical-page request that #7556 clears, the frame loop to the 900 s timeout with stub pipelines, and what the layer refuses at that depth (the console mesh-shader subobject among it). |
+| [modding.md](modding.md) | The mod format: a `mods/<folder>/mod.json` next to `gta6rt.exe` or under `--mods DIR`, swapping a named (or `joaat`) archetype for another; the `tools/leonida_mods.py` manager (`Mods.bat` on Windows); load order, the start-up log, and the fact that a swap waits for the executable's archetype lookup address (RT-5). |
 | [descriptor_lookup_apple.md](descriptor_lookup_apple.md) | M3 Max GPU timings for texture and sampler descriptor lookups at 1k, 10k and 100k live entries. |
 | [descriptor_lookup_ada.md](descriptor_lookup_ada.md) | RTX 4070 SUPER (Ada, Windows) timings for the same lookups in VRAM, host-visible and ReBAR memory. |
 | [descriptor_lookup_intel.md](descriptor_lookup_intel.md) | Intel UHD Graphics 770 (Xe-LP, Windows, driver 101.6129) timings for the same lookups at 1k–100k live entries; both memory placements within 0.6% of each other. |
@@ -98,4 +100,4 @@ method, scope and caveats. No game data is included.
 
 ## Other languages
 
-Community quickstarts (stable onboarding text only; English docs remain authoritative): [i18n/README.md](i18n/README.md) (`fr`, `pt-BR`, `zh-CN`, `pl-PL`, `tr`, `ru`, `ja`, `es`, `it`, `de`, `ar`).
+Community quickstarts (stable onboarding text only; English docs remain authoritative): [i18n/README.md](i18n/README.md) (`fr`, `pt-BR`, `pt-PT`, `zh-CN`, `pl-PL`, `tr`, `ru`, `ja`, `es`, `it`, `de`, `ar`).

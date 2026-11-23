@@ -694,6 +694,8 @@ def motion_samples(s, at):
 def parse_clip(s, at):
     kind = s.u32(at + 0x20)
     if kind >= 16:  # +0x20 is a pointer: a parametric clip that refers to packs outside the dictionary
+        if at + 0x40 > len(s.d):
+            raise DecodeError(f"clip at 0x{at:x} is outside the pages")
         name_at, tag = s.u64(at + 0x30), s.d[at + 0x3F]
         # `.motion`: name at +0x30, a pointer or inline (+0x3F 0x80 | length). For a `.motionmatcher` +0x3F is
         # byte 7 of its name at +0x38: a pointer's zero high byte or an inline character.
@@ -857,7 +859,13 @@ def sequence_header(data, at):
 def decode_sequence(s, at, stats=None):
     """One sequence: 0x20-byte header, then channel definitions, frame bits, u16 counts[11] and the
     (track << 2 | component) lists. Returns (frames, channels) with channels = [type, track, comp, values]."""
+    if at is None:
+        raise DecodeError("sequence pointer is null")
+    if at < 0 or at + 0x20 > len(s.d):
+        raise DecodeError(f"sequence at 0x{at:x} is outside the pages")
     h = sequence_header(s.d, at)
+    if at + 0x20 + h["length"] > len(s.d):
+        raise DecodeError(f"sequence at 0x{at:x} runs past the pages")
     data = memoryview(s.d)[at + 0x20:at + 0x20 + h["length"]]
     nf, fo, fl = h["frames"], h["frame_offset"], h["frame_bytes"]
     lists_at = fo + fl * nf
@@ -889,13 +897,15 @@ def decode_sequence(s, at, stats=None):
                 frame_fields.append((len(channels), bits, quantum, offset))
             elif t == 5:
                 fbits, vbits, words, quantum, offset = struct.unpack_from("<IIIff", data, p)
+                if p + 20 + 4 * words > fo:
+                    raise DecodeError("type-5 value table runs past channel definitions")
                 table_bytes = bytes(data[p + 20:p + 20 + 4 * words])
                 p += 20 + 4 * words
                 n = (32 * words) // vbits if vbits else 1
                 table = [(_bits(table_bytes, i * vbits, vbits) if vbits else 0) * quantum + offset for i in range(n)]
                 frame_fields.append((len(channels), fbits, "table", table))
             elif t == 10:
-                value, size = decode_delta2(data, p, nf, stats)
+                value, size = decode_delta2(data[:fo], p, nf, stats)
                 p += size
             channels.append([t, track, comp, value])
     if p != fo:
@@ -991,6 +1001,8 @@ def decode_animation(s, anim, stats=None):
     tracks, total, frames_sum = {}, 0, 0
     for si, at in enumerate(anim["sequences"]):
         nf, channels = decode_sequence(s, at, stats)
+        if nf == 0 and len(anim["sequences"]) > 1:
+            raise DecodeError("multi-sequence animation has an empty sequence")
         frames_sum += nf
         if stats is not None:
             for t, *_ in channels:
@@ -1004,7 +1016,9 @@ def decode_animation(s, anim, stats=None):
                     stats["boundary_quaternions_same_rotation"] += abs(sum(x * y for x, y in zip(a, b))) > 0.9999
                 else:
                     stats["boundary_values"] += 1
-                    stats["boundary_values_within_1e-3"] += max(abs(x - y) for x, y in zip(a, b)) < 1e-3
+                    stats["boundary_values_within_1e-3"] += (
+                        len(a) == len(b) and bool(a) and max(abs(x - y) for x, y in zip(a, b)) < 1e-3
+                    )
             have = tracks.setdefault(k, [frames[0]] * total if frames else [])
             have.extend(frames[1:] if si else frames)
         total += nf - (1 if si else 0)
@@ -1012,7 +1026,7 @@ def decode_animation(s, anim, stats=None):
             if len(have) < total:
                 have.extend([have[-1]] * (total - len(have)))
     if stats is not None:
-        stats["frames_sum_matches"] += frames_sum == anim["frames"] + len(anim["sequences"]) - 1
+        stats["frames_sum_matches"] += frames_sum == anim["frames"] + max(0, len(anim["sequences"]) - 1)
     return tracks, total
 
 
@@ -1069,25 +1083,30 @@ def _gap_page(m, row, first):
     d.decompress(m[row["offset"]:row["offset"] + row["stored"]])
     end = row["offset"] + row["stored"] - len(d.unused_data)
     at = (end + 15) & ~15
-    if at + 16 > len(m) or m[end:at] != bytes(at - end):
+    if at >= len(m) or m[end:at] != bytes(at - end):
         return None
     if anim_index.ZHDR.match(m, at) and m[at:at + 3] != b"KB2":
         z, chunk = zlib.decompressobj(), m[at:at + 4096]
         try:
             page = z.decompress(chunk)
         except zlib.error:
-            return None
-        if not z.eof:
-            return None
-        seg = {"offset": at, "stored": len(chunk) - len(z.unused_data), "raw": False, "kind": "small zlib page"}
-    else:
-        page = bytes(m[at:at + 16])
-        seg = {"offset": at, "stored": 16, "raw": True, "kind": "raw 16-byte page"}
+            page = None
+        if page and z.eof:
+            try:
+                parse_dictionary(System(first + page))
+            except (DecodeError, struct.error, IndexError):
+                pass
+            else:
+                return {"offset": at, "stored": len(chunk) - len(z.unused_data), "raw": False,
+                        "kind": "small zlib page"}
+    if at + 16 > len(m):
+        return None
+    page = bytes(m[at:at + 16])
     try:
         parse_dictionary(System(first + page))
     except (DecodeError, struct.error, IndexError):
         return None
-    return seg
+    return {"offset": at, "stored": 16, "raw": True, "kind": "raw 16-byte page"}
 
 
 def segment(rows, k):

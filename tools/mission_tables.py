@@ -86,10 +86,14 @@ import collections
 import json
 import math
 import os
+import stat
 import struct
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from file_mode import published_mode  # noqa: E402
+from replace_retry import replace as replace_retry  # noqa: E402
 try:
     import psin_index  # noqa: E402
 except ImportError:  # a bare checkout without the sibling readers: scan raw bytes only
@@ -543,10 +547,53 @@ def count(text):
     return value
 
 
+def write_json(path, payload):
+    """Write `payload` as formatted JSON, staging regular files through a sibling temporary file."""
+    destination = os.path.realpath(path)
+    try:
+        dest_stat = os.stat(destination)
+    except FileNotFoundError:
+        dest_stat = None
+    if dest_stat is not None and not stat.S_ISREG(dest_stat.st_mode):
+        with open(destination, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, indent=1)
+            handle.write("\n")
+        return
+    parent = os.path.dirname(destination) or "."
+    os.makedirs(parent, exist_ok=True)
+    if dest_stat is not None:
+        os.close(os.open(destination, os.O_WRONLY))
+    staged_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            delete=False,
+            dir=parent,
+            prefix=".mission_tables-",
+            suffix=".tmp",
+        ) as staged:
+            staged_path = staged.name
+            json.dump(payload, staged, indent=1)
+            staged.write("\n")
+        if os.name != "nt":
+            os.chmod(staged_path, published_mode(destination))
+        replace_retry(staged_path, destination)
+        staged_path = None
+    finally:
+        if staged_path is not None:
+            try:
+                os.unlink(staged_path)
+            except OSError:
+                pass
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Read mission-state tables from inflated PSIN streams.")
     ap.add_argument("src", help="PSIN file or directory of carved .bin streams")
     ap.add_argument("--json", action="store_true", help="write the files and summary as JSON")
+    ap.add_argument("--out", help="write the files and summary as JSON to this file")
     ap.add_argument("--limit", type=count, help="stop after this many files")
     args = ap.parse_args(argv)
     if not os.path.exists(args.src):
@@ -569,10 +616,20 @@ def main(argv=None):
         print(f"ERROR: {args.src}: {error}", file=sys.stderr)
         return 2
     summary = summarize(files)
+    if args.out:
+        payload = {"files": [_json_record(record) for record in files], "summary": summary}
+        try:
+            write_json(args.out, payload)
+        except OSError as error:
+            reason = error.strerror or str(error)
+            print(f"ERROR: cannot write {args.out}: {reason}", file=sys.stderr)
+            return 2
     if args.json:
         json.dump({"files": [_json_record(record) for record in files], "summary": summary},
                   sys.stdout, indent=1)
         sys.stdout.write("\n")
+        return 0
+    if args.out:
         return 0
     for record in files:
         print(f"{record['file']}  size={record['size']}  records={record['records']}  "

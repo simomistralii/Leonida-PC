@@ -335,6 +335,22 @@ class RunHw(unittest.TestCase):
         finally:
             f.PERTURB.discard("bpermute_wave64_cross")
 
+    def test_gfx12_skips_wave64_permute_programs_the_same_way(self):
+        # measured on an RX 9070 (gfx1201): a wave64 ds_permute_b32 delivers to lane (l + 32) & 63, like bpermute
+        has_pm = lambda p: any(o["kind"] == "permute" for o in p.ops)
+        w64 = next(p for p in f.programs(1, 60, (64,), permute=True) if has_pm(p) and
+                   not any(o["kind"] == "bpermute" for o in p.ops))
+        w32 = next(p for p in f.programs(1, 60, (32,), permute=True) if has_pm(p))
+        self.assertIn("all 64 lanes", f.hw_skip_reason(w64, "gfx1201"))
+        self.assertIsNone(f.hw_skip_reason(w32, "gfx1201"))
+        for arch in ("gfx1150", "gfx1030"):                   # halves stay separate there (measured)
+            self.assertIsNone(f.hw_skip_reason(w64, arch), arch)
+        f.PERTURB.add("permute_wave64_cross")                  # the model that crosses halves can run them
+        try:
+            self.assertIsNone(f.hw_skip_reason(w64, "gfx1201"))
+        finally:
+            f.PERTURB.discard("permute_wave64_cross")
+
     def test_gfx12_kernels_use_its_barrier_and_lds_wait(self):
         p = f.programs(1, 1, (64,))[0]               # every kernel waits and barriers after each op
         g12, g11 = p.hw_lines("gfx1201"), p.hw_lines("gfx1150")
@@ -415,13 +431,18 @@ class Main(unittest.TestCase):
         self.assertEqual(rc, 77)
         self.assertIn("hardware oracle unavailable: no AMD clang", out)
 
-    def test_exit_77_on_an_rdna4_gpu(self):
-        oracle = FakeOracle([])
-        oracle.arch = "gfx1201"
-        with patch.object(runner, "open_oracle", return_value=oracle):
-            rc, out = self.main("--oracle", "hw", "--programs", "2")
-        self.assertEqual(rc, 77)
-        self.assertIn("hardware oracle unavailable: gfx1201", out)
+    def test_an_rdna4_gpu_is_supported(self):
+        # the blanket exit 77 for gfx1170+ is gone: the tool runs there (asm.sync_lines respells GFX12, the
+        # per-program hw_skip_reason skips a wave64 bpermute), so a fake oracle gets past the gate and runs
+        for arch in ("gfx1201", "gfx1170"):
+            oracle = FakeOracle([])
+            oracle.arch = arch
+            with patch.object(runner, "open_oracle", return_value=oracle):
+                oracle.by_text = {tuple(p.hw_lines(arch)): p for p in f.programs(1, 6, (32,))}
+                rc, out = self.main("--oracle", "hw", "--programs", "6", "--wave", "32")
+            self.assertEqual(rc, 0, (arch, out))
+            self.assertIn("hardware oracle: fake", out)
+            self.assertNotIn("hardware oracle unavailable", out)
 
     def test_exit_77_with_a_missing_compiler(self):
         with patch.dict(os.environ, {"LEONIDA_AMD_CLANG": str(TOOLS / "no-such-clang.exe")}):
@@ -472,10 +493,6 @@ class OnHardware(unittest.TestCase):
             cls.oracle = runner.open_oracle()
         except runner.Unavailable as e:
             raise unittest.SkipTest(f"no hardware oracle: {e}")
-        why = asm.rdna23_skip_reason(cls.oracle.arch)
-        if why:
-            cls.oracle.close()
-            raise unittest.SkipTest(why)
         if asm.family(cls.oracle.arch) == "gfx10":
             raise unittest.SkipTest("the cmpstore operand order is measured on GFX11")
 

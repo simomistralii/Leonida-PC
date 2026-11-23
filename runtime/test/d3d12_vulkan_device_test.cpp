@@ -545,7 +545,9 @@ int compare_footprints(ID3D12Device* ours) {
             ++skipped;
             continue;
         }
-        for (const UINT64 base : {UINT64(0), UINT64(1024)}) {
+        // 513 and 2^32 + 1 are not multiples of D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT: they show whether the layout
+        // is aligned from BaseOffset or from 0.
+        for (const UINT64 base : {0ull, 513ull, 1024ull, (1ull << 32) + 1}) {
             std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> a(c.subresources), b(c.subresources);
             std::vector<UINT> rows_a(c.subresources), rows_b(c.subresources);
             std::vector<UINT64> size_a(c.subresources), size_b(c.subresources);

@@ -124,6 +124,14 @@ def _read_field(b: bytes, base: int, member):
     return WI._value(b, base, member)
 
 
+# Bytes read by _read_field and the world_index value decoder for each supported member type.
+FIELD_WIDTHS = {
+    0x01: 1, 0x08: 8, 0x10: 1, 0x11: 1, 0x12: 2, 0x13: 2,
+    0x14: 4, 0x15: 4, 0x21: 4, 0x32: 12, 0x33: 12, 0x34: 16, 0x35: 48,
+    0x4A: 4, 0x4F: 8, 0x60: 1, 0x62: 4,
+}
+
+
 def parse_fog_volumes(b: bytes, *, include_digest: bool = False) -> list[dict]:
     """Decode all CScatteringTransmittance__FogVolume instances in a 0x7a resource."""
     structs, blocks = parse_schema(b)
@@ -132,13 +140,20 @@ def parse_fog_volumes(b: bytes, *, include_digest: bool = False) -> list[dict]:
     vsz, vmems = structs[STRUCT_VOLUME]
     if not vsz:
         return []
+    fields = {}
+    for name, field_hash in FIELDS.items():
+        member = vmems.get(field_hash)
+        if member is not None:
+            width = FIELD_WIDTHS.get(member[1])
+            if width is not None and member[0] + width <= vsz:
+                fields[name] = member
     out: list[dict] = []
     for bsh, bsz, boff in blocks:
         if bsh != STRUCT_VOLUME or boff is None or bsz % vsz or boff + bsz > len(b):
             continue
         for k in range(bsz // vsz):
             base = boff + k * vsz
-            row = {name: _read_field(b, base, vmems.get(h)) for name, h in FIELDS.items()}
+            row = {name: _read_field(b, base, member) for name, member in fields.items()}
             cleaned = {k_: v for k_, v in row.items() if v is not None}
             if include_digest:
                 cleaned["_sha256"] = hashlib.sha256(b[base:base + vsz]).digest()

@@ -178,6 +178,30 @@ enum GameInputForceFeedbackEffectKind : int32_t {
 enum GameInputSwitchPosition : int32_t { GameInputSwitchCenter = 0 };
 enum GameInputFocusPolicy : uint32_t { GameInputDefaultFocusPolicy = 0 };
 
+// What is printed on a control, in the device info below. Only the labels the shim reports are declared. The values
+// are the ones Microsoft Learn's GameInputLabel page lists, unchanged since v0 by that page's version history.
+enum GameInputLabel : int32_t {
+    GameInputLabelUnknown = -1,
+    GameInputLabelNone = 0,
+    GameInputLabelXboxGuide = 1,
+    GameInputLabelXboxMenu = 4,
+    GameInputLabelXboxView = 5,
+    GameInputLabelXboxA = 7,
+    GameInputLabelXboxB = 8,
+    GameInputLabelXboxX = 9,
+    GameInputLabelXboxY = 10,
+    GameInputLabelXboxDPadUp = 11,
+    GameInputLabelXboxDPadDown = 12,
+    GameInputLabelXboxDPadLeft = 13,
+    GameInputLabelXboxDPadRight = 14,
+    GameInputLabelXboxLeftShoulder = 15,
+    GameInputLabelXboxLeftTrigger = 16,
+    GameInputLabelXboxLeftStickButton = 17,
+    GameInputLabelXboxRightShoulder = 18,
+    GameInputLabelXboxRightTrigger = 19,
+    GameInputLabelXboxRightStickButton = 20,
+};
+
 using GameInputCallbackToken = uint64_t;
 constexpr GameInputCallbackToken kInvalidCallbackToken = 0;
 
@@ -408,8 +432,11 @@ struct GameInputRawDeviceReportInfo {
     const GameInputRawDeviceReportItemInfo* items;
 };
 
+// One axis and one button of the controller-axis and controller-button arrays. In the public v0 header the label
+// comes right after mappedInputKinds; it fills what would otherwise be padding, so the sizes do not show it.
 struct GameInputControllerAxisInfo {
     uint32_t mappedInputKinds;  // GameInputKind
+    GameInputLabel label;
     bool isContinuous;
     bool isNonlinear;
     bool isQuantized;
@@ -425,6 +452,7 @@ struct GameInputControllerAxisInfo {
 
 struct GameInputControllerButtonInfo {
     uint32_t mappedInputKinds;  // GameInputKind
+    GameInputLabel label;
     uint16_t legacyDInputIndex;
     uint16_t legacyHidIndex;
     uint32_t rawReportIndex;
@@ -432,9 +460,49 @@ struct GameInputControllerButtonInfo {
     const GameInputRawDeviceReportItemInfo* inputReportItem;
 };
 
-// Empty in v0 (one byte in C++); a title only checks the pointer.
-struct GameInputGamepadInfo {};
-struct GameInputUiNavigationInfo {};
+// The label of each control behind the gamepad state and the UI navigation state: 14 and 21 labels and nothing else.
+// The member order is the public v0 header's, and the host's GameInput 0.2309 fills both this way (docs/gameinput.md,
+// "ABI"). Learn's pages of these two names describe later versions, which start with another member.
+struct GameInputGamepadInfo {
+    GameInputLabel menuButtonLabel;
+    GameInputLabel viewButtonLabel;
+    GameInputLabel aButtonLabel;
+    GameInputLabel bButtonLabel;
+    GameInputLabel xButtonLabel;
+    GameInputLabel yButtonLabel;
+    GameInputLabel dpadUpLabel;
+    GameInputLabel dpadDownLabel;
+    GameInputLabel dpadLeftLabel;
+    GameInputLabel dpadRightLabel;
+    GameInputLabel leftShoulderButtonLabel;
+    GameInputLabel rightShoulderButtonLabel;
+    GameInputLabel leftThumbstickButtonLabel;
+    GameInputLabel rightThumbstickButtonLabel;
+};
+
+struct GameInputUiNavigationInfo {
+    GameInputLabel menuButtonLabel;
+    GameInputLabel viewButtonLabel;
+    GameInputLabel acceptButtonLabel;
+    GameInputLabel cancelButtonLabel;
+    GameInputLabel upButtonLabel;
+    GameInputLabel downButtonLabel;
+    GameInputLabel leftButtonLabel;
+    GameInputLabel rightButtonLabel;
+    GameInputLabel contextButton1Label;
+    GameInputLabel contextButton2Label;
+    GameInputLabel contextButton3Label;
+    GameInputLabel contextButton4Label;
+    GameInputLabel pageUpButtonLabel;
+    GameInputLabel pageDownButtonLabel;
+    GameInputLabel pageLeftButtonLabel;
+    GameInputLabel pageRightButtonLabel;
+    GameInputLabel scrollUpButtonLabel;
+    GameInputLabel scrollDownButtonLabel;
+    GameInputLabel scrollLeftButtonLabel;
+    GameInputLabel scrollRightButtonLabel;
+    GameInputLabel guideButtonLabel;
+};
 
 // Motion: layouts from Microsoft's v0 documentation (learn.microsoft.com GameInputMotionInfo / GameInputMotionState /
 // GameInputMotionAccuracy; the GDK public header spells the same members). Accuracy is deprecated only in GameInput
@@ -536,6 +604,24 @@ static_assert(sizeof(GameInputMotionInfo) == 12);
 static_assert(sizeof(GameInputMotionState) == 68);
 static_assert(sizeof(GameInputControllerAxisInfo) == 48);
 static_assert(sizeof(GameInputControllerButtonInfo) == 32);
+// The members behind a label, and the two label tables: a size of 48 or 32 holds with or without the label, so
+// each offset it moves is pinned here.
+static_assert(offsetof(GameInputControllerAxisInfo, label) == 4);
+static_assert(offsetof(GameInputControllerAxisInfo, isContinuous) == 8);
+static_assert(offsetof(GameInputControllerAxisInfo, isNonlinear) == 9);
+static_assert(offsetof(GameInputControllerAxisInfo, isQuantized) == 10);
+static_assert(offsetof(GameInputControllerAxisInfo, hasRestValue) == 11);
+static_assert(offsetof(GameInputControllerAxisInfo, restValue) == 12);
+static_assert(offsetof(GameInputControllerAxisInfo, resolution) == 16);
+static_assert(offsetof(GameInputControllerButtonInfo, label) == 4);
+static_assert(offsetof(GameInputControllerButtonInfo, legacyDInputIndex) == 8);
+static_assert(offsetof(GameInputControllerButtonInfo, legacyHidIndex) == 10);
+static_assert(offsetof(GameInputControllerButtonInfo, rawReportIndex) == 12);
+static_assert(offsetof(GameInputControllerButtonInfo, inputReport) == 16);
+static_assert(sizeof(GameInputGamepadInfo) == 56);
+static_assert(offsetof(GameInputGamepadInfo, rightThumbstickButtonLabel) == 52);
+static_assert(sizeof(GameInputUiNavigationInfo) == 84);
+static_assert(offsetof(GameInputUiNavigationInfo, guideButtonLabel) == 80);
 static_assert(offsetof(GameInputDeviceInfo, deviceId) == 32);
 static_assert(offsetof(GameInputDeviceInfo, deviceFamily) == 96);
 static_assert(offsetof(GameInputDeviceInfo, inputReportCount) == 112);

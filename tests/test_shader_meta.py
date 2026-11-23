@@ -720,6 +720,33 @@ class OperandClassificationTests(unittest.TestCase):
         got_vcc = M.analyse_instructions([insns_vcc], [[]])
         self.assertEqual(got_vcc["user_sgpr_reads"], [{"sgpr": 0, "kind": "ptr64_lo"}])
 
+    def test_read_dxbc_meta_bounds_container_total_and_part_offsets(self):
+        good = make_dxbc([sfi0_chunk(M.SFI0_RESOURCE_DESCRIPTOR_HEAP_INDEXING)])
+        # Positive control: valid container followed by trailing bytes still parses SFI0.
+        meta_ok = M.read_dxbc_meta(good + b"\x00" * 32)
+        self.assertTrue(meta_ok.get("sfi0_resource_heap_directly_indexed"))
+
+        # Declared total larger than buffer length -> truncated container rejected.
+        trunc = bytearray(good)
+        struct.pack_into("<I", trunc, 24, len(good) + 16)
+        self.assertEqual(M.read_dxbc_meta(bytes(trunc)), {})
+
+        # Part payload extending past declared total into trailing bytes must be ignored.
+        past_total = bytearray(good + b"\x00" * 32)
+        struct.pack_into("<I", past_total, 24, len(good) - 4)
+        self.assertEqual(M.read_dxbc_meta(bytes(past_total)), {})
+
+        # Part offset aliasing the DXBC header (off < 32 + 4 * cnt) must be ignored.
+        # Put a fake SFI0 header at offset 4 inside the 16-byte digest field (bytes 4..19).
+        alias = bytearray(36)
+        alias[0:4] = b"DXBC"
+        alias[4:8] = b"SFI0"
+        struct.pack_into("<I", alias, 8, 8)
+        struct.pack_into("<Q", alias, 12, M.SFI0_RESOURCE_DESCRIPTOR_HEAP_INDEXING)
+        struct.pack_into("<III", alias, 20, 1, len(alias), 1)
+        struct.pack_into("<I", alias, 32, 4)
+        self.assertEqual(M.read_dxbc_meta(bytes(alias)), {})
+
 
 if __name__ == "__main__":
     unittest.main()

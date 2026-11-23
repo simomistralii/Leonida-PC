@@ -165,7 +165,7 @@ bool clear_depth_and_read(ID3D12Device* device, DXGI_FORMAT format, unsigned dep
                           FLOAT depth_full, UINT8 stencil_full, FLOAT depth_part, UINT8 stencil_part,
                           std::vector<unsigned char>& depth_pixels, std::vector<unsigned char>& stencil_pixels,
                           D3D12_CLEAR_FLAGS full_flags = D3D12_CLEAR_FLAGS(0),
-                          D3D12_CLEAR_FLAGS part_flags = D3D12_CLEAR_FLAGS(0)) {
+                          D3D12_CLEAR_FLAGS part_flags = D3D12_CLEAR_FLAGS(0), bool part_no_flags = false) {
     Ref<ID3D12CommandQueue> queue;
     Ref<ID3D12CommandAllocator> allocator;
     Ref<ID3D12GraphicsCommandList> list;
@@ -213,7 +213,8 @@ bool clear_depth_and_read(ID3D12Device* device, DXGI_FORMAT format, unsigned dep
         static_cast<D3D12_CLEAR_FLAGS>((has_stencil ? D3D12_CLEAR_FLAG_STENCIL : 0) | D3D12_CLEAR_FLAG_DEPTH);
     list->ClearDepthStencilView(handle, full_flags ? full_flags : flags, depth_full, stencil_full, 0, nullptr);
     const D3D12_RECT rect{1, 1, 4, 3};
-    list->ClearDepthStencilView(handle, part_flags ? part_flags : flags, depth_part, stencil_part, 1, &rect);
+    list->ClearDepthStencilView(handle, part_no_flags ? D3D12_CLEAR_FLAGS(0) : (part_flags ? part_flags : flags),
+                                depth_part, stencil_part, 1, &rect);
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barrier.Transition.pResource = image.p;
@@ -373,6 +374,54 @@ bool check_unlisted_rtvs(ID3D12Device* device) {
 }
 } // namespace
 
+// ClearDepthStencilView values at the edge of what D3D12 accepts: on a D32_FLOAT target a depth outside [0, 1] and a
+// NaN are stored exactly as given, and flags that name no plane clear nothing (the target keeps the value of the clear
+// before it). WARP shows both in the read-back, and the layer must show the same texels; a call the layer refuses fails
+// Close() inside clear_depth_and_read.
+bool check_depth_clear_edge_values(ID3D12Device* host, ID3D12Device* ours) {
+    constexpr UINT width = 5, height = 3;
+    const auto read = [](ID3D12Device* device, FLOAT depth_full, FLOAT depth_part, bool part_no_flags,
+                         std::vector<unsigned char>& depth) {
+        std::vector<unsigned char> stencil;  // D32_FLOAT has no stencil plane
+        return clear_depth_and_read(device, DXGI_FORMAT_D32_FLOAT, 4, false, depth_full, 0, depth_part, 0, depth,
+                                    stencil, D3D12_CLEAR_FLAG_DEPTH, D3D12_CLEAR_FLAGS(0), part_no_flags);
+    };
+    const auto compare = [&](const char* what, FLOAT depth_full, FLOAT depth_part, bool part_no_flags, FLOAT outside,
+                             FLOAT inside) {
+        std::vector<unsigned char> expected, got;
+        if (!read(host, depth_full, depth_part, part_no_flags, expected)) return false;
+        if (!read(ours, depth_full, depth_part, part_no_flags, got)) return false;
+        CHECK(expected.size() == width * height * 4 && got.size() == expected.size());
+        size_t wrong = 0;
+        for (UINT y = 0; y < height; ++y)
+            for (UINT x = 0; x < width; ++x) {
+                const size_t at = (width * y + x) * 4;
+                const FLOAT want = (x >= 1 && x < 4 && y >= 1) ? inside : outside;
+                if (std::memcmp(expected.data() + at, &want, 4)) {
+                    FLOAT warp_value;
+                    std::memcpy(&warp_value, expected.data() + at, 4);
+                    std::fprintf(stderr, "%s (%u,%u): WARP cleared %g, expected %g\n", what, x, y, warp_value, want);
+                    ++wrong;
+                } else if (std::memcmp(got.data() + at, expected.data() + at, 4)) {
+                    FLOAT warp_value, layer_value;
+                    std::memcpy(&warp_value, expected.data() + at, 4);
+                    std::memcpy(&layer_value, got.data() + at, 4);
+                    std::fprintf(stderr, "%s (%u,%u): layer cleared %g, WARP %g\n", what, x, y, layer_value,
+                                 warp_value);
+                    ++wrong;
+                }
+            }
+        if (wrong) return false;
+        std::printf("%s: %ux%u depth texels match WARP\n", what, width, height);
+        return true;
+    };
+    if (!compare("depth 1.5 and -0.5 are stored as given", 1.5f, -0.5f, false, 1.5f, -0.5f)) return false;
+    // NaN is likewise not clamped away; WARP stores the quiet NaN it was given.
+    const FLOAT nan = std::numeric_limits<float>::quiet_NaN();
+    if (!compare("a NaN depth stays NaN", nan, nan, false, nan, nan)) return false;
+    return compare("flags 0 leaves the target alone", 0.25f, 0.75f, true, 0.25f, 0.25f);
+}
+
 int main(int argc, char** argv) {
     const bool volume_only = argc == 2 && std::strcmp(argv[1], "--volume") == 0;
     const bool rgb9e5_only = argc == 2 && std::strcmp(argv[1], "--rgb9e5") == 0;
@@ -424,6 +473,7 @@ int main(int argc, char** argv) {
         if (!check_volume_rtvs(host.p, ours.p)) return 1;
         if (volume_only) return 0;
         if (!check_unlisted_rtvs(ours.p)) return 1;
+        if (!check_depth_clear_edge_values(host.p, ours.p)) return 1;
         const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
         // Integer-format values: negatives, fractions, NaN and overflow exercise the numeric float->int conversion.
         const std::array<float, 4> int_values[] = {

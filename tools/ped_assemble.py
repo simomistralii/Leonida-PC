@@ -1104,6 +1104,11 @@ _GLB_ATTRIBUTE_TYPES = {
     "JOINTS_1": ("VEC4",),
     "WEIGHTS_1": ("VEC4",),
 }
+_GLB_UNSIGNED_INT_COMPONENTS = (
+    COMPONENT_UNSIGNED_BYTE,
+    COMPONENT_UNSIGNED_SHORT,
+    COMPONENT_UNSIGNED_INT,
+)
 
 
 def _check_glb_document(doc: object, bin_chunk: bytes, path: str) -> None:
@@ -1144,7 +1149,13 @@ def _check_glb_document(doc: object, bin_chunk: bytes, path: str) -> None:
     nodes, meshes, materials = tables["nodes"], tables["meshes"], tables["materials"]
     accessors, views = tables["accessors"], tables["bufferViews"]
 
-    def check_accessor(index: object, what: str, allowed: tuple[str, ...]) -> None:
+    def check_accessor(
+        index: object,
+        what: str,
+        allowed: tuple[str, ...],
+        *,
+        component_types: tuple[int, ...] | None = None,
+    ) -> None:
         if not is_index(index) or index >= len(accessors):
             raise bad(f"{what} names accessor {index!r} (GLB has {len(accessors)})")
         acc = accessors[index]
@@ -1153,6 +1164,8 @@ def _check_glb_document(doc: object, bin_chunk: bytes, path: str) -> None:
         ctype, atype, count = acc.get("componentType"), acc.get("type"), acc.get("count")
         if type(ctype) is not int or ctype not in COMPONENT_STRUCT:
             raise bad(f"accessors[{index}] has unsupported componentType {ctype!r}")
+        if component_types is not None and ctype not in component_types:
+            raise bad(f"{what} is accessor {index} with componentType {ctype}, expected unsigned integer")
         if not isinstance(atype, str) or atype not in TYPE_COMPONENTS:
             raise bad(f"accessors[{index}] has unsupported type {atype!r}")
         if atype not in allowed:
@@ -1254,12 +1267,18 @@ def _check_glb_document(doc: object, bin_chunk: bytes, path: str) -> None:
                 continue
             for name, allowed in _GLB_ATTRIBUTE_TYPES.items():
                 if name in attrs:
-                    check_accessor(attrs[name], f"{where}.{name}", allowed)
+                    ctypes = _GLB_UNSIGNED_INT_COMPONENTS if name in ("JOINTS_0", "JOINTS_1") else None
+                    check_accessor(attrs[name], f"{where}.{name}", allowed, component_types=ctypes)
             for name, index in attrs.items():
                 if re.fullmatch(r"TEXCOORD_[1-9][0-9]{0,8}", name):
                     check_accessor(index, f"{where}.{name}", ("VEC2",))
             if "indices" in prim:
-                check_accessor(prim["indices"], f"{where}.indices", ("SCALAR",))
+                check_accessor(
+                    prim["indices"],
+                    f"{where}.indices",
+                    ("SCALAR",),
+                    component_types=_GLB_UNSIGNED_INT_COMPONENTS,
+                )
             if "material" not in prim:
                 continue
             material_index = prim["material"]

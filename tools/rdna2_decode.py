@@ -1054,17 +1054,20 @@ def _decode_one(code: bytes, pc: int, wave32: bool, mcpu: str) -> tuple[dict | N
         name, spec = tbl[opc]
         is_atomic = "_atomic_" in name
         has_saddr = seg in (1, 2)
-        saddr_off = saddr in (0x7D, 0x7F)  # GFX10 null (125) or legacy 127 => off (64-bit vaddr)
+        saddr_off = saddr in (0x7D, 0x7F)  # GFX10 null (125) or ST-mode/legacy 127 => off
         args = []
         for fn, nr, _ in spec:
             w = _width(nr, wave32)
             if fn == "VDST":
-                if is_atomic and not glc:
+                if (is_atomic and not glc) or (lds and seg in (1, 2)):
                     continue
                 args.append(_vreg(vdst, w))
             elif fn == "ADDR":
-                aw = 2 if (seg == 0 or (seg == 2 and saddr_off)) else 1
-                args.append(_vreg(addr, aw))
+                if seg == 1 and saddr != 0x7D:
+                    args.append({"k": "special", "t": "off", "neg": False, "abs": False})
+                else:
+                    aw = 2 if (seg == 0 or (seg == 2 and saddr_off)) else 1
+                    args.append(_vreg(addr, aw))
             elif fn == "DATA":
                 args.append(_vreg(data, w))
             elif fn == "SADDR" and has_saddr:

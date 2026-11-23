@@ -115,6 +115,10 @@ int main() {
         CHECK(r.outcome == SubgroupOutcome::emulated && r.size == 0 && r.flags == 0);
         r = decide_subgroup_size(entry("ms", true, {128, 1, 1}, true), caps);
         CHECK(r.outcome == SubgroupOutcome::emulated && r.size == 0 && r.flags == 0);
+        auto native = entry("cs", true, {64, 1, 1});
+        native.wave64_exchange = "halves";
+        r = decide_subgroup_size(native, caps);
+        CHECK(r.outcome == SubgroupOutcome::required && r.size == 64);
     }
 
     // --- NVIDIA-like: 32 only ----------------------------------------------------------------------------------

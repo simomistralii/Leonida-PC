@@ -199,24 +199,29 @@ def profile_shader(text: str) -> dict:
 
 
 LLVM_MESSAGES = "; --- llvm-mc messages ---"    # the header shader_disasm.py writes above llvm-mc's stderr
+INVALID_WORD_HEADER = re.compile(r"^;\s*\S+\s+code 0x[0-9a-f]+\.\.0x[0-9a-f]+ .+, ([0-9]{1,20}) invalid words$")
 WARNING_LOCATION = re.compile(r"; <stdin>:[1-9][0-9]*:([1-9][0-9]*)")
 BYTE_ECHO = re.compile(r"; [ \t]*0x[0-9a-fA-F]{2}(?=[ \t]|$)")
 WORD = re.compile(r"[ \t]+".join([r"0x([0-9a-fA-F]{2})"] * 4) + r"(?!\S)")    # four complete 0xNN tokens
 
 
 def warning_words(text: str):
-    """Words LLVM warned about in one .s file's llvm-mc messages section, as (words, unresolved).
+    """Invalid words from a listing, as (words identified from LLVM diagnostics, unresolved count).
 
     Each 'invalid instruction encoding' warning gives one word: the four complete 0xNN tokens starting exactly
     at its one-based column of the source line LLVM echoes right after it, as e.g. 'ff ff ff d7'. A warning whose
-    position, echo or tokens don't give such a word counts as unresolved instead."""
-    if LLVM_MESSAGES not in text:    # clean shaders have no messages section
-        return [], 0
+    position, echo or tokens don't give such a word counts as unresolved instead. The listing header also gives
+    an invalid-word count when the Python decoder produces no LLVM diagnostics."""
+    header = text.partition("\n")[0].rstrip("\r")
+    count = INVALID_WORD_HEADER.fullmatch(header)
+    declared = int(count[1]) if count else 0
+    if LLVM_MESSAGES not in text:
+        return [], declared
     lines = text.splitlines()
     try:
         start = lines.index(LLVM_MESSAGES) + 1
     except ValueError:
-        return [], 0
+        return [], declared
     words, unresolved = [], 0
     for index in range(start, len(lines)):
         head = lines[index]
@@ -240,7 +245,7 @@ def warning_words(text: str):
             words.append(" ".join(word.groups()).lower())
         else:
             unresolved += 1
-    return words, unresolved
+    return words, max(unresolved, declared - len(words))
 
 
 def register_summary(reg_stage) -> dict:

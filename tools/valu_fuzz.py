@@ -19,7 +19,9 @@ Families:
 Oracles (--oracle translator|hw|translator,hw): translator (default) assembles for gfx1013, translates and runs
 vk_compute_test. hw runs the same programs natively on the AMD GPU through tools/hw_oracle/ (wave32 and native wave64,
 64 threads) and compares them with the model, so it tests the model, not the translator; it exits 77 when the tools
-are missing. The forms are the ones with the same meaning on GFX10 and GFX11; what differs is listed in
+are missing. On the hardware both families also run on GFX11.7 and GFX12; mem's gfx12 kernels are respelled by
+gfx12_lines (null soffset, the split wait counters, global_inv). The forms are the ones
+with the same meaning on GFX10 and GFX11; what differs is listed in
 docs/shader_validation.md ("16-bit and memory ops on the GPU"). --negative-control checks that wrong models are caught.
 
 Each program is one 64-thread group (wave64, or two wave32s). Every thread stores 16 result VGPRs (v20..v35); the
@@ -42,6 +44,7 @@ import argparse
 import json
 import os
 import random
+import re
 import struct
 import subprocess
 import sys
@@ -586,9 +589,39 @@ def word3(mode, fam):
     """V# word 3 for a 32_FLOAT buffer with identity DST_SEL and OOB_SELECT = mode. GFX10 and GFX11 keep DST_SEL
     [11:0] and OOB_SELECT [29:28] where they were; FORMAT is 7 bits [18:12] on GFX10 (22 = 32_FLOAT) and 6 bits
     [17:12] on GFX11 (22 = 32_FLOAT too), and GFX10 has RESOURCE_LEVEL in bit 24, which GFX11 dropped (Mesa
-    gfx10-rsrc.json and gfx11-rsrc.json). TYPE [31:30] must be 0 on GFX11."""
+    gfx10-rsrc.json and gfx11-rsrc.json). TYPE [31:30] must be 0 on GFX11. GFX12 keeps GFX11's fields and FORMAT
+    table (gfx12-rsrc.json: 32_FLOAT = 22) and adds STRIDE_SCALE [19:18] and the compression bits [27:24], all left
+    0 here; word 1 (BASE_ADDRESS_HI [15:0], STRIDE [29:16]) is the same on all three."""
     w = 0xFAC | (22 << 12) | (mode << 28)
-    return w | (1 << 24) if fam == "gfx10" else w
+    if fam == "gfx10":
+        return w | (1 << 24)
+    if fam in ("gfx11", "gfx12"):
+        return w
+    raise ValueError(f"no V# word 3 layout for {fam}")
+
+
+# GFX12 spellings of the mem kernels' waits, cache invalidation and soffset (AMD clang, rocm-sdk-core 10.0.0, gfx1200):
+# s_waitcnt_vscnt is gone (s_wait_storecnt); the legacy s_waitcnt vmcnt/lgkmcnt forms still assemble, but to the old
+# encoding, so the split counters are named (loads: loadcnt, scalar memory: kmcnt); buffer_gl0_inv/gl1_inv are gone
+# (global_inv); and a MUBUF soffset must be an SGPR or null, not the literal 0 ("operands are not valid").
+GFX12_SPELLING = {"s_waitcnt_vscnt null, 0x0": ["s_wait_storecnt 0x0"],
+                  "s_waitcnt vmcnt(0)": ["s_wait_loadcnt 0x0"],
+                  "s_waitcnt lgkmcnt(0)": ["s_wait_kmcnt 0x0"],
+                  "buffer_gl0_inv": ["global_inv scope:SCOPE_DEV"],
+                  "buffer_gl1_inv": []}
+
+
+def gfx12_lines(lines):
+    """The mem kernel body in GFX12 spelling: GFX12_SPELLING, and soffset 0 written as null."""
+    out = []
+    for ln in lines:
+        if ln in GFX12_SPELLING:
+            out += GFX12_SPELLING[ln]
+        elif ln.startswith("buffer_"):
+            out.append(re.sub(r"(s\[\d+:\d+\]), 0\b", r"\1, null", ln))
+        else:
+            out.append(ln)
+    return out
 
 
 def buffer_dword_ok(mode, n_rec, stride, idx, off, offs, k):
@@ -746,7 +779,8 @@ class MemFamily(Family):
         return self.body("gfx10", False)
 
     def hw_body(self, fam):
-        return self.body(fam, True)
+        lines = self.body(fam, True)
+        return gfx12_lines(lines) if fam == "gfx12" else lines
 
     def hw_tail(self, fam):
         # the scratch area is in the output buffer already; the results are stored by hw_lines
@@ -814,6 +848,23 @@ FAMILIES = {"f16": F16Family, "mem": MemFamily}
 def programs(family, seed, count, waves, skip=()):
     cls = FAMILIES[family]
     return [cls(seed, i, w, skip) for i in range(count) for w in waves]
+
+
+def hw_family_skip_reason(family, arch):
+    """Why --family FAMILY cannot run natively on this GPU, or None. Checked by assembling what the generator emits
+    (AMD clang, LLVM 23 / rocm-sdk-core 10.0.0): the f16 kernels assemble clean for gfx1150, gfx1170 and gfx1201
+    (300 programs per wave size each, 0 rejected), so f16 runs on GFX11.7 and GFX12 like on any GFX11; the mem
+    kernels assemble clean for gfx1150 and gfx1170, and for gfx12xx in GFX12 spelling (gfx12_lines: the split wait
+    counters, global_inv, and a null soffset, without which every buffer_load/store_b* form is rejected with
+    "operands are not valid for this GPU or mode"). A family whose V# layout word3() does not know is refused."""
+    from hw_oracle import asm
+    if family != "mem":
+        return None
+    try:
+        word3(0, asm.family(arch))
+    except ValueError as e:
+        return f"{arch}: {e}"
+    return None
 
 
 def compare(p, data):
@@ -1039,7 +1090,9 @@ def run_translator(progs, a):
             continue
         # A wave32 program needs 32-lane subgroups. Where vk_compute_test couldn't pin them, its words come from
         # another wave size and are no evidence either way. --wave64-emulate output uses no subgroup operations.
-        lanes = unpinned_subgroup(msg) if p.wave == 32 else None
+        # Only a run that succeeded is skipped for that: a failed one is a harness error even when it printed the
+        # warning first, or a crash after it would be counted as a skip and the run could still pass.
+        lanes = unpinned_subgroup(msg) if rc == 0 and p.wave == 32 else None
         if lanes:
             skipped += 1
             print(f"SKIP {p.name}: the device can't run it at {lanes} lanes "
@@ -1128,11 +1181,16 @@ def main():
             print(f"hardware oracle unavailable: {e}")
             return 77
         from hw_oracle import asm
-        why = asm.rdna23_skip_reason(oracle.arch)
+        why = hw_family_skip_reason(a.family, oracle.arch)
         if why:
             oracle.close()
             print(f"hardware oracle unavailable: {why}")
             return 77
+        if W3_LAYOUT == "gfx10" and asm.family(oracle.arch) == "gfx12":
+            # GFX10's RESOURCE_LEVEL bit 24 is WRITE_COMPRESS_ENABLE in gfx12-rsrc.json: not an informational change there
+            oracle.close()
+            print(f"error: --gfx10-word3 sets V# word 3 bit 24, which is WRITE_COMPRESS_ENABLE on {oracle.arch}")
+            return 2
         print(f"hardware oracle: {oracle.device}")
     if a.show is not None:
         parts = a.show.split(":")

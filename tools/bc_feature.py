@@ -32,10 +32,16 @@ def _color_average(blocks: np.ndarray, force_four_colors: bool = False) -> np.nd
 
 def bc1_average(blocks: np.ndarray) -> np.ndarray:
     """blocks: (N, 8) uint8 -> (N, 3) float average colour of the 16 decoded pixels."""
+    if blocks.ndim != 2 or blocks.shape[1] != 8:
+        raise ValueError(f"bc1_average expects shape (N, 8), got {blocks.shape}")
     return _color_average(blocks)
 
 
 def block_average(blocks: np.ndarray, bpe: int) -> np.ndarray:
+    if bpe not in (8, 16):
+        raise ValueError(f"unsupported block size bpe={bpe} (expected 8 or 16)")
+    if blocks.ndim != 2 or blocks.shape[1] != bpe:
+        raise ValueError(f"block_average(bpe={bpe}) expects shape (N, {bpe}), got {blocks.shape}")
     if bpe == 8:
         return bc1_average(blocks)
     # BC3 colour uses four entries regardless of endpoint order (EXT_texture_compression_s3tc).

@@ -103,6 +103,12 @@ None of the programs is byte-identical to its source's FSSM code. Only 47 distin
 shaders compiled again with their pipeline's state. The 13 programs whose digest names no carved container (4 CS,
 5 PS, 3 VS, the slot-6 program) are the only ones with no source in the shader entries.
 
+For a VS or PS program without native wave-size metadata, a 32-bit EXEC operation and an agreeing wave32
+flag in every FSSM payload of its matching DXBC source distinguish a wave32 program that uses `s_bfm_b64`
+as scalar data. The translator keeps its existing behavior when the source is absent, the payloads disagree,
+or the library code has another strict wave64 marker. Synthetic cases are in
+`tests/semantic/test_fspx_wave_size.py`.
+
 ## 4. Tool
 
 ```sh

@@ -29,6 +29,50 @@ At start the runtime prints what it loaded, for example:
 [rt] mods: 1 archetype swap(s) loaded; not applied yet: the archetype lookup hook for this executable is not known
 ```
 
+## Managing them (`tools/leonida_mods.py`)
+
+`tools/leonida_mods.py` is the small mod manager. It writes only in the port's `mods` folder: it can create,
+install, list, check, enable, disable, pack and remove mods. A package is a normal ZIP file (the `.leonidamod`
+extension is only a name) with `mod.json` at its top level or inside one top-level folder. The installer refuses
+paths that climb out of the package, links and manifests the runtime would reject; it never goes online and never
+copies game data.
+
+On Windows, double-click **`Mods.bat`** for the Tkinter window: choose the port folder, install a ZIP or folder,
+toggle a mod, create a swap, pack or remove one, and launch `gta6rt` normally or as a dry run. The GUI uses the same
+standard-library code as the CLI below.
+
+Point `--port` at the built port (the folder with `gta6rt.exe` and `game_path.txt`), or `--dir` at a mods folder:
+
+```powershell
+python -I tools/leonida_mods.py gui
+python -I tools/leonida_mods.py --port "D:\Games\Leonida" list
+python -I tools/leonida_mods.py --port "D:\Games\Leonida" install .\mandy.zip
+python -I tools/leonida_mods.py --port "D:\Games\Leonida" new lucia_to_mandy `
+    --name "Mandy" --game-version 1.0.2.1 --swap player_story000_00=cs_mandy
+python -I tools/leonida_mods.py --port "D:\Games\Leonida" disable mandy_prison_intro
+python -I tools/leonida_mods.py --dir "D:\Games\Leonida\mods" check
+```
+
+`pack` writes an installed folder back to a ZIP for sharing; `uninstall` removes it. `run` is a convenience
+launcher for the same options `gta6rt` already takes:
+
+```powershell
+python -I tools/leonida_mods.py --port "D:\Games\Leonida" run --archetype-lookup 1A2B3C0
+```
+
+Without the measured `--archetype-lookup` RVA the runtime still loads and reports the manifests but the swaps are
+not applied, as above. The game executable itself is still needed; the manager does not supply it.
+
+The repository's `mods/` folder has four manifest-only examples. `mandy_prison_intro` is enabled; the other three
+are installed disabled so a copied folder cannot surprise anyone or silently fight it:
+
+| Folder | Swap | State |
+|---|---|---|
+| `mandy_prison_intro` | `player_story000_00` -> `cs_mandy` | enabled |
+| `lucia_cutscene_model` | `player_story000_00` -> `cs_lucia` | disabled |
+| `monalisa_player_model` | `player_story000_00` -> `cs_monalisa` | disabled |
+| `mandy_to_monalisa` | `cs_mandy` -> `cs_monalisa` | disabled |
+
 ## mod.json
 
 ```json

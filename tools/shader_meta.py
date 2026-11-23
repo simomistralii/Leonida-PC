@@ -627,17 +627,18 @@ def read_dxbc_meta(data):
     """Parse ISG1 full input signature and SFI0 descriptor-heap indexing flags from a DXBC container."""
     if not data or len(data) < 32 or data[:4] != b"DXBC":
         return {}
-    cnt = struct.unpack_from("<I", data, 28)[0]
-    if 32 + 4 * cnt > len(data):
+    total, cnt = struct.unpack_from("<II", data, 24)
+    table_end = 32 + 4 * cnt
+    if total > len(data) or total < table_end:
         return {}
     parts = {}
     for k in range(cnt):
         off = struct.unpack_from("<I", data, 32 + 4 * k)[0]
-        if off + 8 > len(data):
+        if off < table_end or off + 8 > total:
             continue
         fourcc = data[off:off + 4]
         plen = struct.unpack_from("<I", data, off + 4)[0]
-        if off + 8 + plen <= len(data):
+        if off + 8 + plen <= total:
             parts[fourcc] = data[off + 8:off + 8 + plen]
 
     out = {}

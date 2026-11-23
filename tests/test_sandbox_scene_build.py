@@ -9,6 +9,8 @@ import struct
 import subprocess
 import sys
 import tempfile
+import tracemalloc
+from types import SimpleNamespace
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
@@ -79,6 +81,26 @@ class SceneBuildTests(unittest.TestCase):
         self.assertEqual((meshes, positions), (1, [(5.0, 0.0, 0.0)]))
         self.assertIn("placed=1 unresolved=4", report)
 
+    def test_explicit_center_discards_distant_rows_while_reading(self):
+        (self.models / "manifest.json").write_text(json.dumps({"Items": self.items}), encoding="utf-8", newline="\n")
+        placements = self.root / "entities.jsonl"
+        distant = json.dumps(entity("synthetic_prop", 100, note="x" * 8192)) + "\n"
+        with placements.open("w", encoding="utf-8", newline="\n") as f:
+            for _ in range(1024):
+                f.write(distant)
+            f.write(json.dumps(entity("synthetic_prop", 1)) + "\n")
+        args = SimpleNamespace(entities=placements, models=self.models, textures=[], center=(0, 0),
+                               radius=20, max_props=1, tex_size=256, out=self.root / "scene.bin")
+        tracemalloc.start()
+        try:
+            stats = sandbox_scene.build(args)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertEqual((stats["selected_rows"], stats["entities"], stats["placed"]), (1025, 1, 1))
+        # The distant rows alone carry 8 MiB of metadata if the reader retains them.
+        self.assertLess(peak, 4 * 1024 * 1024)
+
     def test_name_key_mismatches_do_not_consume_placement_limit(self):
         wrong_key = f"{world_names.hash64('synthetic_other_prop'):016x}"
         rows = [entity("synthetic_prop", i + 1, key=wrong_key) for i in range(4)]
@@ -124,6 +146,7 @@ class SceneBuildTests(unittest.TestCase):
         meshes, positions, report = self.build_scene([entity("synthetic_prop", 1)], max_props=0)
         self.assertEqual((meshes, positions), (0, []))
         self.assertIn("entities=0 placed=0", report)
+        self.assertIn("selected_rows=1", report)
 
 
 if __name__ == "__main__":

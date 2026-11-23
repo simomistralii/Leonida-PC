@@ -185,13 +185,19 @@ def run_test(test_file: str, tools_dir: str, timeout: int) -> tuple[bool, str]:
     """True when the test file passes against tools_dir."""
     here = os.path.dirname(os.path.abspath(test_file))
     path = os.pathsep.join(filter(None, [here, os.path.join(ROOT, "tests", "semantic"), os.environ.get("PYTHONPATH")]))
-    env = dict(os.environ, LEONIDA_TOOLS_DIR=tools_dir, PYTHONDONTWRITEBYTECODE="1", PYTHONPATH=path)
+    env = dict(os.environ, LEONIDA_TOOLS_DIR=os.path.abspath(tools_dir), PYTHONDONTWRITEBYTECODE="1",
+               PYTHONPATH=path)
+    # Through unittest, as tests/semantic/test_mutations.py does: a file with no `__main__` block runs nothing when
+    # started as a script, which would pass the baseline and let every mutant survive.
+    module = os.path.splitext(os.path.basename(test_file))[0]
     try:
-        p = subprocess.run([sys.executable, os.path.abspath(test_file)], env=env, capture_output=True, text=True,
-                           timeout=timeout)
+        p = subprocess.run([sys.executable, "-m", "unittest", module], cwd=here, env=env, capture_output=True,
+                           encoding="utf-8", errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
         return False, f"timed out after {timeout} s"
-    tail = (p.stdout + p.stderr).strip().splitlines()
+    if p.returncode == 5:                         # unittest's exit status when it found no tests (Python 3.12+)
+        return False, "no tests ran"
+    tail = ((p.stdout or "") + (p.stderr or "")).strip().splitlines()
     return p.returncode == 0, tail[-1] if tail else ""
 
 

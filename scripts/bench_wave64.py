@@ -1,6 +1,7 @@
-"""Time a wave64 compute shader (runtime/test/shaders/cs_bench_mix.asm) native and emulated, on the AMD and NVIDIA GPU.
+"""Time a wave64 compute shader (runtime/test/shaders/cs_bench_mix.asm) on AMD/NVIDIA or the current Vulkan device.
 
-    python -I scripts/bench_wave64.py [--build DIR] [--llvm-mc PATH] [--groups N] [--reps N] [--procs N] [--shader NAME]
+    python -I scripts/bench_wave64.py [--build DIR] [--llvm-mc PATH] [--groups N] [--reps N] [--procs N]
+        [--shader NAME] [--emulated-only]
 
 Three configurations: AMD with its native 64-wide subgroup (no flag), AMD with --wave64-emulate, NVIDIA with
 --wave64-emulate (the GPU is chosen with VK_LOADER_DRIVERS_SELECT='*amd*,*radeon*' / '*nv*'). Each runs `procs` processes of
@@ -8,6 +9,10 @@ vk_compute_test with VKC_BENCH=`reps` timed dispatches of `groups` workgroups; t
 dispatches, the spread of the per-process medians (other programs share the GPU, so look at it), the number of
 translated segments (static: blocks + continuation segments; every continuation segment is one more workgroup barrier
 on the path through it) and whether the output bytes of the emulated runs equal the native AMD run, which is the reference (they must).
+
+With --emulated-only, run one emulated configuration on the current Vulkan device. This is for a machine without a
+native 64-wide subgroup, such as Apple Silicon. Every process must complete the shader's self-check and return the same
+output hash; there is deliberately no claim that the hash was compared with a native Wave64 device.
 """
 import argparse
 import json
@@ -27,6 +32,7 @@ from check import EXE, pick_build_dir  # noqa: E402
 COMPUTE_TEST = "vk_compute_test" + EXE
 CONFIGS = [("AMD native", "*amd*,*radeon*", False), ("AMD --wave64-emulate", "*amd*,*radeon*", True),
            ("NVIDIA --wave64-emulate", "*nv*", True)]
+EMULATED_ONLY_CONFIG = ("Current device --wave64-emulate", None, True)
 
 
 def build(work, name, emulate, llvm_mc):
@@ -54,7 +60,9 @@ def segments(spv: str) -> tuple[int, int] | None:
 
 
 def run(tools, spv, groups, reps, driver, emulate):
-    env = dict(os.environ, VK_LOADER_DRIVERS_SELECT=driver, VKC_BENCH=str(reps))
+    env = dict(os.environ, VKC_BENCH=str(reps))
+    if driver is not None:
+        env["VK_LOADER_DRIVERS_SELECT"] = driver
     args = [os.path.join(tools, COMPUTE_TEST), spv, str(groups), "dump"]
     if not emulate:
         args.append("--require-wave64")
@@ -89,16 +97,20 @@ def main():
     ap.add_argument("--reps", type=positive_int, default=30)
     ap.add_argument("--procs", type=positive_int, default=5)
     ap.add_argument("--shader", default="cs_bench_mix")
+    ap.add_argument("--emulated-only", action="store_true",
+                    help="benchmark Wave64 emulation on the current device without requiring a native AMD reference")
     a = ap.parse_args()
+    configs = [EMULATED_ONLY_CONFIG] if a.emulated_only else CONFIGS
     tools = pick_build_dir(a.build, (COMPUTE_TEST,))
     with tempfile.TemporaryDirectory(prefix="bench-w64-") as work:
-        spv = {False: build(work, a.shader, False, a.llvm_mc), True: build(work, a.shader, True, a.llvm_mc)}
+        modes = sorted({emulate for _, _, emulate in configs})
+        spv = {emulate: build(work, a.shader, emulate, a.llvm_mc) for emulate in modes}
         seg = segments(spv[True])
         print(f"{a.shader}: {a.groups} workgroups of the shader's group size, {a.procs} x {a.reps} timed dispatches")
         if seg:
             print(f"emulated: {seg[0]} segments, {seg[1]} of them continuation segments (one extra round each)")
         hashes, rows = {}, []
-        for name, driver, emulate in CONFIGS:
+        for name, driver, emulate in configs:
             med, mins, seen, dev = [], [], set(), None
             for _ in range(a.procs):
                 t, h, dev = run(tools, spv[emulate], a.groups, a.reps, driver, emulate)
@@ -116,13 +128,24 @@ def main():
                 rows.append((name, dev, statistics.median(med), min(mins), min(med), max(med)))
         for name, dev, m, lo, a_, b_ in rows:
             print(f"{name:26} {dev:34} median {m:8.3f} ms   best {lo:8.3f}   process medians {a_:.3f}..{b_:.3f}")
-        ref_name = CONFIGS[0][0]
+        if a.emulated_only:
+            name = EMULATED_ONLY_CONFIG[0]
+            result = hashes.get(name)
+            if not result:
+                print(f"no complete result from {name}")
+                return 1
+            if len(result) != 1:
+                print(f"OUTPUT HASH CHANGED between processes: {', '.join(sorted(result))}")
+                return 1
+            print(f"stable output hash: {next(iter(result))} (self-checked; no native reference)")
+            return 0
+        ref_name = configs[0][0]
         ref = hashes.get(ref_name)
         if not ref or len(ref) != 1:
             print(f"no reference output from {ref_name}: cannot compare")
             return 1
-        bad = [n for n, _, _ in CONFIGS[1:] if n in hashes and hashes[n] != ref]
-        missing = [n for n, _, _ in CONFIGS[1:] if n not in hashes]
+        bad = [n for n, _, _ in configs[1:] if n in hashes and hashes[n] != ref]
+        missing = [n for n, _, _ in configs[1:] if n not in hashes]
         print(f"reference output hash: {next(iter(ref))} ({ref_name})")
         if bad:
             print(f"OUTPUT DIFFERS from the reference: {', '.join(bad)}")

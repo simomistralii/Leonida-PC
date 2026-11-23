@@ -1,5 +1,7 @@
 #include "xbox_present.h"
 
+#include "d3d12_trace.h"
+
 #include "../src/vulkan_present.h"
 
 #include <cerrno>
@@ -43,6 +45,22 @@ XboxPresentation::XboxPresentation(std::unique_ptr<WindowPresenter> presenter, l
             std::fprintf(stderr, "[rt] present: LEONIDA_SDR_EOTF=%s is not srgb, gamma22 or 2.2: piecewise sRGB used\n", eotf);
     } else if (env == ERANGE) {
         std::fprintf(stderr, "[rt] present: LEONIDA_SDR_EOTF is too long to be srgb, gamma22 or 2.2: piecewise sRGB used\n");
+    }
+    // LEONIDA_PRESENT_UNCAP (any non-empty value other than "0") takes the frame-rate cap off: a WaitFrameEventX
+    // hands a token out at once instead of at the next interval origin, and presents go unsynced (MAILBOX or
+    // IMMEDIATE, not FIFO), so the frame rate is whatever the title renders. Registration and suspension still
+    // apply, so the title keeps its call sequence.
+    {
+        char* value = nullptr;
+        std::size_t length = 0;
+        if (_dupenv_s(&value, &length, "LEONIDA_PRESENT_UNCAP") == 0 && value) {
+            if (value[0] != '\0' && std::strcmp(value, "0") != 0) {
+                pacer_.set_uncapped(true);
+                std::fprintf(stderr, "[rt] present: LEONIDA_PRESENT_UNCAP is set: frame events return at once and "
+                                     "presents do not wait for vblank\n");
+            }
+            std::free(value);
+        }
     }
     display_white_thread_ = std::thread([this] { display_white_worker(); });
 }
@@ -103,20 +121,27 @@ HRESULT XboxPresentation::GetFrameStatisticsX(std::uint64_t token, UINT type_mas
 
 HRESULT XboxPresentation::PresentX(UINT plane_count, const XboxPresentPlaneParameters* planes,
                                    const XboxPresentParameters* params) {
+    // One trace line per present, whatever path the call takes out of present_x: the queue proxy's PresentX slot is
+    // past the PC chain, so nothing else records it, and a frame loop's presents could not be counted from a trace.
+    return d3d12_trace::result("XboxPresentation::PresentX", present_x(plane_count, planes, params));
+}
+
+HRESULT XboxPresentation::present_x(UINT plane_count, const XboxPresentPlaneParameters* planes,
+                                    const XboxPresentParameters* params) {
     std::lock_guard serialise(present_mutex_);
     if (plane_count > 2 || (plane_count && !planes)) return E_INVALIDARG;
     if (pacer_.suspended()) return from_pacer(hr::invalid_state);
-    // A zero, negative or NaN threshold never tears.
+    // A zero, negative or NaN threshold never tears; an uncapped frame is never late for anything either.
     const float threshold = params ? params->ImmediateThresholdPercent : 0.0f;
-    const bool wants_tear = threshold > 0.0f;
+    const bool wants_tear = threshold > 0.0f && !pacer_.uncapped();
     if (wants_tear && !presenter_->tear_supported())
         log_once(logged_threshold_,
                  "ImmediateThresholdPercent has no effect on this swapchain (tearing disabled by LEONIDA_PRESENT_NO_TEAR, "
                  "no VK_KHR/EXT_swapchain_maintenance1, or no IMMEDIATE/FIFO_RELAXED mode the surface can switch to): "
                  "a late frame waits for the next vblank");
 
-    // Unpaced (no interval registered): do not hold the queue for vblanks.
-    const UINT sync_interval = pacer_.registered() ? 1 : 0;
+    // Unpaced (no interval registered, or uncapped): do not hold the queue for vblanks.
+    const UINT sync_interval = pacer_.registered() && !pacer_.uncapped() ? 1 : 0;
 
     if (plane_count == 0) {
         const HRESULT result = presenter_->present_blank(sync_interval);

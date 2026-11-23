@@ -85,6 +85,53 @@ class TimecyclePairsTests(unittest.TestCase):
         })
         self.assertEqual(summary["second_number"]["distinct_round6"], 2)
 
+    def test_non_ascii_root_extensions_are_not_target_documents(self):
+        for suffix in ("\u00e9", "\u6f22", "\u0301", "\u00b7"):
+            for target, payload in (("timecycle_modifier_data", SYNTH_MOD), ("timecycle_keyframe_data", SYNTH_KF)):
+                with self.subTest(suffix=suffix, target=target), tempfile.TemporaryDirectory() as tmp:
+                    lookalike = payload.replace(target.encode(), (target + suffix).encode("utf-8"))
+                    # These are valid XML names, but they identify different document types.
+                    self.assertEqual(tp.ET.fromstring(lookalike).tag, target + suffix)
+                    path = os.path.join(tmp, "lookalike.xml")
+                    with open(path, "wb") as f:
+                        f.write(lookalike)
+                    self.assertEqual(tp.load_documents([path]), [])
+                    self.assertEqual(tp.load_documents([tmp]), [])
+                    valid = os.path.join(tmp, "valid.xml")
+                    with open(valid, "wb") as f:
+                        f.write(payload)
+                    self.assertEqual(tp.load_documents([tmp]), [(target, payload)])
+
+    def test_carved_source_skips_non_ascii_root_extensions(self):
+        lookalike = SYNTH_MOD.replace(b"timecycle_modifier_data", "timecycle_modifier_data\u00e9".encode("utf-8"))
+
+        class Source:
+            rows = [{"off": 0}, {"off": 1}]
+
+            def read(self, row):
+                return (lookalike, SYNTH_MOD)[row["off"]]
+
+        docs = tp._iter_source_docs(Source())
+        self.assertEqual(docs, [("timecycle_modifier_data", SYNTH_MOD)])
+        self.assertEqual(tp.summarize_documents(docs)["modifiers"]["total"], 3)
+
+    def test_carved_root_name_boundary_can_arrive_in_the_next_stream(self):
+        marker = b"<timecycle_modifier_data"
+        split = SYNTH_MOD.index(marker) + len(marker)
+        for suffix in ("", "\u00e9"):
+            with self.subTest(suffix=suffix):
+                payload = SYNTH_MOD.replace(b"timecycle_modifier_data", ("timecycle_modifier_data" + suffix).encode())
+                chunks = (payload[:split], payload[split:], SYNTH_MOD)
+
+                class Source:
+                    rows = [{"off": i} for i in range(len(chunks))]
+
+                    def read(self, row):
+                        return chunks[row["off"]]
+
+                expected = [("timecycle_modifier_data", SYNTH_MOD)] * (1 if suffix else 2)
+                self.assertEqual(tp._iter_source_docs(Source()), expected)
+
     def test_cli_xml_directory_and_out(self):
         with tempfile.TemporaryDirectory() as tmp:
             with open(os.path.join(tmp, "kf.xml"), "wb") as f:

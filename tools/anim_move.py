@@ -33,6 +33,8 @@ import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import anim_index  # noqa: E402
+from file_mode import published_mode  # noqa: E402
+from replace_retry import replace as replace_retry  # noqa: E402
 from report_paths import same_report_path  # noqa: E402
 
 MAGIC = b"MoVE"
@@ -569,19 +571,38 @@ def _summary_row(r):
 
 
 def _write_json_atomic(path, doc):
-    parent = os.path.dirname(os.path.abspath(path)) or "."
+    """Publish complete JSON, or leave the previous report intact on replace failure."""
+    destination = os.path.abspath(path)
+    parent = os.path.dirname(destination) or "."
     os.makedirs(parent, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(prefix=".anim_move_", suffix=".tmp", dir=parent)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+        mode = os.stat(destination).st_mode
+    except FileNotFoundError:
+        mode = None
+    except OSError:
+        # Non-regular destinations (pipes/devices) keep a direct write.
+        with open(destination, "w", encoding="utf-8", newline="\n") as f:
             json.dump(doc, f, indent=1)
-        os.replace(tmp_path, path)
-    except BaseException:
+        return
+    if mode is not None:
+        # Retain the direct writer's permission check without truncating the report.
+        os.close(os.open(destination, os.O_WRONLY))
+
+    staged = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", newline="\n", delete=False,
+        dir=parent, prefix=".anim_move_", suffix=".tmp",
+    )
+    try:
+        with staged:
+            json.dump(doc, staged, indent=1)
+        if os.name != "nt":
+            os.chmod(staged.name, published_mode(destination))
+        replace_retry(staged.name, destination)
+    finally:
         try:
-            os.unlink(tmp_path)
-        except OSError:
+            os.unlink(staged.name)
+        except FileNotFoundError:
             pass
-        raise
 
 
 def main(argv=None):

@@ -240,6 +240,18 @@ class MainTests(unittest.TestCase):
         with open(archive, "rb") as f:
             self.assertEqual(f.read(), original)
 
+    def test_replace_retry_failure_preserves_the_existing_report(self):
+        previous = '[{"previous": true}]\n'
+        out_dir = os.path.dirname(self.out)
+        os.makedirs(out_dir, exist_ok=True)
+        with open(self.out, "w", encoding="utf-8", newline="\n") as f:
+            f.write(previous)
+        with mock.patch.object(probe, "replace_retry", side_effect=OSError(13, "Permission denied")):
+            with self.assertRaises(OSError):
+                probe._write_json_report(self.out, [{"new": True}])
+        with open(self.out, encoding="utf-8") as f:
+            self.assertEqual(f.read(), previous)
+
     @unittest.skipUnless(os.name == "posix", "requires a POSIX file size limit")
     def test_failed_write_preserves_the_existing_report(self):
         self.write("demo.rpf", b"9FPR" + struct.pack("<I", 16) + bytes(32))
@@ -306,6 +318,35 @@ runpy.run_path(sys.argv.pop(1), run_name="__main__")
             self.assertEqual(probe.main(), 2)
         self.assertIn(blocked, err.getvalue())
         self.assertEqual(self.rows(), before)
+
+    def test_directory_out_is_refused_before_scanning_archives(self):
+        self.write("a.rpf", archive_bytes())
+        out_dir = os.path.join(self.tmp, "out_is_a_dir")
+        os.mkdir(out_dir)
+        err = io.StringIO()
+        argv = ["rpf_probe.py", self.game, "--out", out_dir]
+        with (mock.patch("sys.argv", argv), mock.patch.object(probe, "probe", wraps=probe.probe) as probe_fn,
+              contextlib.redirect_stderr(err)):
+            self.assertEqual(probe.main(), 2)
+        probe_fn.assert_not_called()
+        self.assertIn("directory", err.getvalue().lower())
+        self.assertEqual(os.listdir(out_dir), [])
+
+    def test_symlinked_out_updates_target_in_place(self):
+        self.write("a.rpf", archive_bytes())
+        target = os.path.join(self.tmp, "real_report.json")
+        with open(target, "w", encoding="utf-8") as f:
+            f.write("[]")
+        os.makedirs(os.path.dirname(self.out), exist_ok=True)
+        try:
+            os.symlink(target, self.out)
+        except (OSError, NotImplementedError) as e:
+            self.skipTest(f"symlinks unavailable: {e}")
+        self.run_main()
+        self.assertTrue(os.path.islink(self.out))
+        with open(target, encoding="utf-8") as f:
+            rows = json.load(f)
+        self.assertEqual(len(rows), 1)
 
 
 if __name__ == "__main__":

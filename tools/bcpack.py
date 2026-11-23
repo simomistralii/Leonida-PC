@@ -281,6 +281,8 @@ def _decode_lanes_raw(raw, widths, nsym):
                             fail("fragment did not end at its home state", i)
                     elif out_rem[i] == 0 and not nxt:
                         done[i] = True
+                    elif st == L:
+                        fail("fragment did not end at its home state", i)
                 elif st == L or (out_rem[i] == 0 and not nxt and st > L):
                     fail("fragment did not end at its home state", i)
 
@@ -1039,25 +1041,35 @@ def _bc6h_blocks(lanes, nblocks, provisional, *, history=None):
             f"BC6H chunk has {lost}/{nblocks} blocks from unknown built-in history entries "
             f"({', '.join(missing[:6])}{', ...' if len(missing) > 6 else ''}){hint}"
         )
-    if violations > _loose_limit(nblocks):
-        raise BcpackProvisionalError(
-            f"BC6H chunk has {violations} anchor pixels with an inconsistent index"
-        )
-    if missing:
-        provisional.add(f"BC6H unknown history {', '.join(missing)} ({lost} blocks)")
-    if violations:
-        provisional.add(f"BC6H anchor index inconsistent in {violations} pixels")
-    for kind, entries, cls in (("endpoint", weak_e, eclass), ("index", weak_i, iclass)):
-        for k in sorted(entries):
-            if cls[k] == 3:
-                provisional.add(f"BC6H {kind} history {k} (unconfirmed bits)")
+    weak_labels = [
+        f"BC6H {kind} history {k} (unconfirmed bits)"
+        for kind, entries, cls in (("endpoint", weak_e, eclass), ("index", weak_i, iclass))
+        for k in sorted(entries)
+        if cls[k] == 3
+    ]
+    hist_labels = []
     for name, entries, cls in (("endpoint", ends, eclass), ("index", idxs, iclass)):
         fitted = sorted(k for k in entries if cls[k] == 1)
         rough = sorted(k for k in entries if cls[k] == 2)
         if fitted:
-            provisional.add(f"BC6H {name} history {', '.join(map(str, fitted))}")
+            hist_labels.append(f"BC6H {name} history {', '.join(map(str, fitted))}")
         if rough:
-            provisional.add(f"BC6H {name} history {', '.join(map(str, rough))} (last-resort)")
+            hist_labels.append(f"BC6H {name} history {', '.join(map(str, rough))} (last-resort)")
+    if violations:
+        if not (provisional or missing or weak_labels or hist_labels):
+            raise BcpackError(
+                f"BC6H chunk has {violations} anchor pixel(s) with an inconsistent index"
+            )
+        if violations > _loose_limit(nblocks):
+            raise BcpackProvisionalError(
+                f"BC6H chunk has {violations} anchor pixels with an inconsistent index"
+            )
+    if missing:
+        provisional.add(f"BC6H unknown history {', '.join(missing)} ({lost} blocks)")
+    if violations:
+        provisional.add(f"BC6H anchor index inconsistent in {violations} pixels")
+    provisional.update(weak_labels)
+    provisional.update(hist_labels)
     return bytes(out)
 
 
@@ -1417,10 +1429,10 @@ def _bc7_blocks(lanes, nblocks, provisional, *, history=None):
     data, status = _bc7_rebuild(lanes, nblocks, table)
     bad = [i for i, st in enumerate(status) if st]
     if bad:
-        first_st = status[bad[0]]
-        if not (first_st & (_B7_ANCHOR | _B7_PBIT)):
+        sig_bad = [i for i in bad if status[i] & _B7_SIGNATURE]
+        if sig_bad:
             raise BcpackError(
-                f"BC7 chunk failed signature check ({len(bad)}/{nblocks} blocks; first: block {bad[0]})"
+                f"BC7 chunk failed signature check ({len(sig_bad)}/{nblocks} blocks; first: block {sig_bad[0]})"
             )
         if provisional is None or not provisional:
             raise BcpackError(

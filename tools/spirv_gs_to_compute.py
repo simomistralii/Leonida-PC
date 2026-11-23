@@ -22,6 +22,7 @@ triangles (or lines, points) in emission order.
 Usage: spirv_gs_to_compute.py in.spv out.spv [--layout out.json]
 Needs spirv-dis and spirv-as (SPIRV-Tools) on PATH, or SPIRV_DIS / SPIRV_AS.
 """
+import io
 import json
 import os
 import re
@@ -43,10 +44,15 @@ class Unsupported(Exception):
     pass
 
 
+def _assembly_lines(text):
+    # Only physical line endings separate instructions; Unicode separators can be part of a quoted name.
+    return (line.removesuffix("\n") for line in io.StringIO(text, newline=None))
+
+
 def parse(text):
     """defs: id -> (opcode, operands) for '%id = OpX ...' lines; deco: id -> its OpDecorate operand strings."""
     defs, deco = {}, {}
-    for ln in text.splitlines():
+    for ln in _assembly_lines(text):
         m = re.match(r"\s*(%\w+) = (Op\w+)(.*)$", ln)
         if m:
             defs[m.group(1)] = (m.group(2), m.group(3).split())
@@ -189,7 +195,7 @@ def rewrite(text: str, *, version: tuple[int, int] = (1, 5)) -> tuple[str, dict[
     block_tail = {}
     main_start = None
     state = "header"        # header -> main_entry -> main_vars -> main -> other
-    for ln in text.splitlines():
+    for ln in _assembly_lines(text):
         s = ln.strip()
         if s == "OpCapability Geometry":
             continue

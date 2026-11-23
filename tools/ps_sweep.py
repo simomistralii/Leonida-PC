@@ -537,12 +537,17 @@ def main(argv=None):
     ap.add_argument("--variant", choices=["z", "t", "sint", "uint"], default="z")
     ap.add_argument("--exe", help="vk_ps_sweep")
     ap.add_argument("--glslang", default="glslangValidator")
-    ap.add_argument("--timeout", type=int, default=20, help="seconds the GPU may take for one draw")
+    ap.add_argument("--timeout", type=int, default=20,
+                    help="seconds the GPU may take for one draw (at least 1)")
     ap.add_argument("--lo", type=int, default=0)
     ap.add_argument("--hi", type=int, default=0)
     ap.add_argument("--only", type=lambda s: [int(x) for x in s.split(",")], default=None)
     ap.add_argument("--suffix", default="", help="results folder suffix (a re-run uses _re)")
     a = ap.parse_args(argv)
+    # cmd_run waits timeout+15 seconds. A negative result is already expired: subprocess.run
+    # raises TimeoutExpired at once, and that is recorded as a GPU hang (code 3) without a draw.
+    if a.timeout < 1:
+        ap.error("--timeout must be at least 1")
     a.depth |= a.two_clear
     if a.depth and a.cmd != "run":
         ap.error("--depth needs run")

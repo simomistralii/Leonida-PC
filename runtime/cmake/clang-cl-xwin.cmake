@@ -16,6 +16,12 @@ set(CMAKE_SYSTEM_PROCESSOR AMD64)
 
 if(NOT XWIN_DIR)
   set(XWIN_DIR "$ENV{XWIN_DIR}")
+  if(XWIN_DIR AND NOT IS_ABSOLUTE "${XWIN_DIR}")
+    # Match a relative -DXWIN_DIR= path by resolving it from CMake's working directory.
+    execute_process(COMMAND pwd -P OUTPUT_VARIABLE _xwin_cwd COMMAND_ERROR_IS_FATAL ANY)
+    string(REGEX REPLACE "\n$" "" _xwin_cwd "${_xwin_cwd}")
+    cmake_path(ABSOLUTE_PATH XWIN_DIR BASE_DIRECTORY "${_xwin_cwd}")
+  endif()
 endif()
 if(NOT XWIN_DIR OR NOT EXISTS "${XWIN_DIR}/VC/Tools/MSVC")
   message(FATAL_ERROR "Set XWIN_DIR (or -DXWIN_DIR=) to an xwin splat made with --use-winsysroot-style")

@@ -626,5 +626,46 @@ class RageTextureDetectionTest(unittest.TestCase):
         self.assertEqual(summary["texture_dictionaries"], 1)
         self.assertEqual(summary["texture_headers"], 2)
 
+    def test_failed_output_write_preserves_existing_json_and_csv_reports(self):
+        real_named_temp = tempfile.NamedTemporaryFile
+
+        def failing(*args, **kwargs):
+            handle = real_named_temp(*args, **kwargs)
+
+            def fail_write(data):
+                handle.file.write(data[:4])
+                raise OSError(28, "No space left on device")
+
+            handle.write = fail_write
+            return handle
+
+        with tempfile.TemporaryDirectory() as td:
+            rpf = os.path.join(td, "tex.rpf")
+            data_start = 0x100
+            body = bytearray(data_start)
+            body[:4] = b"9FPR"
+            struct.pack_into("<I", body, 4, data_start)
+            body += zlib.compress(b"plain bytes " * 10)
+            with open(rpf, "wb") as f:
+                f.write(body)
+            rows, summary = restofworld_index.scan_rpf(rpf)
+
+            for name, old_text in (("kept.json", '{"previous": true}\n'), ("kept.csv", "offset,stored\n0x0,1\n")):
+                out = os.path.join(td, name)
+                with open(out, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(old_text)
+                for label, patch in (
+                    ("write", unittest.mock.patch.object(restofworld_index.tempfile, "NamedTemporaryFile",
+                                                         side_effect=failing)),
+                    ("replace", unittest.mock.patch.object(restofworld_index.os, "replace",
+                                                           side_effect=PermissionError(13, "Permission denied"))),
+                ):
+                    with self.subTest(name=name, label=label), patch:
+                        with self.assertRaises(OSError):
+                            restofworld_index.write_output(out, rows, summary)
+                        with open(out, encoding="utf-8") as f:
+                            self.assertEqual(f.read(), old_text)
+                        self.assertFalse([n for n in os.listdir(td) if n.startswith(".restofworld_index-")])
+
 if __name__ == "__main__":
     unittest.main()

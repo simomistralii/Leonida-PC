@@ -64,6 +64,16 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(carve.classify({"head": "ff" + RBF0_HEAD, "size": 1}), "other:ff524246")
 
 
+class BomIndexTests(unittest.TestCase):
+    def test_utf8_bom_index_is_accepted(self):
+        rows = [{"head": RBF0_HEAD, "size": 1}]
+        with tempfile.TemporaryDirectory() as root:
+            index = os.path.join(root, "index.json")
+            with open(index, "w", encoding="utf-8-sig") as f:
+                json.dump({"files": rows}, f)
+            self.assertEqual(list(carve.index_rows(index)), rows)
+
+
 class SizeStatsTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -312,6 +322,43 @@ class MainTests(unittest.TestCase):
                 self.run_main()
         self.assertEqual(self.types(), before)
         self.assertEqual(sorted(os.listdir(self.root)), files)
+
+    def test_recursion_error_in_index_is_one_error_line(self):
+        index = os.path.join(self.archive("a", []), "index.json")
+        err = io.StringIO()
+        with mock.patch.object(carve.json, "load", side_effect=RecursionError("maximum recursion depth exceeded")):
+            with mock.patch.object(sys, "argv", ["classify_carve.py", self.root]):
+                with contextlib.redirect_stderr(err):
+                    rc = carve.main()
+        self.assertEqual(rc, 2)
+        self.assertIn(index, err.getvalue())
+        self.assertIn("invalid JSON", err.getvalue())
+
+    def test_unreadable_root_is_one_error_line(self):
+        err = io.StringIO()
+        with mock.patch.object(carve.os, "listdir", side_effect=PermissionError("denied")):
+            with mock.patch.object(sys, "argv", ["classify_carve.py", self.root]):
+                with contextlib.redirect_stderr(err):
+                    rc = carve.main()
+        self.assertEqual(rc, 2)
+        self.assertIn(self.root, err.getvalue())
+
+    def test_symlinked_types_json_updates_target_in_place(self):
+        self.archive("a", [{"head": RBF0_HEAD, "size": 42}])
+        with tempfile.TemporaryDirectory() as other:
+            target = os.path.join(other, "real_types.json")
+            with open(target, "w", encoding="utf-8") as f:
+                f.write("{}")
+            link = os.path.join(self.root, "types.json")
+            try:
+                os.symlink(target, link)
+            except OSError as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+            self.run_main()
+            self.assertTrue(os.path.islink(link))
+            with open(target, encoding="utf-8") as f:
+                data = json.load(f)
+            self.assertEqual(counts(data["overall"]["rbf0"]), {"files": 1, "bytes": 42})
 
 
 if __name__ == "__main__":

@@ -151,6 +151,9 @@ def run_programs(texts, words=4, wave=32, build=None, work_parent=None, retries=
                 if r.returncode in (0, 77):
                     break
             msg = (r.stdout + r.stderr).strip()
+            if r.returncode not in (0, 77):
+                detail = f": {msg[-400:]}" if msg else ""
+                raise RuntimeError(f"{name}: vk_compute_test exit {r.returncode}{detail}")
             if r.returncode == 77:
                 results[i] = "vk_compute_test: " + (msg.splitlines()[-1] if msg else "unsupported")
             elif wave == 32 and unpinned_subgroup(msg):

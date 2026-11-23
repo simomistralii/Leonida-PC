@@ -213,8 +213,9 @@ nothing for it rather than guessing.
 The trigger motors play one waveform each: an intensity, which is the one thing SDL lets the shim send on a trigger,
 through the same output as the trigger rumble — `SDL_RumbleGamepadTriggers`, or the DualSense effect block. `duration`
 and `repeatDelay` are microseconds, `playCount` 0 plays until the state is set again, and a null `params` stops the
-motor. The trigger rumble level and the haptic intensity share that one message, the stronger of the two winning, so a
-title mixing them does not get one cancel the other.
+motor. For a waveform with a duration, each repetition plays for that duration and then leaves a quiet interval of
+`repeatDelay` before the next repetition. The poll thread samples the current phase. During a pulse, the stronger of
+the haptic intensity and ordinary trigger rumble wins. During the interval, ordinary trigger rumble continues.
 
 **This is an approximation too, and a coarser one than the rumble.** A real haptic motor has a table of waveforms, each
 with its own HID usage; SDL exposes no such table — a DualSense takes one effects block and everything else takes a
@@ -425,7 +426,15 @@ the enums the shim uses and the structs it has to lay out. It was written agains
 GDK version, also published as the `Microsoft.GameInput` NuGet package 0.2303.22621.3038). The header is not in the
 repository. Its struct offsets were checked by compiling both side by side with `offsetof` asserts for every field the
 shim fills (`GameInputDeviceInfo` 320 bytes with `deviceFamily` at 96 and the info pointers from 160,
-`GameInputGamepadState` 28 bytes, `GameInputControllerAxisInfo` 48, and the rest in `gameinput_abi.h`).
+`GameInputGamepadState` 28 bytes, and the rest in `gameinput_abi.h`). Four structs had only their size compared, or
+were taken as empty, and were wrong: `GameInputControllerAxisInfo` (48 bytes) and `GameInputControllerButtonInfo` (32)
+have a `GameInputLabel` at offset 4, in what would otherwise be padding, so the members behind it sat four bytes early,
+and `GameInputGamepadInfo` and `GameInputUiNavigationInfo` are tables of 14 and 21 labels (56 and 84 bytes). Every
+member of the four now compares equal side by side, and `gameinput_abi.h` pins each offset. The host's GameInput 0.2309
+fills the two tables in that order: a DualSense (`054c:0ce6`) over USB has the cross, circle, square and triangle icons
+for A, B, X and Y, `Menu`, `View`, `Up`/`Down`/`Left`/`Right`, `L1`/`R1` and `L3`/`R3`, and null axis and button arrays.
+The shim gives every control the Xbox label of its position on every pad, because every pad is presented as an Xbox
+One pad; an Xbox pad's labels on the host are not measured.
 
 The force-feedback and haptic declarations (`GameInputForceFeedbackMotorInfo`, `GameInputHapticWaveformInfo`,
 `GameInputHapticFeedbackMotorInfo`, the envelope and parameter structs, `IGameInputForceFeedbackEffect`) were

@@ -117,8 +117,8 @@ int check_backend(const char* label, ID3D12Device* device, ID3D12Device* real, b
         EXPECT(dxgi->GetParent(__uuidof(IDXGIAdapter), nullptr) == E_POINTER);
     }
     {
-        // Whose adapter it is. The layer's own stops at IDXGIAdapter3 and its parent is the layer's factory, which
-        // enumerates exactly that one adapter; the host's is the host DXGI's (IDXGIAdapter4 since Windows 10 1803).
+        // Whose adapter it is. Both answer IDXGIAdapter4 (the host's since Windows 10 1803); the layer's parent is
+        // the layer's factory, which enumerates exactly that one adapter.
         Ref<IDXGIAdapter4> adapter4;
         const HRESULT hr4 = adapter->QueryInterface(__uuidof(IDXGIAdapter4), reinterpret_cast<void**>(&adapter4.p));
         Ref<IDXGIFactory1> factory;
@@ -126,7 +126,7 @@ int check_backend(const char* label, ID3D12Device* device, ID3D12Device* real, b
         Ref<IDXGIAdapter> second;
         const HRESULT second_hr = factory->EnumAdapters(1, &second.p);
         if (vulkan) {
-            EXPECT(hr4 == E_NOINTERFACE && !adapter4.p);
+            EXPECT(hr4 == S_OK && adapter4.p);
             EXPECT(second_hr == DXGI_ERROR_NOT_FOUND && !second.p);
         }
     }
@@ -213,7 +213,7 @@ int check_direct(const char* label, ID3D12Device* real, bool vulkan) {
         Ref<IDXGIAdapter> second;
         const HRESULT second_hr = factory->EnumAdapters(1, &second.p);
         if (vulkan) {
-            EXPECT(hr4 == E_NOINTERFACE && !adapter4.p);
+            EXPECT(hr4 == S_OK && adapter4.p);
             EXPECT(second_hr == DXGI_ERROR_NOT_FOUND && !second.p);
         }
     }

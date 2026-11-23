@@ -620,19 +620,21 @@ def main():
     except runner.Unavailable as e:
         print(f"hardware oracle unavailable: {e}")
         return 77
-    family = asm.family(oracle.arch)
-    fmts = explicit if explicit is not None else select_formats("", family)
-    if family == "gfx12":
-        print("GFX12 numbers its formats again; not built here")
-        oracle.close()
-        return 77
-    print(f"hardware oracle: {oracle.device} ({oracle.arch}, {family} format numbers)")
-    if family == "gfx11":
-        print("note: GFX11 is RDNA3 or newer, not RDNA2: a match supports the model and does not prove RDNA2; "
-              f"GFX10-only codes {', '.join(map(str, GFX10_ONLY))} cannot be run here")
-        fmts = [(c, n) for c, n in fmts if n in GFX11_CODES]
-    rng = random.Random(a.seed)
     try:
+        family = asm.family(oracle.arch)
+        fmts = explicit if explicit is not None else select_formats("", family)
+        if family == "gfx12":
+            print("GFX12 numbers its formats again; not built here")
+            return 77
+        print(f"hardware oracle: {oracle.device} ({oracle.arch}, {family} format numbers)")
+        if family == "gfx11":
+            print("note: GFX11 is RDNA3 or newer, not RDNA2: a match supports the model and does not prove RDNA2; "
+                  f"GFX10-only codes {', '.join(map(str, GFX10_ONLY))} cannot be run here")
+            fmts = [(c, n) for c, n in fmts if n in GFX11_CODES]
+            if not a.negative_control and not fmts:
+                print("no requested formats can run on GFX11 (all are GFX10-only)")
+                return 77
+        rng = random.Random(a.seed)
         if a.negative_control:
             return negative_control(oracle, family, rng)
         paths = ("mubuf", "mtbuf") if a.path == "both" else (a.path,)

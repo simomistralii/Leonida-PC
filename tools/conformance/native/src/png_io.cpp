@@ -57,7 +57,8 @@ bool WritePngFile(const std::filesystem::path& path, const PixelSurface& surface
         return false;
     }
     const std::string write_hint =
-        "the output directory is writable and nothing else holds " + path.string() + " open";
+        "the output directory is writable and nothing else holds " +
+        TextFromWide(path.native()) + " open";
     if (!HrSucceeded(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE), __FILE__, __LINE__,
                      "IWICStream::InitializeFromFilename", write_hint.c_str())) {
         return false;
@@ -131,8 +132,8 @@ bool ReadPngFile(const std::filesystem::path& path, PixelSurface& surface_out) {
     }
 
     ComPtr<IWICBitmapDecoder> decoder;
-    const std::string read_hint = path.string() +
-                                  " exists and is not locked by another process";
+    const std::string read_hint =
+        TextFromWide(path.native()) + " exists and is not locked by another process";
     if (!HrSucceeded(factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
                                                         WICDecodeMetadataCacheOnDemand,
                                                         decoder.GetAddressOf()),

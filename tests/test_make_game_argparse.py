@@ -117,6 +117,39 @@ class ArgparseDefaultsAndTypesTest(unittest.TestCase):
                     self.assertEqual(ctx.exception.code, 2, jobs)
                     self.assertIn("must be at least 1", mock_err.getvalue())
 
+    def test_empty_path_options_rejected_by_argparse(self):
+        # An empty value used to read as "not given": --out "" built into the default folder.
+        for option in ("--game", "--out", "--work", "--runtime-build"):
+            for value in ("", "  "):
+                with patch.object(sys, "argv", ["make_game.py", option, value]):
+                    with patch("sys.stderr", new_callable=io.StringIO) as mock_err:
+                        with self.assertRaises(SystemExit) as ctx:
+                            make_game.main()
+                        self.assertEqual(ctx.exception.code, 2, (option, value))
+                        self.assertIn("must not be empty", mock_err.getvalue(), (option, value))
+
+    def test_path_options_omitted_or_given_still_parse(self):
+        class Stop(Exception):
+            pass
+
+        orig_parse_args = argparse.ArgumentParser.parse_args
+        captured = []
+
+        def wrap_parse(parser_self, *args, **kwargs):
+            captured.append(orig_parse_args(parser_self, *args, **kwargs))
+            raise Stop
+
+        paths = ["--game", "G", "--out", "O", "--work", "W", "--runtime-build", "R"]
+        for argv in (["make_game.py"], ["make_game.py", *paths]):
+            with patch.object(sys, "argv", argv):
+                with patch.object(argparse.ArgumentParser, "parse_args", wrap_parse):
+                    with self.assertRaises(Stop):
+                        make_game.main()
+        omitted, given = captured
+        for name in ("game", "out", "work", "runtime_build"):
+            self.assertIsNone(getattr(omitted, name))
+        self.assertEqual((given.game, given.out, given.work, given.runtime_build), ("G", "O", "W", "R"))
+
     def test_unrecognized_argument_rejected(self):
         with patch.object(sys, "argv", ["make_game.py", "--unrecognized-option"]):
             with patch("sys.stderr", new_callable=io.StringIO) as mock_err:

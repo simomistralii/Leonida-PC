@@ -450,5 +450,18 @@ class CompareCommand(unittest.TestCase):
         self.assertIn("display", buf.getvalue())
 
 
+class DrawTimeout(unittest.TestCase):
+    def test_non_positive_timeout_is_a_usage_error(self):
+        # cmd_run passes timeout+15 to subprocess.run. Below -15 that wait is not positive, so the
+        # draw was recorded as an immediate hang (code 3) before the program started.
+        err = io.StringIO()
+        for value in ("0", "-1", "-16"):
+            with self.subTest(timeout=value), contextlib.redirect_stderr(err):
+                with self.assertRaises(SystemExit) as caught:
+                    ps_sweep.main(["sample", "--out", "unused", "--timeout", value])
+                self.assertEqual(caught.exception.code, 2)
+        self.assertIn("--timeout must be at least 1", err.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

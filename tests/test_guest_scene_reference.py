@@ -78,6 +78,25 @@ class GuestSceneReferenceTest(unittest.TestCase):
                     self.assertIn(diagnostic.encode(encoding, "backslashreplace"), result.stderr)
                     self.assertNotIn(b"UnicodeEncodeError", result.stderr)
 
+    def test_uncreatable_output_reports_clean_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "spirv").mkdir()
+            placeholder = root / "placeholder.txt"
+            placeholder.write_bytes(b"synthetic input")
+            out = placeholder / "output"
+            result = subprocess.run(
+                [sys.executable, "-I", str(path), "--wine", sys.executable,
+                 "--loader", str(placeholder), "--guest", str(placeholder),
+                 "--shaders", str(root), "--out", str(out)],
+                capture_output=True, encoding="utf-8", errors="replace", timeout=20,
+            )
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn(f"could not create output directory {out.resolve()}", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(placeholder.read_bytes(), b"synthetic input")
+
     def test_launch_failure_preserves_run_record_and_logs(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve()  # the script resolves its paths, so a short Windows temp name expands
@@ -89,7 +108,7 @@ class GuestSceneReferenceTest(unittest.TestCase):
             cmd = [sys.executable, "-I", str(path), "--loader", str(bad_loader), "--guest", str(bad_loader),
                    "--shaders", str(root), "--out", str(out)]
             if sys.platform != "win32":
-                cmd += ["--wine", str(bad_loader)]
+                cmd += ["--wine", str(bad_loader), "--wine-arg=-a", "--wine-arg=path with spaces/wine"]
             result = subprocess.run(cmd, capture_output=True, encoding="utf-8", timeout=20)
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
             report = json.loads((out / "report.json").read_text(encoding="utf-8"))
@@ -99,6 +118,8 @@ class GuestSceneReferenceTest(unittest.TestCase):
             self.assertEqual(record["outcome"], "launch_failed")
             self.assertIsNone(record["returncode"])
             self.assertEqual(record["cmd"][0], str(bad_loader))
+            if sys.platform != "win32":
+                self.assertEqual(record["cmd"][1:3], ["-a", "path with spaces/wine"])
             self.assertTrue(record["launch_error"])
             for stream in ("stdout", "stderr"):
                 contents = (out / "logs" / f"full.{stream}.log").read_bytes()

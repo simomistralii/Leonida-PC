@@ -24,6 +24,7 @@ import os
 import statistics
 import sys
 from collections import defaultdict
+from decimal import Decimal, InvalidOperation
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
 import shader_ir  # noqa: E402
@@ -81,17 +82,21 @@ def load_stats(path):
 
 def number(raw):
     """The exact int, or else the finite float, a raw value holds; None if it is missing or not such a number."""
-    if raw is None:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError, OverflowError):
         return None
-    for parse in (int, float):
+    if not math.isfinite(value):
+        return None
+    if value.is_integer():
+        # Beyond 2**53, converting the rounded float back to int can change the counter.
         try:
-            value = parse(raw)
-            if not math.isfinite(value):
-                return None
-            return int(value) if isinstance(value, float) and value.is_integer() else value
-        except (TypeError, ValueError, OverflowError):
-            pass
-    return None
+            exact = Decimal(raw)
+        except InvalidOperation:
+            return value
+        if exact == exact.to_integral_value():
+            return int(exact)
+    return value
 
 
 def shader_row(name, stage, st, src):

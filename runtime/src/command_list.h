@@ -762,12 +762,13 @@ public:
     }
 
     // ClearDepthStencilView; the cleared planes must be in depth_write state at execution.
-    // D3D12 requires depth in [0, 1] and at least one clear flag.
+    // A D32_FLOAT target keeps the depth exactly as given, outside [0, 1] and NaN included (measured on WARP,
+    // d3d12_clear_test); a D16 target quantizes it at replay. Flags that name no plane close the list and clear nothing.
     bool clear_depth_stencil(const TargetView& target, std::uint32_t flags, float depth, std::uint8_t stencil,
                              std::span<const Rect> rects = {}) {
         if (!valid(target)) return false;
-        if (!flags || (flags & ~(clear_depth | clear_stencil))) return false;
-        if ((flags & clear_depth) && !(depth >= 0.0f && depth <= 1.0f)) return false;
+        if (flags & ~(clear_depth | clear_stencil)) return false;
+        if (!flags) return !closed_;
         return append(ClearDepthStencil{target, flags, depth, stencil, {rects.begin(), rects.end()}});
     }
 

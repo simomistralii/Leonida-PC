@@ -31,6 +31,10 @@ namespace fs = std::filesystem;
 int g_checks = 0;
 int g_failures = 0;
 
+// The process EXE owns module TLS index 0, as gta6rt.exe does for the mapped game EXE. A /GA fixture only needs
+// the rewrite that this test covers when its own index is not 0, so the test EXE keeps index 0 with this variable.
+__declspec(thread) int g_host_tls_sentinel = 1;
+
 void check(bool condition, const char* what) {
     ++g_checks;
     std::printf("%s %s\n", condition ? "PASS" : "FAIL", what);
@@ -757,6 +761,63 @@ void test_purge_ownership_scoping(const fs::path& dll, const fs::path& temp) {
     fs::remove(live_file, ec);
 }
 
+// A /GA EXE reads its TLS as ThreadLocalStoragePointer[0] and load() rewrites those reads to a TlsAlloc slot whose
+// value is a per-thread view with the image's block at [0]. Threads that existed before load() must get that view as
+// well as the block: the task queue runs a title's callbacks on pool workers that predate the load, and a rewritten
+// read with no view dereferences null.
+void test_ga_tls_existing_thread(const fs::path& exe) {
+    std::printf("\n-- /GA EXE on a thread that existed before load() --\n");
+    struct Step {
+        HANDLE go = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        HANDLE done = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    } first, second;
+    HANDLE started = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    int(__cdecl* get)() = nullptr;
+    void(__cdecl* set)(int) = nullptr;
+    int seen_first = -1, seen_second = -1;
+    std::thread early([&] {
+        SetEvent(started);
+        WaitForSingleObject(first.go, INFINITE);  // the first Loader has mapped the fixture
+        seen_first = get();
+        set(55);
+        SetEvent(first.done);
+        WaitForSingleObject(second.go, INFINITE);  // that Loader is gone and a second one has mapped it again
+        seen_second = get();
+        SetEvent(second.done);
+    });
+    WaitForSingleObject(started, INFINITE);
+
+    {
+        rt::Loader loader(exe.parent_path());
+        rt::Module& m = loader.load(exe);
+        check(m.tls_index != 0, "the /GA fixture gets a module TLS index other than the process EXE's 0");
+        check(m.tls_ga_slot != rt::kNoTlsIndex, "load() rewrites the /GA fixture's index-0 TLS reads");
+        get = find_export<int(__cdecl*)()>(m, "ga_tls_get");
+        set = find_export<void(__cdecl*)(int)>(m, "ga_tls_set");
+        check(get() == 7, "the loading thread reads the /GA fixture's template value 7");
+        SetEvent(first.go);
+        WaitForSingleObject(first.done, INFINITE);
+        check(seen_first == 7, "a thread that existed before load() reads the template value 7");
+        check(get() == 7, "its write stays in its own block");
+        int later = -1;
+        std::thread([&] { later = get(); }).join();
+        check(later == 7, "a thread started after load() reads the template value 7");
+    }
+
+    {
+        rt::Loader loader(exe.parent_path());
+        rt::Module& m = loader.load(exe);
+        get = find_export<int(__cdecl*)()>(m, "ga_tls_get");
+        set = find_export<void(__cdecl*)(int)>(m, "ga_tls_set");
+        check(get() == 7, "a second load() installs a fresh template");
+        SetEvent(second.go);
+        WaitForSingleObject(second.done, INFINITE);
+        check(seen_second == 7, "the same thread reads the template again after a second load()");
+    }
+    early.join();
+    for (HANDLE h : {first.go, first.done, second.go, second.done, started}) CloseHandle(h);
+}
+
 void print_result() {
     if (g_failures == 0)
         std::printf("\nloader_tls_test: OK (%d checks)\n", g_checks);
@@ -784,6 +845,7 @@ int main(int argc, char** argv) {
         }
 
         TempDir temp;
+        g_host_tls_sentinel = 2;
         test_purge_ownership_scoping(tls_dll, temp.path);  // first: the sweep fires once per process
         test_existing_threads(tls_dll);
         test_terminated_thread(tls_dll);
@@ -792,6 +854,10 @@ int main(int argc, char** argv) {
         test_thread_outlives_loader(tls_dll);
         test_multiple_tls_modules(tls_dll, temp.path);
         test_orphan_slot_generation_reuse(tls_dll);
+        const fs::path ga_exe = tls_dll.parent_path() / "tiny_ga_tls.exe";
+        check(fs::exists(ga_exe), "tiny_ga_tls fixture exists");
+        if (fs::exists(ga_exe)) test_ga_tls_existing_thread(ga_exe);
+        check(g_host_tls_sentinel == 2, "this EXE's own TLS at module index 0 is untouched");
 
         // The --run path calls cleanup_tls_clones() before ExitProcess because atexit never runs there.
         std::printf("\n-- explicit clone cleanup (the ExitProcess path) --\n");

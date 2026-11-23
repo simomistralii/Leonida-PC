@@ -38,6 +38,31 @@ def bench(fail):
     return code, out.getvalue()
 
 
+def emulated_only(hashes=("same", "same")):
+    """Run the portable mode with two processes and return its calls and output."""
+    builds, runs = [], []
+
+    def build(work, name, emulate, llvm_mc):
+        builds.append(emulate)
+        return f"{name}-{emulate}.spv"
+
+    def run(tools, spv, groups, reps, driver, emulate):
+        runs.append((driver, emulate))
+        output_hash = hashes[len(runs) - 1]
+        if output_hash is None:
+            return None, "exit 1: device lost", None
+        return (1.0, 0.9), output_hash, "stub GPU"
+
+    out = io.StringIO()
+    with patch.object(bench_wave64, "build", build), \
+            patch.object(bench_wave64, "segments", lambda spv: None), \
+            patch.object(bench_wave64, "run", run), \
+            patch.object(sys, "argv", ["bench_wave64.py", "--emulated-only", "--procs", "2"]), \
+            contextlib.redirect_stdout(out):
+        code = bench_wave64.main()
+    return code, builds, runs, out.getvalue()
+
+
 class PartialFailure(unittest.TestCase):
     def test_every_process_ran(self):
         code, out = bench({})
@@ -56,6 +81,31 @@ class PartialFailure(unittest.TestCase):
         code, out = bench({"AMD native": 2})
         self.assertEqual(code, 1, out)
         self.assertIn("no reference output from AMD native", out)
+
+
+class EmulatedOnly(unittest.TestCase):
+    def test_current_device_needs_no_native_reference(self):
+        code, builds, runs, out = emulated_only()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(builds, [True])
+        self.assertEqual(runs, [(None, True), (None, True)])
+        self.assertIn("Current device --wave64-emulate", out)
+        self.assertIn("stable output hash: same", out)
+        self.assertIn("no native reference", out)
+        self.assertNotIn("AMD native", out)
+
+    def test_changed_hash_is_a_failure(self):
+        code, _, _, out = emulated_only(("first", "second"))
+        self.assertEqual(code, 1, out)
+        self.assertIn("OUTPUT HASH CHANGED between processes", out)
+        self.assertNotIn("stable output hash", out)
+
+    def test_process_failure_is_a_failure(self):
+        code, _, runs, out = emulated_only(("first", None))
+        self.assertEqual(code, 1, out)
+        self.assertEqual(len(runs), 2)
+        self.assertIn("failed or unsupported: exit 1: device lost", out)
+        self.assertIn("no complete result from Current device --wave64-emulate", out)
 
 
 class HarnessError(unittest.TestCase):
@@ -123,6 +173,19 @@ class DriverSelectors(unittest.TestCase):
             self.assertTrue(self._matches(selector, manifest), f"{selector!r} should match {manifest!r}")
         for other in ("amd-vulkan64.json", "radeon_icd.x86_64.json", "igvk64.json", "intel_icd.x86_64.json"):
             self.assertFalse(self._matches(selector, other), f"{selector!r} must not match {other!r}")
+
+    def test_current_device_keeps_an_inherited_selector(self):
+        output = ("device: stub GPU (subgroup 32..32)\n"
+                  "bench ms: median=1.0 min=0.9 max=1.1\n"
+                  "bench out fnv1a: abc\n4 groups x 64: 0 mismatches\n")
+        with patch.dict(os.environ, {"VK_LOADER_DRIVERS_SELECT": "custom.json"}, clear=True), \
+                patch.object(bench_wave64.subprocess, "run") as launch:
+            launch.return_value.stdout = output
+            launch.return_value.stderr = ""
+            launch.return_value.returncode = 0
+            timing, output_hash, device = bench_wave64.run("tools", "test.spv", 4, 2, None, True)
+        self.assertEqual((timing, output_hash, device), ((1.0, 0.9), "abc", "stub GPU"))
+        self.assertEqual(launch.call_args.kwargs["env"]["VK_LOADER_DRIVERS_SELECT"], "custom.json")
 
 
 class SchedulerSegments(unittest.TestCase):

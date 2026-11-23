@@ -5,6 +5,7 @@ compares with are right, so a mismatch is the translator's and not the fuzzer's.
 """
 import os
 import random
+import re
 import shutil
 import struct
 import subprocess
@@ -362,7 +363,7 @@ def test_gfx11_opcode_table_matches_llvm_mc():
 
 @pytest.mark.skipif(_amd_tool("clang") is None, reason="AMD clang (LEONIDA_AMD_CLANG) not found")
 @pytest.mark.parametrize("family", sorted(vf.FAMILIES))
-@pytest.mark.parametrize("arch", ["gfx1150", "gfx1030"])
+@pytest.mark.parametrize("arch", ["gfx1150", "gfx1030", "gfx1170", "gfx1200", "gfx1201"])
 def test_hw_kernels_assemble(family, arch):
     from hw_oracle import asm
     fam = asm.family(arch)
@@ -377,8 +378,74 @@ def test_hw_kernels_assemble(family, arch):
     for p in vf.programs(family, 2, 12, (32, 64)):
         k = asm.Kernel(p.hw_lines(fam), p.wave, vf.THREADS, p.out_words(), raw=True, vgprs=vf.HW_VGPRS, sgprs=vf.HW_SGPRS)
         text = asm.module_text([k], arch, wave=p.wave)[0]
-        r = assemble(asm.true16_spelling(text) if true16 else text, p.wave)
-        assert r.returncode == 0, (arch, p.name, r.stderr[-600:])
+        if true16:                                   # what the runner assembles: the same respellings, same order
+            text = asm.true16_spelling(text)
+        if fam != "gfx10":
+            text = asm.opsel16_spelling(text)
+        r = assemble(text, p.wave)
+        assert r.returncode == 0, (arch, p.name, r.stderr[-600:])   # mem on gfx12xx too, in GFX12 spelling
+
+
+def test_mem_kernels_in_gfx12_spelling():
+    # GFX12 has no s_waitcnt_vscnt or buffer_gl0/gl1_inv, wants a null (not 0) MUBUF soffset, and assembles the legacy
+    # s_waitcnt vmcnt/lgkmcnt to the old encoding, so the gfx12 text names the split counters
+    for sync in ("none", "min", "sinv", "scalar", "full"):
+        old = vf.HW_SYNC
+        vf.HW_SYNC = sync
+        try:
+            for p in vf.programs("mem", 3, 20, (32, 64)):
+                g12, g11 = p.hw_lines("gfx12"), p.hw_lines("gfx11")
+                text = "\n".join(g12)
+                for gone in ("s_waitcnt_vscnt", "buffer_gl0_inv", "buffer_gl1_inv", "s_waitcnt vmcnt", "s_waitcnt lgkmcnt"):
+                    assert gone not in text, (sync, p.name, gone)
+                assert not any(ln.startswith("buffer_") and re.search(r"\], 0\b", ln) for ln in g12), (sync, p.name)
+                assert any(ln.startswith("buffer_") for ln in g12) and "s_wait_loadcnt 0x0" in g12, (sync, p.name)
+                if sync in ("min", "scalar", "full"):
+                    assert ("s_wait_storecnt 0x0" in g12) == ("s_waitcnt_vscnt null, 0x0" in g11), (sync, p.name)
+                if sync == "full" and "buffer_gl0_inv" in g11:
+                    assert "global_inv scope:SCOPE_DEV" in g12, p.name
+                # the respelling is gfx12-only: the gfx11 kernel and the translator's text keep the GFX10/GFX11 forms
+                assert "s_waitcnt vmcnt(0)" in g11 and "s_wait_loadcnt 0x0" not in g11, (sync, p.name)
+                assert "s_wait_loadcnt" not in p.asm() and "s_waitcnt vmcnt(0)" in p.asm(), (sync, p.name)
+        finally:
+            vf.HW_SYNC = old
+
+
+def test_gfx10_word3_is_refused_on_gfx12(monkeypatch, capsys):
+    # --gfx10-word3 sets bit 24 (GFX10 RESOURCE_LEVEL), which gfx12-rsrc.json names WRITE_COMPRESS_ENABLE
+    from hw_oracle import runner
+
+    class Fake:
+        def __init__(self, arch):
+            self.arch, self.device, self.ran = arch, "fake", False
+
+        def run(self, kernels):
+            self.ran = True
+            return ["assembler rejected: fake"] * len(kernels)
+
+        def close(self):
+            pass
+
+    for arch, want in (("gfx1201", 2), ("gfx1150", 2)):
+        fake = Fake(arch)
+        monkeypatch.setattr(runner, "open_oracle", lambda **kw: fake)
+        monkeypatch.setattr(sys, "argv", ["valu_fuzz.py", "--family", "mem", "--oracle", "hw", "--programs", "2",
+                                          "--gfx10-word3"])
+        assert vf.main() == want, arch
+        out = capsys.readouterr().out
+        assert ("WRITE_COMPRESS_ENABLE" in out) == (arch == "gfx1201"), (arch, out[-300:])
+        assert fake.ran == (arch != "gfx1201"), arch    # refused before any kernel on gfx12; gfx11 still runs it
+    vf.W3_LAYOUT = None
+
+
+def test_vsharp_word3_per_family():
+    # GFX12 keeps GFX11's word 3 (gfx12-rsrc.json: same DST_SEL/FORMAT/OOB_SELECT bits, 32_FLOAT = 22 in the GFX11
+    # table); GFX10 adds RESOURCE_LEVEL; a family without a known layout is refused, not given GFX11's by default
+    for mode in range(4):
+        assert vf.word3(mode, "gfx12") == vf.word3(mode, "gfx11") == 0xFAC | (22 << 12) | (mode << 28)
+        assert vf.word3(mode, "gfx10") == vf.word3(mode, "gfx11") | (1 << 24)
+    with pytest.raises(ValueError):
+        vf.word3(0, "gfx13")
 
 
 def test_oracle_hw_exits_77_without_the_tools(monkeypatch, capsys, tmp_path):
@@ -389,20 +456,40 @@ def test_oracle_hw_exits_77_without_the_tools(monkeypatch, capsys, tmp_path):
     assert "hardware oracle unavailable" in capsys.readouterr().out
 
 
-def test_oracle_hw_exits_77_on_an_rdna4_gpu(monkeypatch, capsys):
+def test_hw_family_skip_reason_is_per_family():
+    # the old blanket gate (asm.rdna23_skip_reason) refused every family on gfx1170+; every family runs on every
+    # architecture asm.family knows now (mem on gfx12xx in GFX12 spelling), and an unknown one is refused by name
+    for arch in ("gfx1030", "gfx1100", "gfx1150", "gfx1170", "gfx1200", "gfx1201"):
+        for family in sorted(vf.FAMILIES):
+            assert vf.hw_family_skip_reason(family, arch) is None, (family, arch)
+    why = vf.hw_family_skip_reason("mem", "gfx1300")
+    assert why and "gfx1300" in why, why
+
+
+def test_oracle_hw_runs_on_an_rdna4_gpu(monkeypatch, capsys):
+    # regression: the blanket gate used to exit 77 for every family on gfx1170+ ("the kernels here do not
+    # assemble for it"), which is false for f16; the run now gets past the gate (the fake oracle rejects the
+    # kernels, so the exit code is 2, not 77)
     from hw_oracle import runner
 
-    class Rdna4:
-        arch, device = "gfx1201", "fake"
+    class Fake:
+        def __init__(self, arch):
+            self.arch, self.device = arch, "fake"
+
+        def run(self, kernels):
+            return ["assembler rejected: fake"] * len(kernels)
 
         def close(self):
             pass
 
-    monkeypatch.setattr(runner, "open_oracle", lambda **kw: Rdna4())
-    for family in sorted(vf.FAMILIES):
-        monkeypatch.setattr(sys, "argv", ["valu_fuzz.py", "--family", family, "--oracle", "hw", "--programs", "2"])
-        assert vf.main() == 77
-    assert "hardware oracle unavailable: gfx1201" in capsys.readouterr().out
+    for arch in ("gfx1170", "gfx1201"):
+        for family in sorted(vf.FAMILIES):
+            monkeypatch.setattr(runner, "open_oracle", lambda **kw: Fake(arch))
+            monkeypatch.setattr(sys, "argv", ["valu_fuzz.py", "--family", family, "--oracle", "hw", "--programs", "2"])
+            assert vf.main() == 2, (arch, family)
+            out = capsys.readouterr().out
+            assert "hardware oracle: fake" in out
+            assert "hardware oracle unavailable" not in out
 
 
 def test_oracle_option_is_validated(monkeypatch):
@@ -582,6 +669,46 @@ def test_gpu_timeout_is_a_harness_error_and_next_program_runs(monkeypatch, capsy
     out = capsys.readouterr().out
     assert f"ERROR {progs[0].name}" in out and "timed out after 0.25 s" in out
     assert "1/1 programs that ran match" in out and "1 harness errors" in out
+
+
+def test_failed_gpu_child_with_unpinned_warning_is_a_harness_error(monkeypatch, capsys, tmp_path):
+    """vk_compute_test prints the unpinned-subgroup warning, writes a full dump and then exits 1: that is a failed
+    run, not a skip, so the fuzzer exits 2 even when the other program matches."""
+    build = tmp_path / "build"
+    build.mkdir()
+    (build / ("vk_compute_test" + (".exe" if os.name == "nt" else ""))).touch()
+    progs = vf.programs("f16", 1, 2, (32,))
+
+    def translate(progs, work, _emulate):
+        (work / "spirv").mkdir()
+        for p in progs:
+            (work / "spirv" / (p.name + ".spv")).touch()
+        return {p.name: {} for p in progs}, ""
+
+    def run(cmd, *, env, timeout, **kwargs):
+        name = os.path.splitext(os.path.basename(cmd[1]))[0]
+        prog = next(p for p in progs if p.name == name)
+        with open(env["VKC_DUMP"], "wb") as dump:
+            dump.write(bytes(4 * prog.out_words()))
+        if name == progs[0].name:
+            return subprocess.CompletedProcess(cmd, 1, UNPINNED + "\n", "vkQueueSubmit failed\n")
+        return subprocess.CompletedProcess(cmd, 0, "compute subgroup size: 32", "")
+
+    def compare(prog, data):
+        prog.uncertain_words = 0
+        return []
+
+    monkeypatch.delenv("LEONIDA_PC_TAIL_UBO", raising=False)
+    monkeypatch.setattr(vf, "translate", translate)
+    monkeypatch.setattr(vf.subprocess, "run", run)
+    monkeypatch.setattr(vf, "compare", compare)
+    monkeypatch.setattr(sys, "argv", ["valu_fuzz.py", "--family", "f16", "--programs", "2", "--wave", "32",
+                                      "--build", str(build), "--work", str(tmp_path)])
+
+    assert vf.main() == 2
+    out = capsys.readouterr().out
+    assert f"ERROR {progs[0].name}: exit 1" in out and f"SKIP {progs[0].name}" not in out
+    assert "1/1 programs that ran match" in out and "0 skipped" in out and "1 harness errors" in out
 
 
 def test_pc_tail_ubo_forwarded_to_translator_and_vk_compute_test(monkeypatch, tmp_path):

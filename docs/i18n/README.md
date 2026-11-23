@@ -14,6 +14,7 @@ A language is added when a contributor volunteers to maintain it and keeps the s
 |---|---|---|---|
 | Français (`fr`) | [`fr/quickstart.md`](fr/quickstart.md) | `aa2988cc` | `@Urban225` |
 | Português (Brasil) (`pt-BR`) | [`pt-BR/quickstart.md`](pt-BR/quickstart.md) | `f847748c` | `@Andretuta` |
+| Português (Portugal) (`pt-PT`) | [`pt-PT/quickstart.md`](pt-PT/quickstart.md) | `867d922f` | `@enzoduarte1` |
 | 简体中文 (`zh-CN`) | [`zh-CN/quickstart.md`](zh-CN/quickstart.md) | `aa2988cc` | `@liang-kai-shui` |
 | Polski (Polish) (`pl-PL`) | [`pl-PL/quickstart.md`](pl-PL/quickstart.md) | `f847748c` | `@Dom-in, @t91a60` |
 | Türkçe (`tr`) | [`tr/quickstart.md`](tr/quickstart.md) | `561b65a` | `@emirhan-karaca` |

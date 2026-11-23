@@ -18,6 +18,7 @@
 namespace rt::shims {
 long xgameruntime_offline_game_events();
 long xgameruntime_user_open_handles();
+long xgameruntime_offline_device_registrations(uint32_t kind);
 }
 
 namespace {
@@ -91,6 +92,89 @@ void* user_object(HRESULT(WINAPI* query)(const GUID*, REFIID, void**)) {
 }
 
 void CALLBACK on_state(void*, uint64_t, uint32_t) {}
+
+// XUserDeviceImpl slots 4/5 (device association) and 7/8 (default audio endpoint): kept until unregistered, never
+// called back offline.
+long g_device_callbacks = 0;
+void CALLBACK on_association_changed(void* context, const void*) {
+    ++g_device_callbacks;
+    if (context) ++*static_cast<long*>(context);
+}
+void CALLBACK on_audio_endpoint_changed(void* context, uint64_t, uint32_t, const wchar_t*) {
+    ++g_device_callbacks;
+    if (context) ++*static_cast<long*>(context);
+}
+
+constexpr uint32_t kAssociation = 0, kAudioEndpoint = 1;   // rt::shims::xgameruntime_offline_device_registrations
+
+void check_device_registrations(void* device) {
+    using rt::shims::xgameruntime_offline_device_registrations;
+    auto reg = [&](int slot, XTaskQueueHandle queue, void* context, void* callback, XTaskQueueRegistrationToken* t) {
+        return at<Register>(device, slot)(device, queue, context, callback, t);
+    };
+    auto unreg = [&](int slot, XTaskQueueRegistrationToken t, bool wait) {
+        return at<Unregister>(device, slot)(device, t, wait);
+    };
+    void* association = reinterpret_cast<void*>(&on_association_changed);
+    void* audio = reinterpret_cast<void*>(&on_audio_endpoint_changed);
+
+    XTaskQueueRegistrationToken t{};
+    check(reg(4, nullptr, nullptr, nullptr, &t) == E_INVALIDARG && reg(4, nullptr, nullptr, association, nullptr) ==
+              E_INVALIDARG && reg(7, nullptr, nullptr, nullptr, &t) == E_INVALIDARG &&
+              reg(7, nullptr, nullptr, audio, nullptr) == E_INVALIDARG,
+          "device registrations need a callback and a token (E_INVALIDARG)");
+    check(xgameruntime_offline_device_registrations(kAssociation) == 0 &&
+              xgameruntime_offline_device_registrations(kAudioEndpoint) == 0,
+          "a refused device registration is not kept");
+
+    // queue and context are optional; one registration of each kind on a manual queue the test dispatches.
+    XTaskQueueHandle manual = nullptr;
+    check(SUCCEEDED(XTaskQueueCreate(XTaskQueueDispatchMode::Manual, XTaskQueueDispatchMode::Manual, &manual)),
+          "create a manual queue for the device callbacks");
+    long calls = 0;
+    XTaskQueueRegistrationToken a1{}, a2{}, e1{}, e2{};
+    check(reg(4, nullptr, nullptr, association, &a1) == S_OK && reg(4, manual, &calls, association, &a2) == S_OK &&
+              reg(7, nullptr, nullptr, audio, &e1) == S_OK && reg(7, manual, &calls, audio, &e2) == S_OK,
+          "device association and audio endpoint registrations succeed with or without a queue and context");
+    const uint64_t tokens[] = {a1.token, a2.token, e1.token, e2.token};
+    bool distinct = true;
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j) distinct = distinct && tokens[i] != 0 && (i == j || tokens[i] != tokens[j]);
+    check(distinct, "device registration tokens are non-zero and unique across both kinds");
+    check(xgameruntime_offline_device_registrations(kAssociation) == 2 &&
+              xgameruntime_offline_device_registrations(kAudioEndpoint) == 2,
+          "each device registration is kept under its token");
+
+    check(!XTaskQueueDispatch(manual, XTaskQueuePort::Work, 0) &&
+              !XTaskQueueDispatch(manual, XTaskQueuePort::Completion, 0),
+          "nothing is queued for a device registration offline");
+    // The title closing its own queue handle doesn't end a registration: the shim keeps its own reference.
+    XTaskQueueCloseHandle(manual);
+    check(xgameruntime_offline_device_registrations(kAssociation) == 2,
+          "a registration outlives the title's handle to its queue");
+
+    // A token of the other kind, one never handed out, or 0: unregistering is harmless (true) and removes nothing.
+    check(unreg(5, e1, true) && unreg(8, a1, false) && unreg(5, XTaskQueueRegistrationToken{0}, false) &&
+              unreg(8, XTaskQueueRegistrationToken{~0ull}, true),
+          "unregistering a foreign, unissued or zero token returns true");
+    check(xgameruntime_offline_device_registrations(kAssociation) == 2 &&
+              xgameruntime_offline_device_registrations(kAudioEndpoint) == 2,
+          "and leaves every registration in place");
+
+    // Unregistering removes the registration at once, with or without wait (nothing is ever pending).
+    check(unreg(5, a1, false) && xgameruntime_offline_device_registrations(kAssociation) == 1,
+          "XUserUnregisterForDeviceAssociationChanged (wait = false) removes its registration");
+    check(unreg(5, a2, true) && xgameruntime_offline_device_registrations(kAssociation) == 0 &&
+              xgameruntime_offline_device_registrations(kAudioEndpoint) == 2,
+          "XUserUnregisterForDeviceAssociationChanged (wait = true) removes only its own");
+    check(unreg(8, e1, true) && unreg(8, e2, false) && xgameruntime_offline_device_registrations(kAudioEndpoint) == 0,
+          "XUserUnregisterForDefaultAudioEndpointUtf16Changed removes its registrations");
+    check(unreg(5, a1, true) && unreg(8, e2, false) && xgameruntime_offline_device_registrations(kAssociation) == 0 &&
+              xgameruntime_offline_device_registrations(kAudioEndpoint) == 0,
+          "a second unregister is harmless (true)");
+
+    check(g_device_callbacks == 0 && calls == 0, "no device association or audio endpoint callback ever ran");
+}
 
 }  // namespace
 
@@ -178,9 +262,7 @@ int main() {
     check(rt::shims::xgameruntime_user_open_handles() == 1, "the handle is an XUserHandle the title closes");
     at<CloseUser>(user_object(query), 4)(user_object(query), user);
     check(rt::shims::xgameruntime_user_open_handles() == 0, "XUserCloseHandle closes it");
-    check(at<Register>(device, 4)(device, nullptr, nullptr, reinterpret_cast<void*>(&on_state), &token) == S_OK &&
-              at<Unregister>(device, 5)(device, token, false),
-          "device association registration and unregistration");
+    check_device_registrations(device);
     wchar_t endpoint[8] = {L'x'};
     size_t used = 99;
     check(FAILED(at<Endpoint>(device, 6)(device, 1, 0, 8, endpoint, &used)) && endpoint[0] == 0 && used == 0,

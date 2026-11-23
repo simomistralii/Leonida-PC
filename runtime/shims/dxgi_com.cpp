@@ -228,6 +228,8 @@ public:
     bool init(HWND hwnd, const DXGI_SWAP_CHAIN_DESC1& desc, VkFormat vk_fmt) {
         hwnd_ = hwnd;
         flags_ = desc.Flags;
+        swap_effect_ = desc.SwapEffect;
+        buffer_usage_ = desc.BufferUsage;
         const VkExtent2D size = size_or_client(desc.Width, desc.Height, {256u, 256u});
         const std::uint32_t w = size.width;
         const std::uint32_t h = size.height;
@@ -316,7 +318,7 @@ public:
     }
 
     HRESULT STDMETHODCALLTYPE GetBuffer(UINT buffer, REFIID riid, void** surface) override {
-        if (!surface) return E_POINTER;
+        if (!surface) return DXGI_ERROR_INVALID_CALL;  // host-measured, not E_POINTER
         *surface = nullptr;
         if (buffer >= buffers_.size()) return DXGI_ERROR_INVALID_CALL;
         return buffers_[buffer]->QueryInterface(riid, surface);
@@ -336,11 +338,11 @@ public:
         desc->BufferDesc.Height = swapchain_.extent().height;
         desc->BufferDesc.Format = vk_to_dxgi_format(swapchain_.format());
         desc->SampleDesc.Count = 1;
-        desc->BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        desc->BufferUsage = buffer_usage_;
         desc->BufferCount = swapchain_.image_count();
         desc->OutputWindow = hwnd_;
         desc->Windowed = TRUE;
-        desc->SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        desc->SwapEffect = swap_effect_;
         desc->Flags = flags_;
         return S_OK;
     }
@@ -357,9 +359,18 @@ public:
             vk_fmt = dxgi_to_vk_format(fmt);
             if (vk_fmt == VK_FORMAT_UNDEFINED) return E_INVALIDARG;
         }
+        // DXGI first checks creation-dependent flags against the chain's original flags. If one is missing, this
+        // E_INVALIDARG wins even when the same call also includes flags that independently return INVALID_CALL.
         constexpr UINT creation_only_flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT |
-                                             DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+                                             DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING |
+                                             DXGI_SWAP_CHAIN_FLAG_FOREGROUND_LAYER | DXGI_SWAP_CHAIN_FLAG_YUV_VIDEO |
+                                             0x2000u;
         if ((flags & creation_only_flags) != (flags_ & creation_only_flags)) return E_INVALIDARG;
+        // On a chain whose creation flags match, NONPREROTATED, FULLSCREEN_VIDEO and every bit from 0x4000 up are
+        // DXGI_ERROR_INVALID_CALL (host-measured on Windows 11 with the RTX 5070 Ti and WARP).
+        constexpr UINT refused_flags = ~0x3fffu | DXGI_SWAP_CHAIN_FLAG_NONPREROTATED |
+                                       DXGI_SWAP_CHAIN_FLAG_FULLSCREEN_VIDEO;
+        if (flags & refused_flags) return DXGI_ERROR_INVALID_CALL;
         // DXGI refuses to resize while the app still holds a back buffer reference.
         for (auto* bb : buffers_)
             if (bb->held_by_app()) return DXGI_ERROR_INVALID_CALL;
@@ -442,7 +453,7 @@ public:
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE GetLastPresentCount(UINT* p) override {
-        if (!p) return E_INVALIDARG;
+        if (!p) return DXGI_ERROR_INVALID_CALL;  // host-measured
         *p = present_count_.load(std::memory_order_relaxed);
         return S_OK;
     }
@@ -455,10 +466,10 @@ public:
         desc->Height = swapchain_.extent().height;
         desc->Format = vk_to_dxgi_format(swapchain_.format());
         desc->SampleDesc.Count = 1;
-        desc->BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        desc->BufferUsage = buffer_usage_;
         desc->BufferCount = swapchain_.image_count();
         desc->Scaling = DXGI_SCALING_STRETCH;
-        desc->SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        desc->SwapEffect = swap_effect_;
         desc->AlphaMode = DXGI_ALPHA_MODE_IGNORE;
         desc->Flags = flags_;
         return S_OK;
@@ -469,7 +480,11 @@ public:
         desc->Windowed = TRUE;
         return S_OK;
     }
-    HRESULT STDMETHODCALLTYPE GetHwnd(HWND* out) override { if (!out) return E_INVALIDARG; *out = hwnd_; return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetHwnd(HWND* out) override {
+        if (!out) return DXGI_ERROR_INVALID_CALL;  // host-measured
+        *out = hwnd_;
+        return S_OK;
+    }
     HRESULT STDMETHODCALLTYPE GetCoreWindow(REFIID, void** out) override {
         if (!out) return DXGI_ERROR_INVALID_CALL;
         *out = nullptr;
@@ -479,15 +494,13 @@ public:
         return Present(sync, flags);
     }
     BOOL STDMETHODCALLTYPE IsTemporaryMonoSupported() override { return FALSE; }
+    // Host-measured: a chain created without an output answers S_OK with a null output, and a null pointer is
+    // DXGI_ERROR_INVALID_CALL.
     HRESULT STDMETHODCALLTYPE GetRestrictToOutput(IDXGIOutput** out) override {
-        if (!out) return E_INVALIDARG;
-        if (restrict_to_output_) {
-            *out = restrict_to_output_;
-            restrict_to_output_->AddRef();
-            return S_OK;
-        }
-        *out = nullptr;
-        return DXGI_ERROR_NOT_FOUND;
+        if (!out) return DXGI_ERROR_INVALID_CALL;
+        *out = restrict_to_output_;
+        if (restrict_to_output_) restrict_to_output_->AddRef();
+        return S_OK;
     }
     void set_restrict_to_output(IDXGIOutput* out) {
         if (restrict_to_output_) restrict_to_output_->Release();
@@ -529,6 +542,10 @@ public:
         *h = source_size_.height;
         return S_OK;
     }
+    // Host-measured (Windows 11, RTX 5090 and WARP): the waitable object is a semaphore initialized to 1 with max 40.
+    // Increasing latency releases (max_latency - prev) tokens (if current + delta > 40, ReleaseSemaphore fails with
+    // ERROR_TOO_MANY_POSTS leaving count unchanged and SetMaximumFrameLatency still returns S_OK). Decreasing updates
+    // max_frame_latency_ without draining existing tokens. Present releases 1 token per non-test call up to max 40.
     HRESULT STDMETHODCALLTYPE SetMaximumFrameLatency(UINT max_latency) override {
         if (!waitable_ || max_latency == 0 || max_latency > max_waitable_frame_latency)
             return DXGI_ERROR_INVALID_CALL;
@@ -538,16 +555,18 @@ public:
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE GetMaximumFrameLatency(UINT* n) override {
-        if (!n) return E_INVALIDARG;
-        if (!waitable_) return DXGI_ERROR_INVALID_CALL;
+        // Host-measured (Windows 11, RTX 5090 and WARP): null output returns DXGI_ERROR_INVALID_CALL on both
+        // waitable and non-waitable swapchains.
+        if (!n || !waitable_) return DXGI_ERROR_INVALID_CALL;
         *n = max_frame_latency_.load(std::memory_order_relaxed);
         return S_OK;
     }
     HANDLE STDMETHODCALLTYPE GetFrameLatencyWaitableObject() override {
         if (!waitable_) return nullptr;
         HANDLE dup = nullptr;
-        if (!DuplicateHandle(GetCurrentProcess(), waitable_, GetCurrentProcess(), &dup, 0, FALSE,
-                             DUPLICATE_SAME_ACCESS))
+        // Host-measured (Windows 11, RTX 5090 and WARP): the returned handle grants SYNCHRONIZE only, so callers can
+        // wait on it and CloseHandle it, while ReleaseSemaphore fails with ERROR_ACCESS_DENIED.
+        if (!DuplicateHandle(GetCurrentProcess(), waitable_, GetCurrentProcess(), &dup, SYNCHRONIZE, FALSE, 0))
             return nullptr;
         return dup;
     }
@@ -618,6 +637,9 @@ private:
     HWND hwnd_ = nullptr;
     IDXGIOutput* restrict_to_output_ = nullptr;
     UINT flags_ = 0;
+    // As created: the host reports the creation SwapEffect and BufferUsage (FLIP_SEQUENTIAL, SHADER_INPUT, or 0).
+    DXGI_SWAP_EFFECT swap_effect_ = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    DXGI_USAGE buffer_usage_ = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     HANDLE waitable_ = nullptr;
     std::vector<BackBufferResource*> buffers_;
     std::atomic<UINT> present_count_{0};
@@ -1048,7 +1070,7 @@ private:
 };
 
 
-// Vulkan-backed IDXGIAdapter3 reporting the physical device's name, IDs, LUID (matching
+// Vulkan-backed IDXGIAdapter4 reporting the physical device's name, IDs, LUID (matching
 // ID3D12Device::GetAdapterLuid), memory heap sizes, and video memory budget info.
 
 // The adapter's user-mode driver version, as DXGI's CheckInterfaceSupport(IDXGIDevice) reports it: what
@@ -1082,7 +1104,7 @@ LARGE_INTEGER umd_driver_version(LUID luid) {
     return version;
 }
 
-class Adapter final : public IDXGIAdapter3 {
+class Adapter final : public IDXGIAdapter4 {
 public:
     Adapter(IDXGIFactory4* parent, PFN_vkGetInstanceProcAddr gipa, VkInstance instance, VkPhysicalDevice physical)
         : parent_(parent), gipa_(gipa), instance_(instance), physical_(physical) {
@@ -1109,8 +1131,9 @@ public:
         if (!out) return E_POINTER;
         *out = nullptr;
         if (riid == __uuidof(IUnknown) || riid == __uuidof(IDXGIObject) || riid == __uuidof(IDXGIAdapter) ||
-            riid == __uuidof(IDXGIAdapter1) || riid == __uuidof(IDXGIAdapter2) || riid == __uuidof(IDXGIAdapter3)) {
-            *out = static_cast<IDXGIAdapter3*>(this);
+            riid == __uuidof(IDXGIAdapter1) || riid == __uuidof(IDXGIAdapter2) || riid == __uuidof(IDXGIAdapter3) ||
+            riid == __uuidof(IDXGIAdapter4)) {
+            *out = static_cast<IDXGIAdapter4*>(this);
             AddRef();
             return S_OK;
         }
@@ -1254,6 +1277,26 @@ public:
         return S_OK;
     }
     void STDMETHODCALLTYPE UnregisterVideoMemoryBudgetChangeNotification(DWORD) override {}
+
+    // IDXGIAdapter4 (host DXGI answers it since Windows 10 1803). DXGI_ADAPTER_FLAG3_SOFTWARE is the same bit as
+    // DXGI_ADAPTER_FLAG_SOFTWARE; a null description is E_INVALIDARG, as on the host.
+    HRESULT STDMETHODCALLTYPE GetDesc3(DXGI_ADAPTER_DESC3* desc) override {
+        if (!desc) return E_INVALIDARG;
+        std::memset(desc, 0, sizeof(*desc));
+        std::memcpy(desc->Description, desc_.Description, sizeof(desc->Description));
+        desc->VendorId = desc_.VendorId;
+        desc->DeviceId = desc_.DeviceId;
+        desc->SubSysId = desc_.SubSysId;
+        desc->Revision = desc_.Revision;
+        desc->DedicatedVideoMemory = desc_.DedicatedVideoMemory;
+        desc->DedicatedSystemMemory = desc_.DedicatedSystemMemory;
+        desc->SharedSystemMemory = desc_.SharedSystemMemory;
+        desc->AdapterLuid = desc_.AdapterLuid;
+        desc->Flags = static_cast<DXGI_ADAPTER_FLAG3>(desc_.Flags);
+        desc->GraphicsPreemptionGranularity = desc_.GraphicsPreemptionGranularity;
+        desc->ComputePreemptionGranularity = desc_.ComputePreemptionGranularity;
+        return S_OK;
+    }
 
 private:
     void populate_desc() {

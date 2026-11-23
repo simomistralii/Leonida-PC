@@ -24,6 +24,7 @@ import zlib
 # `python -I` leaves the script's directory off sys.path.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from replace_retry import replace as replace_retry  # noqa: E402
+from shader_carve_accel import entry_search  # noqa: E402
 
 ENTRY = re.compile(rb"([\x21-\x7e]{3,200})\x00(.)(....)(....)\3(....)", re.DOTALL)
 STAGES = {0: "ps", 1: "vs", 2: "gs", 3: "hs", 4: "ds", 5: "cs", 6: "lib", 13: "ms", 14: "as"}
@@ -95,9 +96,10 @@ def main(argv=None) -> int:
     except OSError as e:  # a regular file where a parent folder is expected
         ap.error(f"cannot create {out}: {e.strerror or e}")
     index, seen, used, bad = [], {}, set(), 0
-    with open(src, "rb") as fh, mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as m:
+    with (open(src, "rb") as fh, mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as m,
+          entry_search(m, ENTRY) as search):
         pos = 0
-        while (mt := ENTRY.search(m, pos)) is not None:
+        while (mt := search(pos)) is not None:
             # A rejected header is rescanned past its name (a real entry can start inside it); a carved
             # shader resumes after its stored bytes, so deflate output never becomes a name or a match.
             pos = mt.end(1) + 1

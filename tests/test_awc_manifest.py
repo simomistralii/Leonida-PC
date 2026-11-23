@@ -370,7 +370,7 @@ class ManifestTest(unittest.TestCase):
                 made_writable.append(path)
             return real_chmod(path, mode, *args, **kwargs)
 
-        with mock.patch.object(awc_manifest.os, "replace", side_effect=OSError("replace denied")), \
+        with mock.patch.object(awc_manifest, "replace_retry", side_effect=OSError("replace denied")), \
                 mock.patch.object(awc_manifest.os, "chmod", chmod):
             with self.assertRaises(OSError):
                 awc_manifest.write_manifest([], 0, 0, "json", out)

@@ -358,13 +358,21 @@ class Gen:
             self.emit(f"v_mov_b32 v{16 + i}, s{s}")
 
 
-def generate_program(rng, n_ops, wave=64, masks_as_data=False, permlane_partial=False):
+def generate_case(rng, n_ops, wave=64, masks_as_data=False, permlane_partial=False):
+    """Return the complete case and the instruction bounds of its body."""
     g = Gen(rng, wave, masks_as_data, permlane_partial)
     g.prologue()
+    body_start = len(g.lines)
     for _ in range(n_ops):
         g.op()
+    body_end = len(g.lines)
     g.observe()
-    return g.lines
+    return g.lines, body_start, body_end
+
+
+def generate_program(rng, n_ops, wave=64, masks_as_data=False, permlane_partial=False):
+    lines, _, _ = generate_case(rng, n_ops, wave, masks_as_data, permlane_partial)
+    return lines
 
 
 # ---- translator side --------------------------------------------------------------------------------------------
@@ -408,13 +416,21 @@ def run_spirv(spv, wave):
     return [[memory.get(lane * LANE_BYTES + 4 * k) for k in range(len(WORDS))] for lane in range(wave)]
 
 
-def compare(model, spirv):
+def differences(model, spirv):
+    """Yield (lane, column, expected, actual) for each differing observed word."""
     for lane, (m_words, s_words) in enumerate(zip(model, spirv)):
         for k, (m, s) in enumerate(zip(m_words, s_words)):
-            if s is None:
-                return f"lane {lane} v{WORDS[k]}: the SPIR-V never stored it"
-            if m & M32 != s & M32:
-                return f"lane {lane} v{WORDS[k]}: expected 0x{m & M32:08x}, actual 0x{s & M32:08x}"
+            expected = m & M32
+            actual = None if s is None else s & M32
+            if expected != actual:
+                yield lane, k, expected, actual
+
+
+def compare(model, spirv):
+    for lane, k, expected, actual in differences(model, spirv):
+        if actual is None:
+            return f"lane {lane} v{WORDS[k]}: the SPIR-V never stored it"
+        return f"lane {lane} v{WORDS[k]}: expected 0x{expected:08x}, actual 0x{actual:08x}"
     return None
 
 

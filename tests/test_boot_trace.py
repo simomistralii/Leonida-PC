@@ -137,6 +137,20 @@ class BootTraceTests(unittest.TestCase):
         self.assertIs(trace["exceptions"][1]["cpp"], True)
         self.assertEqual(trace["exit"], 0)
 
+    def test_unimplemented_calls_rank_by_frequency_and_preserve_first_caller(self):
+        names = ("x.dll!Foo", "y.dll!Bar", "y.dll!Bar", "y.dll!Bar")
+        self.write(self.startup, [
+            {"kind": "unimplemented_call", "import": name, "caller": f"synthetic+{i}"}
+            for i, name in enumerate(names)
+        ])
+        trace = bt.parse_startup(self.startup, limit=1)
+        self.assertEqual(trace["unimplemented_call_counts"], {"x.dll!Foo": 1, "y.dll!Bar": 3})
+        self.assertEqual(trace["unimplemented_by_dll"], {"x.dll": 1, "y.dll": 1})
+        report = bt.format_text(bt.summarize(trace, None), 1)
+        self.assertIn("unimplemented: 2 unique, 4 calls", report)
+        self.assertIn("y.dll!Bar from synthetic+1 (3 calls)", report)
+        self.assertNotIn("x.dll!Foo from", report)
+
     def test_exception_limit_keeps_final_observation(self):
         early = [
             {"kind": "exception", "code": "0xe06d7363", "at": f"synthetic.exe+0x{0x1100 + i:x}", "cpp": True}
@@ -267,6 +281,21 @@ class BootTraceTests(unittest.TestCase):
         self.assertEqual(trace["sequence_break_count"], 0)
         self.assertEqual(trace["sequence_breaks"], [])
 
+    def test_repeated_method_failures_are_counted_beyond_the_sample_limit(self):
+        self.write_lines(self.d3d12, [
+            "[d3d12-trace] #1 CreatePipelineState ok",
+            "[d3d12-trace] #2 CreatePipelineState failed",
+            "[d3d12-trace] #3 CreatePipelineState failed",
+            "[d3d12-trace] #4 ExecuteCommandLists partial",
+        ])
+        trace = bt.parse_d3d12(self.d3d12, limit=1)
+        self.assertEqual(trace["method_outcomes"], {
+            "CreatePipelineState": {"ok": 1, "failed": 2},
+            "ExecuteCommandLists": {"partial": 1},
+        })
+        self.assertEqual(len(trace["failed"]), 1)
+        self.assertIn("CreatePipelineState: failed 2", bt.format_text({"startup": None, "d3d12": trace}, 1))
+
     def test_sequence_breaks_count_boundaries_and_limit_examples(self):
         self.write_lines(self.d3d12, [
             "[d3d12-trace] #4 Foo called",
@@ -358,6 +387,38 @@ class BootTraceTests(unittest.TestCase):
         data = json.loads(out.getvalue())
         self.assertEqual(data["startup"]["pid"], 123)
         self.assertEqual(data["d3d12"]["calls"], 9)
+
+    def test_counts_only_json_omits_raw_trace_fields(self):
+        self.write(self.startup, [
+            {"kind": "exception", "code": "private-code", "address": "private-address",
+             "stack": ["private-stack"]},
+            {"kind": "file_open_failed", "path": "private-file", "caller": "private-caller"},
+            {"kind": "error", "what": "private-message"},
+            {"kind": "private-kind"},
+        ])
+        self.write_lines(self.d3d12, [
+            "[d3d12-trace] #1 private-method failed",
+            "[d3d12-trace] #2 private-method private-outcome",
+        ])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(bt.main([self.startup, "--d3d12", self.d3d12, "--counts-only"]), 0)
+        text = out.getvalue()
+        self.assertNotIn("private-", text)
+        self.assertNotIn("boot.jsonl", text)
+        self.assertNotIn("d3d12.log", text)
+        data = json.loads(text)
+        self.assertEqual(data["startup"]["exception_count"], 1)
+        self.assertEqual(data["startup"]["events"], 4)
+        self.assertEqual(data["d3d12"]["outcomes"], {"failed": 1, "other": 1})
+        self.assertEqual(data["d3d12"]["calls"], 2)
+
+    def test_counts_only_redacts_missing_input_paths_from_stderr(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(bt.main([self.startup, "--counts-only"]), 2)
+        self.assertIn("startup trace unavailable", err.getvalue())
+        self.assertNotIn("boot.jsonl", err.getvalue())
 
     def test_missing_and_empty_files_are_errors(self):
         err = io.StringIO()

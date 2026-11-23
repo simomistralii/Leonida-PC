@@ -146,6 +146,8 @@ public:
     // for a present that was waiting for a swapchain image when SuspendX came.
     // `params` may be null (threshold 0). ImmediateThresholdPercent: see XboxPresentParameters; a frame that was shown
     // at once has its display statistic's percent_scanned set and is counted in immediate_presents().
+    // With --trace-d3d12 every call writes one `[d3d12-trace] ... XboxPresentation::PresentX <ok|failed>`
+    // line (shims/d3d12_trace.h), so a run's presents can be counted and a refused one is visible.
     HRESULT PresentX(UINT plane_count, const XboxPresentPlaneParameters* planes, const XboxPresentParameters* params);
     // SuspendX drops the interval, the origin event and the frames in flight, and refuses presents. ResumeX allows
     // presents again; SetFrameIntervalX and ScheduleFrameEventX must be called again before the next wait.
@@ -171,6 +173,8 @@ public:
     std::uint64_t immediate_presents() const { return pacer_.immediate_presents(); }
 
 private:
+    // PresentX without its `[d3d12-trace]` line.
+    HRESULT present_x(UINT plane_count, const XboxPresentPlaneParameters* planes, const XboxPresentParameters* params);
     float effective_sdr_white_nits();  // override, else the cached Windows setting while HDR10, else 203
     void display_white_worker();       // refreshes display_white_ off the present path
     std::unique_ptr<WindowPresenter> presenter_;

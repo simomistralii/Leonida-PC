@@ -724,10 +724,26 @@ class AudioWavCliTest(unittest.TestCase):
         out_file = os.path.join(self.dir, "out_file")
         with open(out_file, "wb") as f:
             f.write(b"content")
-        p = subprocess.run([sys.executable, "-I", TOOL, self.src_dir, "--out", out_file],
-                           capture_output=True, text=True)
-        self.assertEqual(p.returncode, 2)
-        self.assertIn("is a file, not a folder", p.stderr)
+        for suffix in ("", os.sep, os.sep + "."):
+            with self.subTest(suffix=suffix):
+                out = out_file + suffix
+                p = subprocess.run([sys.executable, "-I", TOOL, self.src_dir, "--out", out],
+                                   capture_output=True, text=True, timeout=10)
+                self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+                self.assertEqual(p.stdout, "")
+                self.assertIn(f"{out} is a file, not a folder", p.stderr)
+        with open(out_file, "rb") as f:
+            self.assertEqual(f.read(), b"content")
+
+    def test_cli_subprocess_accepts_normalized_output_directory(self):
+        directory = os.path.join(self.dir, "output")
+        os.mkdir(directory)
+        missing_ffmpeg = os.path.join(self.dir, "no-ffmpeg")
+        p = subprocess.run([sys.executable, "-I", TOOL, self.src_dir, "--out", directory + os.sep + ".",
+                            "--ffmpeg", missing_ffmpeg], capture_output=True, text=True, timeout=10)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stderr, "")
+        self.assertIn("Nothing to do: no Ogg Opus files found", p.stdout)
 
     def test_cli_rejects_missing_source(self):
         missing = os.path.join(self.dir, "nonexistent")

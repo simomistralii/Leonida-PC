@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import suppress
+import errno
 import json
 import os
 import struct
@@ -666,7 +667,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.json_path:
-        if os.path.isdir(args.json_path):
+        # A trailing separator marks a directory-style destination; realpath would strip it and publish
+        # over a same-named file, which open(..., "w") never did.
+        separators = tuple(separator for separator in (os.sep, os.altsep) if separator)
+        if os.path.isdir(args.json_path) or args.json_path.endswith(separators):
             print(f"error: --json {args.json_path} is a directory", file=sys.stderr)
             return 2
         if same_report_path(args.json_path, args.input):
@@ -688,15 +692,23 @@ def main(argv: list[str] | None = None) -> int:
         except (TypeError, ValueError) as exc:
             print(f"error: cannot write {args.json_path}: {exc}", file=sys.stderr)
             return 2
+        # Publish at the symlink's target, as open(..., "w") did before the report was staged, without
+        # replacing the link. os.replace unlinks only at the destination name, so another hard link to
+        # the previous report keeps its bytes (the report-writer rule story_index.write_output documents).
         staged = None
         try:
-            directory = os.path.dirname(os.path.abspath(args.json_path))
+            destination = os.path.realpath(args.json_path)
+            if os.path.islink(destination):
+                # realpath leaves an unresolved link in place for a cycle (or past the depth limit); replacing it
+                # would break the promise above. open(..., "w") failed with ELOOP there.
+                raise OSError(errno.ELOOP, "Too many levels of symbolic links", args.json_path)
+            directory = os.path.dirname(os.path.abspath(destination))
             with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="\n", dir=directory,
                                              prefix=".glb_inspect-", delete=False) as handle:
                 staged = handle.name
                 handle.write(text)
-            os.chmod(staged, published_mode(args.json_path))
-            os.replace(staged, args.json_path)
+            os.chmod(staged, published_mode(destination))
+            os.replace(staged, destination)
             staged = None
         except OSError as exc:
             print(f"error: cannot write {args.json_path}: {getattr(exc, 'strerror', None) or exc}", file=sys.stderr)

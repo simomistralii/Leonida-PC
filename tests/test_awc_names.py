@@ -480,6 +480,30 @@ class TestCli(unittest.TestCase):
             path = write(os.path.join(tmp, "words.json"), json.dumps(["a_word", 2]))
             self.assertEqual(A.read_words(path), ["a_word", "2"])
 
+    def test_json_write_failure_preserves_previous_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = '{"previous": true}'
+            path = os.path.join(tmp, "names.json")
+            with open(path, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(previous)
+            with mock.patch.object(A, "replace_retry", side_effect=OSError(13, "Permission denied")):
+                with self.assertRaises(OSError):
+                    A.write_json_report(path, {"summary": {}, "streams": []})
+            with open(path, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), previous)
+
+    def test_csv_write_failure_preserves_previous_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = "source,bank,stream_id,name,rule\nkeep,b,1,n,dialogue\n"
+            path = os.path.join(tmp, "names.csv")
+            with open(path, "w", encoding="utf-8", newline="") as fh:
+                fh.write(previous)
+            with mock.patch.object(A, "replace_retry", side_effect=OSError(13, "Permission denied")):
+                with self.assertRaises(OSError):
+                    A.write_csv_report(path, [])
+            with open(path, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), previous)
+
 
 if __name__ == "__main__":
     unittest.main()

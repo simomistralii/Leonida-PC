@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mc_command import mc_command  # noqa: E402
 from report_paths import path_key, same_report_path  # noqa: E402
 from shader_stage_manifest import shader_stems  # noqa: E402
+import fssm_header  # noqa: E402
 import rdna2_decode  # noqa: E402
 
 TRIPLE = "amdgcn--amdpal"
@@ -151,6 +152,7 @@ def code_range(b: bytes):
 def one(path, out, mcpu, backend="llvm-mc"):
     with open(path, "rb") as f:
         b = f.read()
+    wave32 = fssm_header.wave_size(b) != 64
     start, end, how = code_range(b)
     if end is None:
         return "no s_endpgm"
@@ -158,13 +160,13 @@ def one(path, out, mcpu, backend="llvm-mc"):
         # Walk back in 4-byte steps from the end and keep the longest clean decode.
         start, best = end - 4, None
         for s in range(end - 4, max(0x100, end - 0x4000) - 1, -4):
-            _, bad, _ = disasm(b[s:end], mcpu, backend=backend)
+            _, bad, _ = disasm(b[s:end], mcpu, backend=backend, wave32=wave32)
             if bad == 0:
                 best = s
         if best is None:
             return "scan failed"
         start = best
-    asm, bad, err = disasm(b[start:end], mcpu, backend=backend)
+    asm, bad, err = disasm(b[start:end], mcpu, backend=backend, wave32=wave32)
     if not asm.strip():  # a broken toolchain, not a shader: never report this as "clean"
         reason = (err.strip().splitlines() or ["no output"])[0]
         FAILED.append((path, reason))

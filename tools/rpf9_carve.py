@@ -31,6 +31,7 @@ import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rsc8_audio import parse_adat_header_bytes  # noqa: E402
+from report_paths import same_report_path  # noqa: E402
 from restofworld_model_join import ModelSystemPages  # noqa: E402
 
 # zlib stream start, or a Bink 2 video ('KB2' + revision letter, then u32 size-8).
@@ -153,6 +154,9 @@ def main(argv=None) -> int:
         base = a.start
     if os.path.exists(a.out) and not os.path.isdir(a.out):
         sys.exit(f"{a.out}: output path is a file, not a directory")
+    index_path = os.path.join(a.out, "index.json")
+    if same_report_path(index_path, a.archive):
+        sys.exit(f"{index_path}: output must not overwrite input archive {a.archive}")
     try:
         os.makedirs(a.out, exist_ok=True)
     except OSError as e:

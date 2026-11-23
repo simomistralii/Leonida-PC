@@ -119,6 +119,49 @@ bool lies_under(const std::wstring& path, const std::filesystem::path& root) {
     return p.compare(0, base.size(), base) == 0 && (p.size() == base.size() || p[base.size()] == L'\\');
 }
 
+// The console shim may resolve even a short guest name to an extended-length host path. GetFullPathNameW
+// applies the ordinary DOS path rules (including trailing dots and spaces) before the extended prefix disables
+// that normalization. The headroom is for CreateDirectoryW's shorter limit on an unprefixed directory name.
+std::filesystem::path win32_io_path(const std::filesystem::path& path) {
+    const auto& native = path.native();
+    constexpr size_t kDirectoryPathLimit = MAX_PATH - 12;
+    if (native.size() < kDirectoryPathLimit || !path.is_absolute() ||
+        native.starts_with(L"\\\\?\\") || native.starts_with(L"\\\\.\\"))
+        return path;
+
+    const DWORD capacity = ::GetFullPathNameW(native.c_str(), 0, nullptr, nullptr);
+    if (capacity == 0) return path;
+    std::wstring full(capacity, L'\0');
+    const DWORD size = ::GetFullPathNameW(native.c_str(), capacity, full.data(), nullptr);
+    if (size == 0 || size >= capacity) return path;
+    full.resize(size);
+
+    // DOS device names such as NUL can normalize to a device path. Leave those to the native API as before.
+    if (full.starts_with(L"\\\\.\\")) return path;
+    if (full.starts_with(L"\\\\")) return std::filesystem::path(L"\\\\?\\UNC\\" + full.substr(2));
+    return std::filesystem::path(L"\\\\?\\" + full);
+}
+
+std::filesystem::path win32_find_path(const std::filesystem::path& path, const std::wstring& leaf) {
+    if (path.native().size() < MAX_PATH) return path;
+    const auto search = win32_io_path(path);
+    if (search == path || !leaf.ends_with(L'.') || leaf.find_first_of(L"*?") == std::wstring::npos) return search;
+
+    // GetFullPathNameW strips a terminal dot, but that dot changes a native Win32 search (e.g. "mesh*.").
+    // Preserve the DOS wildcard expression for the extended path and let the filesystem match it, including
+    // short names. The DOS_STAR, DOS_QM and DOS_DOT tokens are defined by MS-FSA 2.1.4.3-4.
+    std::wstring mask = search.filename().native();
+    if (mask.ends_with(L'*')) mask.back() = L'<';
+    else mask.push_back(L'"');
+    for (size_t i = 0; i + 1 < mask.size(); ++i) {
+        const wchar_t next = mask[i + 1];
+        if (mask[i] == L'?') mask[i] = L'>';
+        else if (mask[i] == L'*' && next == L'.') mask[i] = L'<';
+        else if (mask[i] == L'.' && (next == L'*' || next == L'?' || next == L'<')) mask[i] = L'"';
+    }
+    return search.parent_path() / mask;
+}
+
 // "G:\x" is the installed package, like "GAME:\x", and "T:\x" a scratch folder the title may write to, the way the
 // other console layers map those two drives (RT-218). Only the executable can say which spelling the title uses, so
 // a host drive of the same letter must keep working: a path under --game-dir or the overlay (a package on drive G:,
@@ -151,7 +194,7 @@ Parsed parse_console(const std::wstring& path, std::vector<std::wstring>& parts)
         const std::filesystem::path overlay = roots().overlay;
         const DWORD last_error = ::GetLastError();
         std::error_code ec;
-        if (!overlay.empty()) std::filesystem::create_directories(overlay / kScratchDir, ec);
+        if (!overlay.empty()) std::filesystem::create_directories(win32_io_path(overlay / kScratchDir), ec);
         ::SetLastError(last_error);
     }
     const size_t floor = parts.size();  // ".." may not climb out of the drive's own root
@@ -194,6 +237,10 @@ std::filesystem::path join(const std::filesystem::path& root, const std::vector<
     return p;
 }
 
+std::filesystem::path disk_path(const std::filesystem::path& root, const std::vector<std::wstring>& parts) {
+    return win32_io_path(join(root, parts));
+}
+
 bool drive_root(const std::wstring& path, const std::vector<std::wstring>& parts) {
     size_t prefix_length = 0;
     return parts.empty() || (parts.size() == 1 && console_drive(path, prefix_length) == Drive::Scratch);
@@ -224,11 +271,13 @@ bool deleted(const std::filesystem::path& overlay, const std::vector<std::wstrin
     // Only regular files are deletion markers; parent directories inside .gta6rt-deleted/ exist only to hold markers
     // for nested deleted files and must not hide the corresponding ancestor directories in the package.
     const std::filesystem::path m = marker(overlay, parts);
-    return std::filesystem::is_regular_file(m, ec) || std::filesystem::is_regular_file(m / kRemovedDirMarker, ec);
+    return std::filesystem::is_regular_file(win32_io_path(m), ec) ||
+           std::filesystem::is_regular_file(win32_io_path(m / kRemovedDirMarker), ec);
 }
 
 // Writes an empty hidden marker file. On failure `error` holds the reason.
-bool write_marker(const std::filesystem::path& mark, DWORD& error) {
+bool write_marker(const std::filesystem::path& path, DWORD& error) {
+    const std::filesystem::path mark = win32_io_path(path);
     std::error_code ec;
     std::filesystem::create_directories(mark.parent_path(), ec);
     if (ec) {
@@ -247,7 +296,7 @@ bool write_marker(const std::filesystem::path& mark, DWORD& error) {
 
 // Flushes a file the shim wrote on the title's behalf, for MOVEFILE_WRITE_THROUGH. On failure `error` holds the reason.
 bool flush_file(const std::filesystem::path& path, DWORD& error) {
-    const HANDLE h = ::CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+    const HANDLE h = ::CreateFileW(win32_io_path(path).c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                    nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
         error = ::GetLastError();
@@ -276,14 +325,14 @@ View view(const Roots& r, const std::vector<std::wstring>& parts) {
         return v;
     }
     if (!r.overlay.empty()) {
-        const std::filesystem::path p = join(r.overlay, parts);
+        const std::filesystem::path p = disk_path(r.overlay, parts);
         if (std::filesystem::exists(p, ec)) {
             v.in_overlay = true;
             v.kind = std::filesystem::is_directory(p, ec) ? Kind::Directory : Kind::File;
         }
     }
     if (!r.game.empty() && !deleted(r.overlay, parts)) {
-        const std::filesystem::path p = join(r.game, parts);
+        const std::filesystem::path p = disk_path(r.game, parts);
         if (std::filesystem::exists(p, ec)) {
             v.in_package = true;
             if (v.kind == Kind::None) v.kind = std::filesystem::is_directory(p, ec) ? Kind::Directory : Kind::File;
@@ -310,7 +359,7 @@ std::vector<std::wstring> parent_of(const std::vector<std::wstring>& parts) {
 bool empty_in_view(const Roots& r, const std::vector<std::wstring>& parts) {
     std::error_code ec;
     if (!r.overlay.empty()) {
-        const std::filesystem::path p = join(r.overlay, parts);
+        const std::filesystem::path p = disk_path(r.overlay, parts);
         for (auto it = std::filesystem::directory_iterator(p, ec); !ec && it != std::filesystem::directory_iterator();
              it.increment(ec)) {
             if (parts.empty() && internal_dir(it->path().filename().c_str())) continue;
@@ -319,7 +368,7 @@ bool empty_in_view(const Roots& r, const std::vector<std::wstring>& parts) {
     }
     ec.clear();
     if (!r.game.empty()) {
-        const std::filesystem::path p = join(r.game, parts);
+        const std::filesystem::path p = disk_path(r.game, parts);
         for (auto it = std::filesystem::directory_iterator(p, ec); !ec && it != std::filesystem::directory_iterator();
              it.increment(ec)) {
             std::vector<std::wstring> child = parts;
@@ -350,7 +399,7 @@ Target read_target(const std::wstring& path) {
 
     std::error_code ec;
     if (!r.overlay.empty()) {
-        const std::filesystem::path overlay_path = join(r.overlay, parts);
+        const std::filesystem::path overlay_path = disk_path(r.overlay, parts);
         if (std::filesystem::exists(overlay_path, ec)) {
             Target t;
             t.path = overlay_path;
@@ -361,7 +410,7 @@ Target read_target(const std::wstring& path) {
     if (deleted(r.overlay, parts)) return fail(ERROR_FILE_NOT_FOUND);
 
     Target t;
-    t.path = join(r.game, parts);
+    t.path = disk_path(r.game, parts);
     return t;
 }
 
@@ -388,7 +437,7 @@ Target write_target(const std::wstring& path, bool copy_up) {
     if (!scratch && !is_folder(r, parent_of(parts))) return fail(ERROR_PATH_NOT_FOUND);
 
     Target t;
-    t.path = join(r.overlay, parts);
+    t.path = disk_path(r.overlay, parts);
 
     std::error_code ec;
     std::filesystem::create_directories(t.path.parent_path(), ec);
@@ -400,7 +449,7 @@ Target write_target(const std::wstring& path, bool copy_up) {
     // A deleted package file is not there to copy: copying it up would bring the name back, and an open that keeps
     // the contents (OPEN_EXISTING, TRUNCATE_EXISTING) has to fail on it instead. CREATE_ALWAYS and CREATE_NEW still
     // make a new overlay file, which reads prefer over the package and so over the marker.
-    const std::filesystem::path package_path = join(r.game, parts);
+    const std::filesystem::path package_path = disk_path(r.game, parts);
     // One copy-up at a time: a second thread writing the same file waits here and then finds the first one's copy, so
     // it neither fails on the taken name nor collides with that file's open through a rename of its own.
     static std::mutex s_copy_mutex;
@@ -412,9 +461,9 @@ Target write_target(const std::wstring& path, bool copy_up) {
         // not a truncated file that reads would prefer over the package.
         static unsigned s_copies = 0;  // under s_copy_mutex
         const std::filesystem::path staging = r.overlay / kCopyDir;
-        std::filesystem::create_directories(staging, ec);
+        std::filesystem::create_directories(win32_io_path(staging), ec);
         const std::filesystem::path tmp =
-            staging / (std::to_wstring(::GetCurrentProcessId()) + L"-" + std::to_wstring(++s_copies));
+            win32_io_path(staging / (std::to_wstring(::GetCurrentProcessId()) + L"-" + std::to_wstring(++s_copies)));
         // Use CopyFileW for staging because MSVC's std::filesystem::copy_file calls CopyFile2, which Wine 9 lacks.
         if (ec) {
             t.error = static_cast<DWORD>(ec.value());
@@ -530,7 +579,7 @@ bool collect(const std::wstring& pattern, const std::vector<std::wstring>& parts
     if (!r.overlay.empty()) {
         const std::filesystem::path marks = marker(r.overlay, dirs);
         WIN32_FIND_DATAW m{};
-        const HANDLE mh = ::FindFirstFileW((marks / L"*").c_str(), &m);
+        const HANDLE mh = ::FindFirstFileW(win32_io_path(marks / L"*").c_str(), &m);
         if (mh != INVALID_HANDLE_VALUE) {
             has_markers = true;
             do {
@@ -547,7 +596,7 @@ bool collect(const std::wstring& pattern, const std::vector<std::wstring>& parts
                 // markers of a nested delete. A missing sentinel is that ordinary answer (status() reports not_found
                 // with an error code set); any other error leaves the decision to deleted() per entry.
                 std::error_code ec;
-                const auto st = std::filesystem::status(marks / m.cFileName / kRemovedDirMarker, ec);
+                const auto st = std::filesystem::status(win32_io_path(marks / m.cFileName / kRemovedDirMarker), ec);
                 if (st.type() == std::filesystem::file_type::regular) deleted_here.insert(ascii_key(m.cFileName));
                 else if (st.type() != std::filesystem::file_type::not_found && ec) markers_exact = false;
             } while (::FindNextFileW(mh, &m));
@@ -580,10 +629,8 @@ bool collect(const std::wstring& pattern, const std::vector<std::wstring>& parts
 
     auto add_root = [&](const std::filesystem::path& root, bool overlay_root) {
         if (root.empty()) return;
-        std::filesystem::path search = join(root, dirs);
-        search /= leaf;
         WIN32_FIND_DATAW found{};
-        const HANDLE h = ::FindFirstFileW(search.c_str(), &found);
+        const HANDLE h = ::FindFirstFileW(win32_find_path(join(root, dirs) / leaf, leaf).c_str(), &found);
         if (h == INVALID_HANDLE_VALUE) return;
         do {
             if (overlay_root && internal_dir(found.cFileName)) continue;
@@ -917,13 +964,13 @@ BOOL WINAPI delete_file_w(LPCWSTR name) {
 
     bool removed = false;
     std::error_code ec;
-    const std::filesystem::path overlay_path = join(r.overlay, parts);
+    const std::filesystem::path overlay_path = disk_path(r.overlay, parts);
     if (std::filesystem::exists(overlay_path, ec)) {
         if (!::DeleteFileW(overlay_path.c_str())) return FALSE;
         removed = true;
     }
     if (!r.game.empty() && !deleted(r.overlay, parts)) {
-        const std::filesystem::path package_path = join(r.game, parts);
+        const std::filesystem::path package_path = disk_path(r.game, parts);
         if (std::filesystem::exists(package_path, ec)) {
             if (std::filesystem::is_directory(package_path, ec)) {
                 SetLastError(ERROR_ACCESS_DENIED);
@@ -982,12 +1029,22 @@ BOOL create_directory(LPCWSTR template_name, LPCWSTR name, LPSECURITY_ATTRIBUTES
     if (view(r, parts).kind != Kind::None) return fail_bool(ERROR_ALREADY_EXISTS);  // "GAME:" included
     if (!is_folder(r, parent_of(parts))) return fail_bool(ERROR_PATH_NOT_FOUND);
 
-    const std::filesystem::path target = join(r.overlay, parts);
+    const std::filesystem::path target = disk_path(r.overlay, parts);
     std::error_code ec;
     std::filesystem::create_directories(target.parent_path(), ec);
     if (ec) return fail_bool(static_cast<DWORD>(ec.value()));
-    return template_name ? ::CreateDirectoryExW(template_path.c_str(), target.c_str(), security)
-                         : ::CreateDirectoryW(target.c_str(), security);
+    const BOOL created = template_name ? ::CreateDirectoryExW(template_path.c_str(), target.c_str(), security)
+                                       : ::CreateDirectoryW(target.c_str(), security);
+    if (created) {
+        // Keep markers for deleted children, which must remain hidden after the folder is recreated.
+        std::filesystem::remove(marker(r.overlay, parts) / kRemovedDirMarker, ec);
+        if (ec) {
+            const DWORD error = static_cast<DWORD>(ec.value());
+            ::RemoveDirectoryW(target.c_str());
+            return fail_bool(error);
+        }
+    }
+    return created;
 }
 
 }  // namespace
@@ -1028,7 +1085,7 @@ BOOL WINAPI remove_directory_w(LPCWSTR name) {
     if (v.kind == Kind::File) return fail_bool(ERROR_DIRECTORY);
     if (!empty_in_view(r, parts)) return fail_bool(ERROR_DIR_NOT_EMPTY);
 
-    if (v.in_overlay && !::RemoveDirectoryW(join(r.overlay, parts).c_str())) return FALSE;  // its error
+    if (v.in_overlay && !::RemoveDirectoryW(disk_path(r.overlay, parts).c_str())) return FALSE;  // its error
     if (v.in_package) {
         // The package folder stays where it is; the marker hides it, and its files are already hidden one by one.
         DWORD error = 0;
@@ -1062,7 +1119,7 @@ BOOL WINAPI move_file_ex_w(LPCWSTR from, LPCWSTR to, DWORD flags) {
     if (drive_root(from, src) || drive_root(to, dst)) return fail_bool(ERROR_ACCESS_DENIED);
     const View from_view = view(r, src);
     if (from_view.kind == Kind::None) return fail_bool(ERROR_FILE_NOT_FOUND);
-    const std::filesystem::path overlay_from = join(r.overlay, src), overlay_to = join(r.overlay, dst);
+    const std::filesystem::path overlay_from = disk_path(r.overlay, src), overlay_to = disk_path(r.overlay, dst);
     if (same_entry(src, dst)) {
         // The destination is the source, so it is not "already there". The host succeeds at a move onto the same
         // name and changes nothing, and renames when only the case differs. Here the case of a name is the overlay's
@@ -1076,7 +1133,7 @@ BOOL WINAPI move_file_ex_w(LPCWSTR from, LPCWSTR to, DWORD flags) {
         std::error_code same_ec;
         std::filesystem::create_directories(overlay_to.parent_path(), same_ec);
         if (same_ec) return fail_bool(static_cast<DWORD>(same_ec.value()));
-        if (!::CopyFileW(join(r.game, src).c_str(), overlay_to.c_str(), TRUE)) return FALSE;
+        if (!::CopyFileW(disk_path(r.game, src).c_str(), overlay_to.c_str(), TRUE)) return FALSE;
         DWORD flush_error = 0;
         if ((flags & MOVEFILE_WRITE_THROUGH) != 0 && !flush_file(overlay_to, flush_error)) return fail_bool(flush_error);
         return TRUE;
@@ -1107,7 +1164,7 @@ BOOL WINAPI move_file_ex_w(LPCWSTR from, LPCWSTR to, DWORD flags) {
         // The host never sees a move here, only a copy and a marker, so MOVEFILE_WRITE_THROUGH is honoured by
         // flushing both before returning, as MoveFileEx does for its own copy and delete.
         const BOOL fail_if_exists = (flags & MOVEFILE_REPLACE_EXISTING) == 0;
-        if (!::CopyFileW(join(r.game, src).c_str(), overlay_to.c_str(), fail_if_exists)) return FALSE;
+        if (!::CopyFileW(disk_path(r.game, src).c_str(), overlay_to.c_str(), fail_if_exists)) return FALSE;
         if (write_through && !flush_file(overlay_to, error)) return fail_bool(error);
     }
     if (from_view.in_package) {
@@ -1157,7 +1214,7 @@ bool copy_destination(LPCWSTR to, bool fail_if_exists, std::filesystem::path& ou
     if (v.kind == Kind::File && fail_if_exists) return false;
     error = ERROR_PATH_NOT_FOUND;
     if (!is_folder(r, parent_of(parts))) return false;
-    out = join(r.overlay, parts);
+    out = disk_path(r.overlay, parts);
     std::error_code ec;
     std::filesystem::create_directories(out.parent_path(), ec);
     if (ec) {
@@ -1289,14 +1346,14 @@ HRESULT WINAPI copy_file2(PCWSTR from, PCWSTR to, COPYFILE2_EXTENDED_PARAMETERS*
     if (parameters && parameters->dwSize < sizeof(COPYFILE2_EXTENDED_PARAMETERS)) return E_INVALIDARG;
     const CopyFile2Fn host = host_copy_file2();
     if (!host && !fallback_supports(parameters)) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
-    const bool fail_if_exists = parameters && (parameters->dwCopyFlags & COPY_FILE_FAIL_IF_EXISTS) != 0;
-    std::filesystem::path source, destination;
-    DWORD error = 0;
-    if (!copy_paths(from, to, fail_if_exists, source, destination, error)) return HRESULT_FROM_WIN32(error);
     // A cancel flag already set is answered here, for the host's CopyFile2 as well as the fallback: Windows returns
     // ERROR_REQUEST_ABORTED and writes nothing, while Wine reads the flag in neither call (Wine 11.20's CopyFile2 logs
     // "pfCancel is not supported" and copies, dlls/kernelbase/file.c copy_file; Wine 9 has only CopyFileExW).
     if (parameters && parameters->pfCancel && *parameters->pfCancel) return HRESULT_FROM_WIN32(ERROR_REQUEST_ABORTED);
+    const bool fail_if_exists = parameters && (parameters->dwCopyFlags & COPY_FILE_FAIL_IF_EXISTS) != 0;
+    std::filesystem::path source, destination;
+    DWORD error = 0;
+    if (!copy_paths(from, to, fail_if_exists, source, destination, error)) return HRESULT_FROM_WIN32(error);
     if (host) return host(source.c_str(), destination.c_str(), parameters);
     return copy_file2_fallback(source.c_str(), destination.c_str(), parameters);
 }
@@ -1316,7 +1373,7 @@ BOOL WINAPI set_file_attributes_w(LPCWSTR name, DWORD attributes) {
 
     // The attributes belong to the overlay copy: a package file is copied up and a package folder mirrored first,
     // so the package keeps its own attributes and reads, which prefer the overlay, see the new ones.
-    const std::filesystem::path target = join(r.overlay, parts);
+    const std::filesystem::path target = disk_path(r.overlay, parts);
     if (!v.in_overlay) {
         std::error_code ec;
         if (v.kind == Kind::Directory) {

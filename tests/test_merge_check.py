@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -147,6 +147,54 @@ class MergeCheckTest(unittest.TestCase):
         self.assertEqual(r["merges"], [])  # another number: only the text check can see it
         self.assertEqual(r["duplicates"], {"docs/notes.md": 3})
 
+    def test_duplicate_check_reports_failed_blob_reads(self):
+        self.append("docs/notes.md", "\n" + PARAGRAPH)
+        self.commit("Existing paragraph")
+        self.pr_branch("repeat", "main", "\n" + PARAGRAPH)
+        tree = self.git("rev-parse", "repeat^{tree}")
+        run = subprocess.run
+
+        for rev in ("main", tree):
+            with self.subTest(revision=rev):
+                read = ["show", f"{rev}:docs/notes.md"]
+
+                def fail_read(args, **kwargs):
+                    if args[3:] == read:
+                        return subprocess.CompletedProcess(args, 128, b"", b"fatal: could not read blob\n")
+                    return run(args, **kwargs)
+
+                out, err = io.StringIO(), io.StringIO()
+                with mock.patch.object(subprocess, "run", side_effect=fail_read), \
+                        redirect_stdout(out), redirect_stderr(err):
+                    code = mc.main(["--repo", self.repo, "--main", "main", "--json", "20=repeat"])
+                self.assertEqual((code, out.getvalue()), (2, ""))
+                self.assertEqual(err.getvalue(), f"merge_check: git {' '.join(read)}: fatal: could not read blob\n")
+
+    def test_a_new_path_is_clean(self):
+        self.append("docs/notes.md", "\n" + PARAGRAPH)
+        self.commit("Existing paragraph")
+        self.git("checkout", "-q", "-b", "new-path")
+        self.write("docs/new.md", PARAGRAPH)
+        self.commit("Add a separate document")
+        self.git("checkout", "-q", "main")
+
+        code, [result] = self.run_check("20=new-path")
+        self.assertEqual((code, result["verdict"], result["duplicates"]), (0, "clean", {}))
+
+    def test_a_gitlink_update_needs_no_submodule_objects(self):
+        path = "deps/sample"
+        oid_length = len(self.git("rev-parse", "main"))
+        for digit, branch in (("1", "main"), ("2", "updated")):
+            if branch == "updated":
+                self.git("checkout", "-q", "-b", branch)
+            oid = digit * oid_length
+            self.git("update-index", "--add", "--cacheinfo", f"160000,{oid},{path}")
+            self.git("commit", "-q", "-m", f"Set gitlink on {branch}")
+        self.git("checkout", "-q", "main")
+
+        code, [result] = self.run_check("20=updated")
+        self.assertEqual((code, result["verdict"], result["duplicates"]), (0, "clean", {}))
+
     def test_patch_paths_and_added_header_like_lines_still_count_duplicates(self):
         paths = ("docs/quoted \u65e5\u672c\u8a9e.md", "docs/notes with spaces.md", "docs/header-like.md")
         header_like = "++ " + PARAGRAPH
@@ -168,6 +216,29 @@ class MergeCheckTest(unittest.TestCase):
         self.git("config", "diff.noprefix", "true")
         self.git("config", "core.quotePath", "false")
         self.assertEqual(self.run_check("18=duplicated"), (code, [result]))
+
+    def test_duplicate_blocks_span_retained_blank_lines_only(self):
+        first, second, third = PARAGRAPH.splitlines(keepends=True)
+        paragraph = first + "\n" + second + third
+        intro = paragraph + "Start of the changed section.\n"
+        ending = "End of the changed section.\n"
+        duplicate = "docs/notes.md"
+        partial_edit = "docs/partial.md"
+        self.write(duplicate, intro + "\n" + ending)
+        self.write(partial_edit, intro + second + ending)
+        self.commit("Add two documents and placeholders")
+        self.git("checkout", "-q", "-b", "fill-placeholders")
+        for path in (duplicate, partial_edit):
+            self.write(path, intro + paragraph + ending)
+        self.commit("Fill placeholders")
+        self.git("checkout", "-q", "main")
+
+        # Git keeps the blank line in notes.md and the second content line in partial.md.
+        # Both split the additions into separate hunks, but only notes.md adds all three content lines.
+        code, [result] = self.run_check("20=fill-placeholders")
+        self.assertEqual((code, result["verdict"]), (1, "duplicates"))
+        self.assertEqual(result["duplicates"], {duplicate: 3})
+        self.assertEqual(result["duplicate_samples"], {duplicate: PARAGRAPH.splitlines()})
 
     def test_duplicate_blocks_use_git_line_boundaries(self):
         unicode_lines = "".join(f"Paragraph {i} begins with enough text to count as a line.\u2028"

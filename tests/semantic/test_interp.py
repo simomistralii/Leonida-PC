@@ -460,6 +460,23 @@ OpStore %f32_control %control
                 self.assertEqual(si.run_fragment(body, memory=memory)["%out"][0], result)
                 self.assertEqual(memory[4096], after)
 
+    def test_atomic_store_writes_the_word(self):
+        """OpAtomicStore has no result: it writes its value, to memory or to a variable's element."""
+        text = HEADER.replace("OpMemoryModel Logical GLSL450",
+                              'OpCapability PhysicalStorageBufferAddresses\n'
+                              'OpExtension "SPV_KHR_physical_storage_buffer"\n'
+                              "OpMemoryModel PhysicalStorageBuffer64 GLSL450")
+        decls = ("%ulong = OpTypeInt 64 0\n"
+                 "%_ptr_PSB_uint = OpTypePointer PhysicalStorageBuffer %uint\n%addr = OpConstant %ulong 4096\n")
+        text = text.replace("%main = OpFunction", decls + "%main = OpFunction")
+        body = (text + "%p = OpConvertUToPtr %_ptr_PSB_uint %addr\nOpAtomicStore %p %c1 %c0 %cF0\n"
+                "%v = OpVariable %_ptr_Function_arr Function %null_arr\n"
+                "%e = OpAccessChain %_ptr_Function_uint %v %c2\nOpAtomicStore %e %c1 %c0 %c8\n"
+                "%res = OpLoad %uint %e\nOpStore %out %res\n" + FOOTER)
+        memory = {4096: 7}
+        self.assertEqual(si.run_fragment(body, memory=memory)["%out"][0], 8)
+        self.assertEqual(memory[4096], 0xFFFFFFF0)
+
     def test_inputs_and_push_constants_can_be_seeded(self):
         text = HEADER.replace('OpEntryPoint Fragment %main "main" %out',
                               'OpEntryPoint Fragment %main "main" %out %in')
@@ -846,6 +863,67 @@ OpStore %element %seven
 OpStore %out %result
 """
         self.assertEqual(si.run_fragment(self.HEADER + body + FOOTER)["%out"], (0, 7))
+
+
+class MeshOutputTests(unittest.TestCase):
+    """A mesh shader's outputs (SPV_EXT_mesh_shader): arrays of vectors and of a Block struct holding a bool, and
+    OpSetMeshOutputsEXT, whose counts the result reports under its name."""
+    HEADER = """\
+OpCapability MeshShadingEXT
+OpExtension "SPV_EXT_mesh_shader"
+OpMemoryModel Logical GLSL450
+OpEntryPoint MeshEXT %main "main" %idx %cull
+OpExecutionMode %main LocalSize 1 1 1
+OpExecutionMode %main OutputVertices 3
+OpExecutionMode %main OutputPrimitivesEXT 2
+OpExecutionMode %main OutputTrianglesEXT
+OpDecorate %idx BuiltIn PrimitiveTriangleIndicesEXT
+OpDecorate %blk Block
+OpMemberDecorate %blk 0 BuiltIn CullPrimitiveEXT
+OpMemberDecorate %blk 0 PerPrimitiveEXT
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%uint = OpTypeInt 32 0
+%bool = OpTypeBool
+%v3uint = OpTypeVector %uint 3
+%c0 = OpConstant %uint 0
+%c1 = OpConstant %uint 1
+%c2 = OpConstant %uint 2
+%c3 = OpConstant %uint 3
+%true = OpConstantTrue %bool
+%arr_idx = OpTypeArray %v3uint %c2
+%blk = OpTypeStruct %bool
+%arr_cull = OpTypeArray %blk %c2
+%ptr_idx = OpTypePointer Output %arr_idx
+%ptr_cull = OpTypePointer Output %arr_cull
+%ptr_v3 = OpTypePointer Output %v3uint
+%ptr_bool = OpTypePointer Output %bool
+%idx = OpVariable %ptr_idx Output
+%cull = OpVariable %ptr_cull Output
+%tri = OpConstantComposite %v3uint %c0 %c1 %c2
+%main = OpFunction %void None %fn
+%entry = OpLabel
+"""
+    BODY = """\
+%p = OpAccessChain %ptr_v3 %idx %c1
+OpStore %p %tri
+%q = OpAccessChain %ptr_bool %cull %c1 %c0
+OpStore %q %true
+"""
+
+    def test_counts_and_arrayed_outputs(self):
+        out = si.run_fragment(self.HEADER + "OpSetMeshOutputsEXT %c3 %c2\n" + self.BODY + FOOTER)
+        self.assertEqual(out["OpSetMeshOutputsEXT"], (3, 2))
+        self.assertEqual(out["%idx"], (0, 0, 0, 0, 1, 2))      # element 1 written, element 0 still zero
+        self.assertEqual(out["%cull"], (0, 1))                  # the Block's bool member, per primitive
+
+    def test_no_counts_before_the_instruction_runs(self):
+        self.assertNotIn("OpSetMeshOutputsEXT", si.run_fragment(self.HEADER + self.BODY + FOOTER))
+
+    def test_a_second_call_is_rejected(self):
+        twice = "OpSetMeshOutputsEXT %c3 %c2\nOpSetMeshOutputsEXT %c3 %c2\n"
+        with self.assertRaisesRegex(si.InvalidModule, "second time"):
+            si.run_fragment(self.HEADER + twice + FOOTER)
 
 
 if __name__ == "__main__":

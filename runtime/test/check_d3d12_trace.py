@@ -1,20 +1,39 @@
 """Check the trace on the CPU command-list fixture, or on d3d12_com_test with --queue."""
 
 import argparse
+import os
 import re
+import signal
 import subprocess
 
 
 RUNNER = []  # the command that runs a Windows executable here: empty on Windows, ["wine"] for a cross build
+TIMEOUT, RUNNER_TIMEOUT = 30, 120  # seconds per fixture run, natively and through RUNNER
 
 
 def run_fixture(exe, *args):
     # A first start of Wine in a fresh prefix can take tens of seconds, hence the longer limit through a runner.
-    process = subprocess.run([*RUNNER, exe, *args], capture_output=True, text=True, encoding="utf-8",
-                             errors="replace", timeout=120 if RUNNER else 30)
+    timeout = RUNNER_TIMEOUT if RUNNER else TIMEOUT
+    # A runner such as Wine can leave the fixture (and its children) running after the launcher is killed, so on
+    # POSIX the run gets a session of its own and a timeout kills the whole group.
+    group = bool(RUNNER) and os.name == "posix"
+    with subprocess.Popen([*RUNNER, exe, *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+                          start_new_session=group) as process:
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            if group:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            process.kill()
+            process.wait()
+            raise SystemExit(f"{' '.join([exe, *args])}: no exit within {timeout}s") from None
     if process.returncode:
-        raise SystemExit(f"{exe} exited with {process.returncode}\n{process.stdout}{process.stderr}")
-    return [line for line in process.stderr.splitlines() if line.startswith("[d3d12-trace]")]
+        raise SystemExit(f"{exe} exited with {process.returncode}\n{stdout}{stderr}")
+    return [line for line in stderr.splitlines() if line.startswith("[d3d12-trace]")]
 
 
 def main():

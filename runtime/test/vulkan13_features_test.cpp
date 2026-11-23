@@ -75,6 +75,12 @@ VKAPI_ATTR void VKAPI_CALL fake_get_features2(VkPhysicalDevice, VkPhysicalDevice
                 reinterpret_cast<VkPhysicalDeviceSynchronization2FeaturesKHR*>(node)->synchronization2 =
                     g_device->synchronization2;
                 break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT: {
+                auto* f = reinterpret_cast<VkPhysicalDeviceSubgroupSizeControlFeaturesEXT*>(node);
+                f->subgroupSizeControl = g_device->subgroup_size_control;
+                f->computeFullSubgroups = g_device->compute_full_subgroups;
+                break;
+            }
             case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT:
                 reinterpret_cast<VkPhysicalDeviceExtendedDynamicStateFeaturesEXT*>(node)->extendedDynamicState =
                     g_device->eds;
@@ -217,6 +223,30 @@ int main() {
         v13.query(VK_NULL_HANDLE, VK_API_VERSION_1_2, fake_get_features2, fake_enumerate_extensions);
         EXPECT(!v13.core && !v13.usable());
         EXPECT(dev.enum_calls == 2 && dev.features2_calls == 0);
+    }
+
+    // Vulkan 1.2 can pin subgroup size with the extension regardless of dynamic-state extensions.
+    {
+        FakeDevice dev;
+        dev.extensions = {VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
+                          VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME};
+        dev.dynamic_rendering = dev.synchronization2 = dev.subgroup_size_control = VK_TRUE;
+        dev.compute_full_subgroups = VK_TRUE;
+        g_device = &dev;
+        Vulkan13Features v13;
+        v13.query(VK_NULL_HANDLE, VK_API_VERSION_1_2, fake_get_features2, fake_enumerate_extensions);
+        EXPECT(v13.usable() && v13.subgroup_size_control && v13.compute_full_subgroups);
+        std::vector<const char*> extensions;
+        v13.add_extensions(extensions);
+        EXPECT(extensions.size() == 3 && std::strcmp(extensions.back(), VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME) == 0);
+        VkBaseOutStructure tail{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, nullptr};
+        auto* head = static_cast<VkBaseOutStructure*>(v13.enable(&tail));
+        auto* sg = reinterpret_cast<VkPhysicalDeviceSubgroupSizeControlFeaturesEXT*>(head->pNext->pNext);
+        EXPECT(sg->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT);
+        EXPECT(sg->subgroupSizeControl && sg->computeFullSubgroups && *v13.next() == &tail);
+        dev.subgroup_size_control = VK_FALSE;
+        v13.query(VK_NULL_HANDLE, VK_API_VERSION_1_2, fake_get_features2, fake_enumerate_extensions);
+        EXPECT(v13.usable() && !v13.subgroup_size_control && !v13.compute_full_subgroups);
     }
 
     // Vulkan 1.2 with KHR dynamic_rendering + synchronization2, without extended_dynamic_state(2).

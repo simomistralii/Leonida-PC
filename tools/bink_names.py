@@ -42,6 +42,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
@@ -49,6 +50,8 @@ if ROOT not in sys.path:
 import bink_index  # noqa: E402
 from report_paths import os_error_text  # noqa: E402
 import gamedata_index  # noqa: E402
+from file_mode import published_mode  # noqa: E402
+from replace_retry import replace as replace_retry  # noqa: E402
 import gamedata_xml  # noqa: E402
 
 LIST_ENTRY = re.compile(r"<filename>\s*\$\(common\)/movies/([^<]+?\.bk2)\s*</filename>", re.I)
@@ -342,14 +345,61 @@ def name_streams(names, streams, pins=None, max_skip=MAX_SKIP):
 
 
 def write(out, rows, unmatched, summary):
-    if out.lower().endswith(".json"):
-        with open(out, "w", encoding="utf-8", newline="\n") as fh:
-            json.dump({"summary": summary, "streams": rows, "unmatched_list_entries": unmatched}, fh, indent=1)
+    """Publish a complete report, or leave the previous file intact on replace failure."""
+    destination = os.path.abspath(out)
+    parent = os.path.dirname(destination) or "."
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    try:
+        mode = os.stat(destination).st_mode
+    except FileNotFoundError:
+        mode = None
+    except OSError:
+        # Non-regular destinations (pipes/devices) keep a direct write.
+        _write_report_body(destination, rows, unmatched, summary)
+        return
+    if mode is not None:
+        # Retain the direct writer's permission check without truncating the report.
+        os.close(os.open(destination, os.O_WRONLY))
+
+    staged = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", newline="\n", delete=False,
+        dir=parent, prefix=".bink_names-", suffix=".tmp",
+    )
+    try:
+        with staged:
+            _write_report_body(staged, rows, unmatched, summary, json_out=out.lower().endswith(".json"))
+        if os.name != "nt":
+            os.chmod(staged.name, published_mode(destination))
+        replace_retry(staged.name, destination)
+    finally:
+        try:
+            os.unlink(staged.name)
+        except FileNotFoundError:
+            pass
+
+
+def _write_report_body(fh_or_path, rows, unmatched, summary, json_out=None):
+    if isinstance(fh_or_path, str):
+        path = fh_or_path
+        if json_out is None:
+            json_out = path.lower().endswith(".json")
+        if json_out:
+            with open(path, "w", encoding="utf-8", newline="\n") as fh:
+                json.dump({"summary": summary, "streams": rows, "unmatched_list_entries": unmatched}, fh, indent=1)
+        else:
+            with open(path, "w", encoding="utf-8", newline="") as fh:
+                w = csv.DictWriter(fh, fieldnames=FIELDS, lineterminator="\n")
+                w.writeheader()
+                w.writerows(rows)
+        return
+    fh = fh_or_path
+    if json_out:
+        json.dump({"summary": summary, "streams": rows, "unmatched_list_entries": unmatched}, fh, indent=1)
     else:
-        with open(out, "w", encoding="utf-8", newline="") as fh:
-            w = csv.DictWriter(fh, fieldnames=FIELDS, lineterminator="\n")
-            w.writeheader()
-            w.writerows(rows)
+        w = csv.DictWriter(fh, fieldnames=FIELDS, lineterminator="\n")
+        w.writeheader()
+        w.writerows(rows)
 
 
 def main(argv=None):

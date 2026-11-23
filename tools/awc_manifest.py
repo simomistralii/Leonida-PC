@@ -35,6 +35,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import awc_opus  # noqa: E402
 from file_mode import published_mode  # noqa: E402
+from replace_retry import replace as replace_retry  # noqa: E402
 from report_paths import same_report_path  # noqa: E402
 
 FIELDS = ("bank", "stream", "codec", "codec_name", "channels", "sample_rate", "declared_samples",
@@ -185,19 +186,12 @@ def collect(src: str, *, out: str | None = None):
 
 
 def write_manifest(rows: list, banks: int, streamed: int, fmt: str, out: str) -> None:
-    """Write to stdout, or to a temporary file renamed over `out` once it is complete, so a failed
-    write keeps the previous manifest instead of truncating it."""
+    """Write to stdout, or publish a complete file over `out` so a failed replace keeps the previous
+    manifest instead of truncating it."""
     doc = {"bank_count": banks, "stream_count": len(rows),
            "streamed_music_channel_count": streamed, "streams": rows}
-    tmp = None
-    if out:
-        folder = os.path.dirname(os.path.abspath(out))
-        os.makedirs(folder, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=folder, prefix=".awc_manifest-", suffix=".tmp")
-        f = os.fdopen(fd, "w", encoding="utf-8", newline="")
-    else:
-        f = sys.stdout
-    try:
+
+    def _emit(f):
         if fmt == "json":
             json.dump(doc, f, indent=2)
             f.write("\n")
@@ -209,25 +203,48 @@ def write_manifest(rows: list, banks: int, streamed: int, fmt: str, out: str) ->
                 row["duration_s"] = "" if r["duration_s"] is None else f"{r['duration_s']:.6f}"
                 row["streamed_music"] = "yes" if r["streamed_music"] else "no"
                 w.writerow(row)
-        if tmp:
-            f.close()
-            os.chmod(tmp, published_mode(out))   # mkstemp creates 0600
-            os.replace(tmp, out)
-            tmp = None
+
+    if not out:
+        _emit(sys.stdout)
+        return
+
+    destination = os.path.abspath(out)
+    folder = os.path.dirname(destination) or "."
+    os.makedirs(folder, exist_ok=True)
+    try:
+        mode = os.stat(destination).st_mode
+    except FileNotFoundError:
+        mode = None
+    except OSError:
+        # Non-regular destinations (pipes/devices) keep a direct write.
+        with open(destination, "w", encoding="utf-8", newline="") as f:
+            _emit(f)
+        return
+    if mode is not None:
+        # Retain the direct writer's permission check without truncating the report.
+        os.close(os.open(destination, os.O_WRONLY))
+
+    staged = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", newline="", delete=False,
+        dir=folder, prefix=".awc_manifest-", suffix=".tmp",
+    )
+    try:
+        with staged:
+            _emit(staged)
+        if os.name != "nt":
+            os.chmod(staged.name, published_mode(destination))
+        replace_retry(staged.name, destination)
     finally:
-        if f is not sys.stdout:
-            f.close()
-        if tmp:
-            # The staging file may have inherited a read-only destination's mode; make it deletable
-            # first, or Windows strands it beside the manifest when the replace fails.
-            try:
-                os.chmod(tmp, 0o600)
-            except OSError:
-                pass
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
+        # The staging file may have inherited a read-only destination's mode; make it deletable
+        # first, or Windows strands it beside the manifest when the replace fails.
+        try:
+            os.chmod(staged.name, 0o600)
+        except OSError:
+            pass
+        try:
+            os.unlink(staged.name)
+        except FileNotFoundError:
+            pass
 
 
 def main(argv=None) -> int:

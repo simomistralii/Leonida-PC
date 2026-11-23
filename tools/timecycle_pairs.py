@@ -49,6 +49,8 @@ def _iter_source_docs(source) -> list[tuple[str, bytes]]:
                 if gi.stream_kind(nxt, rows[j]) in ("decl", "bink2", "rbf0", "psin", "other", "binary"):
                     break
                 blob += nxt
+                if not root:  # the opening name or its delimiter may span streams
+                    root = gi.xml_root(blob)
                 j += 1
             if root in TARGET_ROOTS:
                 docs.append((root, blob))

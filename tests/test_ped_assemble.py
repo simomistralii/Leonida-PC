@@ -1115,5 +1115,111 @@ class SkinnedJointRemappingTests(unittest.TestCase):
             pa.build_assembled_glb([oob_raw_part], skeleton=master_skel, apply_standing=False)
 
 
+class GlbIndexComponentTypeTest(unittest.TestCase):
+    """Non-unsigned-integer componentTypes in GLB indices/JOINTS accessors report one ERROR line."""
+
+    @staticmethod
+    def _pack_glb(doc: dict, bin_bytes: bytes) -> bytes:
+        jb = json.dumps(doc, separators=(",", ":")).encode("utf-8")
+        jb += b" " * ((4 - len(jb) % 4) % 4)
+        bb = bin_bytes + b"\x00" * ((4 - len(bin_bytes) % 4) % 4)
+        total = 12 + 8 + len(jb) + 8 + len(bb)
+        return (
+            b"glTF" + struct.pack("<II", 2, total)
+            + struct.pack("<II", len(jb), 0x4E4F534A) + jb
+            + struct.pack("<II", len(bb), 0x004E4942) + bb
+        )
+
+    def test_cli_rejects_float_indices_and_joints_without_traceback(self):
+        pos_bytes = struct.pack("<9f", 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+        idx_u16 = struct.pack("<3H", 0, 1, 2) + b"\x00\x00"
+        idx_nan = struct.pack("<3f", 0.0, float("nan"), 2.0)
+        joints_inf = struct.pack("<12f", float("inf"), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+        cases = [
+            (
+                "float_indices_nan",
+                {
+                    "asset": {"version": "2.0"},
+                    "buffers": [{"byteLength": len(pos_bytes) + len(idx_nan)}],
+                    "bufferViews": [
+                        {"buffer": 0, "byteOffset": 0, "byteLength": len(pos_bytes)},
+                        {"buffer": 0, "byteOffset": len(pos_bytes), "byteLength": len(idx_nan)},
+                    ],
+                    "accessors": [
+                        {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3"},
+                        {"bufferView": 1, "componentType": 5126, "count": 3, "type": "SCALAR"},
+                    ],
+                    "meshes": [{"name": "upper", "primitives": [{"attributes": {"POSITION": 0}, "indices": 1}]}],
+                    "nodes": [{"name": "upper", "mesh": 0}],
+                },
+                pos_bytes + idx_nan,
+            ),
+            (
+                "float_joints0_inf",
+                {
+                    "asset": {"version": "2.0"},
+                    "buffers": [{"byteLength": len(pos_bytes) + len(idx_u16) + len(joints_inf)}],
+                    "bufferViews": [
+                        {"buffer": 0, "byteOffset": 0, "byteLength": len(pos_bytes)},
+                        {"buffer": 0, "byteOffset": len(pos_bytes), "byteLength": 6},
+                        {"buffer": 0, "byteOffset": len(pos_bytes) + len(idx_u16), "byteLength": len(joints_inf)},
+                    ],
+                    "accessors": [
+                        {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3"},
+                        {"bufferView": 1, "componentType": 5123, "count": 3, "type": "SCALAR"},
+                        {"bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC4"},
+                    ],
+                    "meshes": [{"name": "upper", "primitives": [
+                        {"attributes": {"POSITION": 0, "JOINTS_0": 2}, "indices": 1}
+                    ]}],
+                    "nodes": [{"name": "upper", "mesh": 0}],
+                },
+                pos_bytes + idx_u16 + joints_inf,
+            ),
+            (
+                "float_joints1_inf",
+                {
+                    "asset": {"version": "2.0"},
+                    "buffers": [{"byteLength": len(pos_bytes) + len(idx_u16) + len(joints_inf)}],
+                    "bufferViews": [
+                        {"buffer": 0, "byteOffset": 0, "byteLength": len(pos_bytes)},
+                        {"buffer": 0, "byteOffset": len(pos_bytes), "byteLength": 6},
+                        {"buffer": 0, "byteOffset": len(pos_bytes) + len(idx_u16), "byteLength": len(joints_inf)},
+                    ],
+                    "accessors": [
+                        {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3"},
+                        {"bufferView": 1, "componentType": 5123, "count": 3, "type": "SCALAR"},
+                        {"bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC4"},
+                    ],
+                    "meshes": [{"name": "upper", "primitives": [
+                        {"attributes": {"POSITION": 0, "JOINTS_1": 2}, "indices": 1}
+                    ]}],
+                    "nodes": [{"name": "upper", "mesh": 0}],
+                },
+                pos_bytes + idx_u16 + joints_inf,
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for label, doc, payload in cases:
+                with self.subTest(case=label):
+                    in_glb = os.path.join(tmp, f"{label}.glb")
+                    out_glb = os.path.join(tmp, f"{label}_out.glb")
+                    with open(in_glb, "wb") as f:
+                        f.write(self._pack_glb(doc, payload))
+                    proc = subprocess.run(
+                        [sys.executable, "-I", os.path.join(TOOLS, "ped_assemble.py"),
+                         "assemble", in_glb, "-o", out_glb],
+                        capture_output=True, text=True, timeout=60,
+                    )
+                    self.assertEqual(proc.returncode, 2)
+                    self.assertFalse(os.path.exists(out_glb))
+                    lines = proc.stderr.splitlines()
+                    self.assertEqual(len(lines), 1, proc.stderr)
+                    self.assertIn("ERROR:", lines[0])
+                    self.assertIn("expected unsigned integer", lines[0])
+
+
 if __name__ == "__main__":
     unittest.main()

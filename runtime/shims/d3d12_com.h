@@ -18,6 +18,7 @@
 #include "../src/gfx10_descriptors.h"
 #include "../src/vulkan_backend.h"
 
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <span>
@@ -62,7 +63,8 @@ bool command_signature_info(ID3D12CommandSignature* signature, leonida::Indirect
 // (D3D12_MULTIPLE_FENCE_WAIT_FLAG_ALL) or any fence (_ANY) has reached its value; a null event blocks until then.
 HRESULT set_event_on_multiple_fence_completion(leonida::VulkanContext& context, ID3D12Fence* const* fences,
                                                const UINT64* values, UINT count,
-                                               D3D12_MULTIPLE_FENCE_WAIT_FLAGS flags, HANDLE event);
+                                               D3D12_MULTIPLE_FENCE_WAIT_FLAGS flags, HANDLE event,
+                                               IUnknown* device = nullptr);
 
 std::shared_ptr<const leonida::TileHeapAllocation> tile_heap(ID3D12Heap* heap, const leonida::VulkanContext& context,
                                                            bool image, std::uint32_t memory_types);
@@ -187,11 +189,21 @@ struct VulkanDeviceInfo {
     // colours fall back to transparent black.
     bool custom_border_color = false;
     bool custom_border_color_without_format = false;
+    // VK_EXT_external_memory_host is enabled on `device` when this is non-zero (its
+    // minImportedHostPointerAlignment): OpenExistingHeapFromAddress backs a heap with the caller's own committed
+    // memory. Zero: existing heaps stay unsupported.
+    VkDeviceSize host_pointer_alignment = 0;
 };
 
 // A Vulkan-backed ID3D12Device (PC ABI, up to ID3D12Device11) on caller-owned Vulkan objects, which must outlive
 // the device and every object it created. Wrap it in rt::d3d12_xs::create_device_proxy for the Xbox ABI.
 HRESULT create_vulkan_device(const VulkanDeviceInfo& info, REFIID riid, void** out);
+
+// The folder of translated shaders a device loads when VulkanDeviceInfo::shader_dir is empty: LEONIDA_SHADERS, else
+// the path make_game recorded in shader_path.txt next to the executable (`config` names another file, for tests).
+// Empty when neither names one, or when the path cannot be converted (a shader_path.txt that is not UTF-8); the reason
+// is in `*error` then. Never throws.
+std::filesystem::path configured_shader_directory(std::string* error, const std::filesystem::path& config = {});
 
 // The same, on a Vulkan instance and device of its own (destroyed with the D3D12 device). Picks the first discrete
 // GPU with the features above. LEONIDA_VK_VALIDATION=1 enables VK_LAYER_KHRONOS_validation.
@@ -210,6 +222,13 @@ HRESULT create_vulkan_device_standalone(REFIID riid, void** out,
 // proxy it also makes the proxy's IDXGIDevice1::GetAdapter return this layer's adapter (d3d12_xs_device.h).
 void set_device_outer(ID3D12Device* device, IUnknown* outer);
 
+// Console Xbox CreateDescriptorHeap takes a 16-byte PC D3D12_DESCRIPTOR_HEAP_DESC followed by address/size at
+// +0x10/+0x18 (issue #313 comment 7107265058). This helper creates a heap with that console ABI contract on a
+// device from create_vulkan_device*; it is intended for the Xbox device-proxy slot 14 path, not normal PC callers.
+HRESULT create_console_descriptor_heap(ID3D12Device* device, const D3D12_DESCRIPTOR_HEAP_DESC* desc,
+                                       D3D12_GPU_VIRTUAL_ADDRESS console_address, std::uint64_t console_size,
+                                       REFIID riid, void** out);
+
 // The VkImage behind a texture created by such a device, or VK_NULL_HANDLE. For tests and the swapchain.
 VkImage vulkan_image(ID3D12Resource* resource);
 // The VkBuffer behind a buffer created by such a device, or VK_NULL_HANDLE. For tests.
@@ -218,6 +237,13 @@ VkBuffer vulkan_buffer(ID3D12Resource* resource);
 const VulkanDeviceInfo* vulkan_device_info(ID3D12Device* device);
 // True when `device` has VK_KHR_acceleration_structure + VK_KHR_ray_query enabled.
 bool device_supports_ray_tracing(ID3D12Device* device);
+
+// Xbox device slot 133 (the console's CreatePlacedResourceX): a buffer on the caller's own pages at `address`, which
+// becomes its console VA. The pages are imported with VK_EXT_external_memory_host, so what the CPU writes there is
+// what the GPU reads. A buffer description only; E_NOTIMPL on a device that is not the Vulkan layer, without the
+// extension, or for a texture.
+HRESULT create_buffer_at_host_address(ID3D12Device* device, void* address, const D3D12_RESOURCE_DESC& desc,
+                                      std::uint32_t layout, REFIID riid, void** out);
 // The VkAccelerationStructureKHR registered for `va` on `device`, or VK_NULL_HANDLE. For tests.
 VkAccelerationStructureKHR vulkan_acceleration_structure(ID3D12Device* device, D3D12_GPU_VIRTUAL_ADDRESS va);
 

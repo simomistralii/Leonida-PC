@@ -269,13 +269,15 @@ std::vector<Case> cases() {
          CALLS(const FLOAT c[4] = {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(),
                -1, 2};
                e.list->ClearRenderTargetView(e.rtv, c, 0, nullptr))},
-        {"ClearDepthStencilView with flags 0", true, stricter,
+        // A depth outside [0, 1] (NaN included) is stored as given and a clear that names no plane clears nothing:
+        // WARP closes both lists (d3d12_clear_test reads the texels back).
+        {"ClearDepthStencilView with flags 0", true, match,
          CALLS(e.list->ClearDepthStencilView(e.dsv, D3D12_CLEAR_FLAGS(0), 1, 0, 0, nullptr))},
-        {"ClearDepthStencilView depth 1.5", true, stricter,
+        {"ClearDepthStencilView depth 1.5", true, match,
          CALLS(e.list->ClearDepthStencilView(e.dsv, D3D12_CLEAR_FLAG_DEPTH, 1.5f, 0, 0, nullptr))},
-        {"ClearDepthStencilView depth -0.5", true, stricter,
+        {"ClearDepthStencilView depth -0.5", true, match,
          CALLS(e.list->ClearDepthStencilView(e.dsv, D3D12_CLEAR_FLAG_DEPTH, -0.5f, 0, 0, nullptr))},
-        {"ClearDepthStencilView depth NaN", true, stricter,
+        {"ClearDepthStencilView depth NaN", true, match,
          CALLS(e.list->ClearDepthStencilView(e.dsv, D3D12_CLEAR_FLAG_DEPTH,
                                             std::numeric_limits<float>::quiet_NaN(), 0, 0,
                                             nullptr))},

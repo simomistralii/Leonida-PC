@@ -5,6 +5,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -54,6 +55,59 @@ void init_pe64(uint8_t* img, uint32_t size_of_image, const std::vector<IMAGE_SEC
     nt->OptionalHeader.SizeOfImage = size_of_image;
     IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
     for (std::size_t i = 0; i < sections.size(); ++i) sec[i] = sections[i];
+}
+
+// Real functions for the unwinding checks: an exception leaves the hooked function, or the callback.
+uint32_t throw_on_seven(uint32_t value) {
+    if (value == 7) throw std::runtime_error("seven");
+    return value + 1;
+}
+
+uint32_t throw_on_seven_result(uint32_t result, uint32_t argument) {
+    if (argument == 8) throw std::runtime_error("eight");
+    return result * 100 + argument;
+}
+
+// Leaves no return address of an earlier call where an unwinder that reads the wrong slot could find one.
+void dirty_stack() {
+    volatile unsigned char bytes[8192];
+    for (auto& b : bytes) b = 0xAB;
+}
+
+bool caught_through(const uint8_t* thunk, uint32_t argument) {
+    dirty_stack();
+    try {
+        reinterpret_cast<uint32_t (*)(uint32_t)>(const_cast<uint8_t*>(thunk))(argument);
+    } catch (const std::runtime_error&) {
+        return true;
+    }
+    return false;
+}
+
+// Unwinds one frame from inside `thunk`, where its call returns to (`return_offset`, after a prolog that moved rsp by
+// `frame` bytes), and says whether the caller's rip and rsp come out.
+bool unwinds_to_caller(uint8_t* thunk, std::size_t return_offset, std::size_t frame) {
+    alignas(16) uint64_t stack[64] = {};
+    const uint64_t caller_rip = 0x1234567890ull;
+    uint64_t* at_entry = stack + 40;  // rsp when the thunk is entered: the return address
+    *at_entry = caller_rip;
+    CONTEXT context{};
+    context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+    context.Rip = reinterpret_cast<DWORD64>(thunk + return_offset);
+    context.Rsp = reinterpret_cast<DWORD64>(at_entry) - frame;
+    DWORD64 base = 0, establisher = 0;
+    PRUNTIME_FUNCTION function = RtlLookupFunctionEntry(context.Rip, &base, nullptr);
+    if (!function || base != reinterpret_cast<DWORD64>(thunk)) return false;
+    void* handler_data = nullptr;
+    RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, context.Rip, function, &context, &handler_data, &establisher, nullptr);
+    return context.Rip == caller_rip && context.Rsp == reinterpret_cast<DWORD64>(at_entry + 1);
+}
+
+// The offset just after the first `call rax` (FF D0) of a thunk.
+std::size_t after_first_call(const uint8_t* thunk) {
+    for (std::size_t i = 0; i + 1 < 256; ++i)
+        if (thunk[i] == 0xFF && thunk[i + 1] == 0xD0) return i + 2;
+    return 0;
 }
 
 }  // namespace
@@ -290,6 +344,29 @@ int main() {
     check(redirect_direct_branches(nullptr, 16, target0, thunk0) == 0,
           "redirect_direct_branches returns 0 for null begin");
     VirtualFree(mem, 0, MEM_RELEASE);
+
+    // Stack walks and exceptions pass through both thunks.
+    const auto* throwing = reinterpret_cast<const void*>(&throw_on_seven);
+    uint8_t* unwind_result = make_result_thunk(throwing, &throw_on_seven_result, throwing);
+    uint8_t* unwind_remap = make_remap_thunk(throwing, 0, &throw_on_seven, throwing);
+    check(unwind_result && unwind_remap, "thunks for the unwinding checks");
+    if (unwind_result && unwind_remap) {
+        check(reinterpret_cast<Fn1>(unwind_result)(1) == 201, "the result thunk still works");
+        check(reinterpret_cast<Fn1>(unwind_remap)(1) == 3, "the remap thunk still works");
+        check(unwinds_to_caller(unwind_result, after_first_call(unwind_result), 0x28),
+              "a stack walk from the hooked function reaches the result thunk's caller");
+        check(unwinds_to_caller(unwind_remap, after_first_call(unwind_remap), 0x88),
+              "a stack walk from the callback reaches the remap thunk's caller");
+        check(caught_through(unwind_result, 7), "an exception leaves the hooked function through the result thunk");
+        check(caught_through(unwind_result, 8), "an exception leaves the callback through the result thunk");
+        check(caught_through(unwind_remap, 7), "an exception leaves the callback through the remap thunk");
+        const DWORD64 freed = reinterpret_cast<DWORD64>(unwind_result) + 1;
+        DWORD64 base = 0;
+        free_thunk(unwind_result);
+        check(RtlLookupFunctionEntry(freed, &base, nullptr) == nullptr, "a freed thunk leaves no function table");
+        free_thunk(unwind_remap);
+    }
+    free_thunk(nullptr);
 
     std::printf("code_hooks_test: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

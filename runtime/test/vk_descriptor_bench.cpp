@@ -1375,6 +1375,7 @@ int main(int argc, char** argv) {
     VkPhysicalDeviceProperties pd_props{};
     std::uint32_t qi = 0;
     std::uint32_t ts_valid_bits = 0;
+    bool filtered_out = false;   // LEONIDA_VK_DEVICE left a device out
     if (opt.device_index.has_value()) {
         const std::uint32_t device_index = *opt.device_index;
         if (device_index >= pd_count) {
@@ -1400,6 +1401,11 @@ int main(int argc, char** argv) {
         for (VkPhysicalDevice cand : pds) {
             VkPhysicalDeviceProperties p{};
             vkGetPhysicalDeviceProperties(cand, &p);
+            // LEONIDA_VK_DEVICE names the GPU, as in the other harnesses (vk_device_pick.h, docs/testing.md).
+            if (!leonida::vulkan_device_wanted(p.deviceName)) {
+                filtered_out = true;
+                continue;
+            }
             std::uint32_t c_qi = 0, c_ts = 0;
             if (p.apiVersion < VK_API_VERSION_1_1 || !find_compute_queue(cand, c_qi, c_ts)) continue;
             const int s = score(p.deviceType, p.vendorID);
@@ -1413,6 +1419,11 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (!pd && filtered_out) {   // a filter that matches no usable device fails the run, it does not skip
+        leonida::vk_test::report_no_device();
+        destroy_instance();
+        return 1;
+    }
     if (!pd) {
         std::printf("unsupported: no Vulkan 1.1+ compute physical device\n");
         destroy_instance();

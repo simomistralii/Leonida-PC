@@ -8,6 +8,7 @@ import contextlib
 import csv
 import json
 import os
+from pathlib import Path
 import struct
 import subprocess
 import sys
@@ -325,6 +326,24 @@ class ArchiveTest(unittest.TestCase):
             self.assertIn(message, p.stderr)
             self.assertNotIn("Traceback", p.stderr)
             self.assertFalse(os.path.exists(out))
+
+    def test_invalid_archive_header_is_rejected_before_output(self):
+        valid = Path(self.rpf).read_bytes()
+        cases = (
+            (b"NOPE" + valid[4:], [], "not an RPF9 archive"),
+            (b"NOPE" + valid[4:], ["--start", str(self.offsets[0])], "not an RPF9 archive"),
+            (valid[:7], [], "truncated RPF9 header"),
+        )
+        source = Path(self.root) / "invalid.rpf"
+        for i, (payload, args, diagnostic) in enumerate(cases):
+            with self.subTest(args=args, diagnostic=diagnostic):
+                source.write_bytes(payload)
+                out = Path(self.root) / f"invalid-{i}.json"
+                proc = subprocess.run([sys.executable, "-I", TOOL, source, out, "--quiet", *args],
+                                      capture_output=True, text=True, errors="replace")
+                self.assertEqual(proc.returncode, 1, proc.stderr)
+                self.assertIn(diagnostic, proc.stderr)
+                self.assertFalse(out.exists())
 
     def test_missing_source_or_out_folder_is_one_line(self):
         missing = os.path.join(self.root, "missing.rpf")

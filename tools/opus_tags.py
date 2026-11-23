@@ -122,6 +122,10 @@ def load_names(path, source=None):
     ambiguous = collections.defaultdict(set)
     with open(path, encoding="utf-8-sig", newline="") as fh:
         reader = csv.DictReader(fh)
+        fields = reader.fieldnames or ()
+        missing = [name for name in ("bank", "stream_id", "name") if name not in fields]
+        if missing:
+            raise ValueError(f"{path}: missing columns in names CSV header: {', '.join(missing)}")
         for row in reader:
             if source and row.get("source") != source:
                 continue

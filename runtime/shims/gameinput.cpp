@@ -39,6 +39,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -442,6 +443,22 @@ bool build_effect(const GameInputForceFeedbackParams& p, float gain, bool* endle
     return true;
 }
 
+struct TriggerWaveform {
+    float intensity = 0.0f;
+    uint64_t start = 0, end = 0;  // microseconds, end == 0 holds until replaced
+    uint64_t duration = 0, delay = 0;
+
+    float level_at(uint64_t now) const {
+        if (end && now >= end) return 0.0f;
+        if (!duration || !delay || now <= start) return intensity;
+        const uint64_t elapsed = now - start;
+        if (elapsed < duration) return intensity;
+        // A cycle longer than the clock's entire range can only reach its first quiet interval.
+        if (delay > UINT64_MAX - duration) return 0.0f;
+        return elapsed % (duration + delay) < duration ? intensity : 0.0f;
+    }
+};
+
 class Device final : public IGameInputDevice {
 public:
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** out) override {
@@ -507,8 +524,7 @@ public:
     float motor_gain = 1.0f;                     // SetForceFeedbackMotorGain, 0..1
     std::vector<ForceFeedbackEffect*> effects;    // every live effect, so the poll thread can drive them
     std::vector<int> retired;                     // SDL effect ids whose object is gone: destroyed on the poll thread
-    float haptic_intensity[kHapticMotors] = {};   // SetHapticMotorState, 0..1
-    uint64_t haptic_until[kHapticMotors] = {};    // when the request ends, 0 for "until changed"
+    TriggerWaveform waveforms[kHapticMotors]{};
     GameInputBatteryState battery{0, 0, 0, 0, GameInputBatteryUnknown};
     AppLocalDeviceId base_id{};  // id_bytes of the identity alone: twins share it, info.deviceId tells them apart
 
@@ -1180,7 +1196,40 @@ void fill_info(Device* d, SDL_Gamepad* p, const AppLocalDeviceId& id) {
         d->button_info[b].mappedInputKinds = GameInputKindGamepad;
         d->button_info[b].legacyHidIndex = static_cast<uint16_t>(b);
         d->button_info[b].legacyDInputIndex = static_cast<uint16_t>(b);
+        d->button_info[b].label = GameInputLabelUnknown;  // paddles, touchpad, misc: no gamepad meaning to name
     }
+    // Labels. Every pad is presented as an Xbox One pad (docs/gameinput.md), so every control carries the Xbox label
+    // of its position, whatever is printed on the pad in the player's hands. A stick axis has no label in v0, so
+    // only the triggers are named. UI navigation names the controls read_pad reads it from; scrolling is the right
+    // stick, which has none.
+    const GameInputLabel face[4] = {GameInputLabelXboxA, GameInputLabelXboxB, GameInputLabelXboxX,
+                                    GameInputLabelXboxY};
+    const GameInputLabel menu = GameInputLabelXboxMenu, view = GameInputLabelXboxView;
+    const GameInputLabel up = GameInputLabelXboxDPadUp, down = GameInputLabelXboxDPadDown;
+    const GameInputLabel left = GameInputLabelXboxDPadLeft, right = GameInputLabelXboxDPadRight;
+    const GameInputLabel lb = GameInputLabelXboxLeftShoulder, rb = GameInputLabelXboxRightShoulder;
+    const GameInputLabel ls = GameInputLabelXboxLeftStickButton, rs = GameInputLabelXboxRightStickButton;
+    const GameInputLabel lt = GameInputLabelXboxLeftTrigger, rt = GameInputLabelXboxRightTrigger;
+    const GameInputLabel none = GameInputLabelNone;
+    d->gamepad_info = {menu, view, face[0], face[1], face[2], face[3], up, down, left, right, lb, rb, ls, rs};
+    d->ui_info = {menu, view, face[0], face[1], up, down, left, right, face[2], face[3], ls, rs, lt, rt, lb, rb,
+                  none, none, none, none, GameInputLabelXboxGuide};
+    d->axis_info[4].label = lt;
+    d->axis_info[5].label = rt;
+    const struct {
+        SDL_GamepadButton sdl;
+        GameInputLabel label;
+    } labelled[] = {
+        {SDL_GAMEPAD_BUTTON_SOUTH, face[0]},    {SDL_GAMEPAD_BUTTON_EAST, face[1]},
+        {SDL_GAMEPAD_BUTTON_WEST, face[2]},     {SDL_GAMEPAD_BUTTON_NORTH, face[3]},
+        {SDL_GAMEPAD_BUTTON_BACK, view},        {SDL_GAMEPAD_BUTTON_GUIDE, GameInputLabelXboxGuide},
+        {SDL_GAMEPAD_BUTTON_START, menu},       {SDL_GAMEPAD_BUTTON_LEFT_STICK, ls},
+        {SDL_GAMEPAD_BUTTON_RIGHT_STICK, rs},   {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, lb},
+        {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, rb}, {SDL_GAMEPAD_BUTTON_DPAD_UP, up},
+        {SDL_GAMEPAD_BUTTON_DPAD_DOWN, down},   {SDL_GAMEPAD_BUTTON_DPAD_LEFT, left},
+        {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, right},
+    };
+    for (const auto& l : labelled) d->button_info[l.sdl].label = l.label;
     i.controllerAxisInfo = d->axis_info;
     i.controllerButtonInfo = d->button_info;
     i.gamepadInfo = &d->gamepad_info;
@@ -1386,7 +1435,7 @@ void open_pad(SDL_JoystickID jid, uint64_t ts) {
     d->haptic_motors = 0;
     if (d->has_trigger_output) {
         for (uint32_t m = 0; m < kHapticMotors; ++m) {
-            d->haptic_waveform_info[m] = {{0x0F, 0x58}, true, true, true, false, 0};
+            d->haptic_waveform_info[m] = {{0x0F, 0x58}, true, true, true, true, 0};
             d->haptic_motor_info[m] = {};
             d->haptic_motor_info[m].mappedRumbleMotors = m ? GameInputRumbleRightTrigger : GameInputRumbleLeftTrigger;
             d->haptic_motor_info[m].location = GameInputLocationChassis;
@@ -1456,7 +1505,7 @@ void close_pad(Device* d, uint64_t ts) {
     d->sent_gain = -1;
     d->haptic_motors = 0;
     for (ForceFeedbackEffect* e : d->effects) e->orphan();
-    for (uint32_t m = 0; m < kHapticMotors; ++m) d->haptic_intensity[m] = 0, d->haptic_until[m] = 0;
+    for (auto& waveform : d->waveforms) waveform = {};
     if (!d->history.empty()) d->evicted_order = d->history.back()->order();  // the history ends with the session
     for (Reading* r : d->history) r->Release();
     d->history.clear();
@@ -1525,7 +1574,7 @@ void apply_output(Device* d, uint64_t now) {
         std::lock_guard lock(s.mu);
         want = d->wanted;
         for (uint32_t m = 0; m < d->haptic_motors; ++m)
-            if (!d->haptic_until[m] || now < d->haptic_until[m]) haptic[m] = d->haptic_intensity[m];
+            haptic[m] = d->waveforms[m].level_at(now);
     }
     const bool muted = !s.config.rumble;
     if (muted) want = {};
@@ -2021,19 +2070,27 @@ void Device::SetForceFeedbackMotorGain(uint32_t motorIndex, float masterGain) {
 HRESULT Device::SetHapticMotorState(uint32_t motorIndex, const void* params) {
     std::lock_guard lock(g().mu);
     if (motorIndex >= haptic_motors) return E_INVALIDARG;
+    auto& waveform = waveforms[motorIndex];
     if (!params) {  // stop the motor
-        haptic_intensity[motorIndex] = 0.0f;
-        haptic_until[motorIndex] = 0;
+        waveform = {};
         return S_OK;
     }
     const auto* p = static_cast<const GameInputHapticFeedbackParams*>(params);
     if (p->waveformIndex >= haptic_motor_info[motorIndex].waveformCount) return E_INVALIDARG;
-    haptic_intensity[motorIndex] = std::clamp(p->intensity, 0.0f, 1.0f);
+    waveform.intensity = std::clamp(p->intensity, 0.0f, 1.0f);
+    waveform.start = now_us();
+    waveform.duration = p->duration;
+    waveform.delay = p->repeatDelay;
     // duration and repeatDelay are microseconds; playCount 0 plays until the state is set again. The poll thread sends
-    // the level and drops it when the deadline passes.
+    // the level and drops it when the deadline passes. The sums saturate: a request longer than a uint64 of
+    // microseconds (a duration of UINT64_MAX, say) ends at UINT64_MAX, which the poll thread never reaches, instead of
+    // wrapping to a deadline already past or only a moment away.
+    constexpr uint64_t kMax = UINT64_MAX;
+    const auto mul = [](uint64_t a, uint64_t b) { return b && a > kMax / b ? kMax : a * b; };
+    const auto add = [](uint64_t a, uint64_t b) { return a > kMax - b ? kMax : a + b; };
     uint64_t total = p->playCount == 0 ? 0 : p->duration;
-    if (p->playCount > 1) total = p->duration * p->playCount + p->repeatDelay * (p->playCount - 1);
-    haptic_until[motorIndex] = total ? now_us() + total : 0;
+    if (p->playCount > 1) total = add(mul(p->duration, p->playCount), mul(p->repeatDelay, p->playCount - 1));
+    waveform.end = total ? add(waveform.start, total) : 0;
     return S_OK;
 }
 

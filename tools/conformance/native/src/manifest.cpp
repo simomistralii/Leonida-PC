@@ -74,7 +74,8 @@ bool WriteManifest(const std::filesystem::path& path, const std::string& adapter
                    const conform::Scene* scenes, int scene_count) {
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     if (!output.is_open()) {
-        ReportFailure(__FILE__, __LINE__, "std::ofstream::open", "could not create " + path.string(),
+        ReportFailure(__FILE__, __LINE__, "std::ofstream::open",
+                      "could not create " + TextFromWide(path.native()),
                       "the output directory is writable and not on a read-only volume");
         return false;
     }
@@ -88,7 +89,8 @@ bool WriteManifest(const std::filesystem::path& path, const std::string& adapter
     output << "  ]\n}\n";
     output.close();
     if (output.fail()) {
-        ReportFailure(__FILE__, __LINE__, "std::ofstream::close", "could not write " + path.string(),
+        ReportFailure(__FILE__, __LINE__, "std::ofstream::close",
+                      "could not write " + TextFromWide(path.native()),
                       "the disk has free space; a full volume fails on close, not on open");
         return false;
     }

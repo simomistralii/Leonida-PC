@@ -489,6 +489,82 @@ void test_deserializer() {
         check(d->Flags == 0, "shim deserializer returns flags with the high byte cleared");
         shim_de->Release();
     }
+
+    // Corrupted non-zero DXBC checksum: the helper must not forge a valid hash over a corrupted container.
+    {
+        std::vector<uint8_t> bad_hash = tampered;
+        bad_hash[4] ^= 0x01;
+        std::vector<uint8_t> out(1, 0xCC);
+        const bool rewrote = rt::d3d12_xs::copy_rts0_blob_clear_xbox_flags(bad_hash.data(), bad_hash.size(), out);
+        check(!rewrote && out.empty(), "blob helper refuses to rewrite and re-sign a corrupted DXBC checksum");
+
+        ID3D12RootSignatureDeserializer* host_bad = nullptr;
+        const HRESULT hr_host =
+            D3D12CreateRootSignatureDeserializer(bad_hash.data(), bad_hash.size(), IID_PPV_ARGS(&host_bad));
+        if (host_bad) host_bad->Release();
+        if (FAILED(hr_host)) {
+            ID3D12RootSignatureDeserializer* shim_bad = nullptr;
+            const HRESULT hr_shim = deserialize(bad_hash.data(), bad_hash.size(), IID_PPV_ARGS(&shim_bad));
+            check(FAILED(hr_shim) && !shim_bad,
+                  "shim deserializer rejects a corrupted DXBC checksum just as the host does");
+            if (shim_bad) shim_bad->Release();
+        } else {
+            std::printf("SKIP host-vs-shim corrupted checksum rejection (this host accepts bad checksums)\n");
+        }
+    }
+
+    // Trailing bytes past DXBC total_size (bytes 24..27): host rejects and the helper must not rewrite/rehash it.
+    {
+        std::vector<uint8_t> trailing = tampered;
+        trailing.resize(trailing.size() + 16, 0xAB);
+        std::vector<uint8_t> out(1, 0xCC);
+        const bool rewrote = rt::d3d12_xs::copy_rts0_blob_clear_xbox_flags(trailing.data(), trailing.size(), out);
+        check(!rewrote && out.empty(), "blob helper refuses a DXBC container with trailing bytes past total_size");
+
+        ID3D12RootSignatureDeserializer* host_trail = nullptr;
+        const HRESULT hr_host =
+            D3D12CreateRootSignatureDeserializer(trailing.data(), trailing.size(), IID_PPV_ARGS(&host_trail));
+        if (host_trail) host_trail->Release();
+        if (FAILED(hr_host)) {
+            ID3D12RootSignatureDeserializer* shim_trail = nullptr;
+            const HRESULT hr_shim = deserialize(trailing.data(), trailing.size(), IID_PPV_ARGS(&shim_trail));
+            check(FAILED(hr_shim) && !shim_trail,
+                  "shim deserializer rejects trailing bytes past total_size just as the host does");
+            if (shim_trail) shim_trail->Release();
+        } else {
+            std::printf("SKIP host-vs-shim trailing-bytes rejection (this host accepts trailing bytes)\n");
+        }
+    }
+
+    // Mismatched total_size header field (even if bytes 4..19 hold dxbc_checksum of the buffer length).
+    {
+        std::vector<uint8_t> bad_total = tampered;
+        uint32_t bogus_total = static_cast<uint32_t>(bad_total.size() + 4);
+        std::memcpy(bad_total.data() + 24, &bogus_total, sizeof(bogus_total));
+        uint32_t bad_total_hash[4];
+        rt::d3d12_xs::dxbc_checksum(bad_total.data(), bad_total.size(), bad_total_hash);
+        std::memcpy(bad_total.data() + 4, bad_total_hash, sizeof(bad_total_hash));
+        std::vector<uint8_t> out(1, 0xCC);
+        const bool rewrote = rt::d3d12_xs::copy_rts0_blob_clear_xbox_flags(bad_total.data(), bad_total.size(), out);
+        check(!rewrote && out.empty(), "blob helper refuses a DXBC container whose header total_size != size");
+    }
+
+    // All-zero DXBC checksum: accepted by host d3d12.dll, so the helper clears the Xbox high byte and keeps it zeroed.
+    {
+        std::vector<uint8_t> zero_hash = tampered;
+        std::memset(zero_hash.data() + 4, 0, 16);
+        std::vector<uint8_t> out;
+        const bool rewrote = rt::d3d12_xs::copy_rts0_blob_clear_xbox_flags(zero_hash.data(), zero_hash.size(), out);
+        constexpr uint8_t kZero[16] = {};
+        check(rewrote && out.size() == zero_hash.size() && std::memcmp(out.data() + 4, kZero, 16) == 0,
+              "blob helper rewrites an all-zero-checksum Xbox blob and keeps its zero checksum");
+
+        ID3D12RootSignatureDeserializer* shim_zero = nullptr;
+        const HRESULT hr_zero = deserialize(zero_hash.data(), zero_hash.size(), IID_PPV_ARGS(&shim_zero));
+        check(SUCCEEDED(hr_zero) && shim_zero && shim_zero->GetRootSignatureDesc()->Flags == 0,
+              "shim deserializer accepts an all-zero-checksum Xbox blob with the high byte cleared");
+        if (shim_zero) shim_zero->Release();
+    }
 }
 
 }  // namespace

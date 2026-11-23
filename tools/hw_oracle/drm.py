@@ -9,7 +9,9 @@ driver (libdrm_amdgpu) by hw_oracle_drm.c. Standard library only. No ROCm: an as
                                   kernel driver reset the GPU, and with it everything shown on that display.
     LEONIDA_AMD_CLANG, LEONIDA_HOST_CC, LEONIDA_HW_ARCH   as in runner.py
 
-The launcher supports compute engine version 10 only: GFX10, which is RDNA1 and RDNA2.
+The launcher supports compute engine versions 10, 11 and 12: GFX10 (RDNA1 and RDNA2), GFX11 (RDNA3) and
+GFX12 (RDNA4). The registers the launcher writes sit at the same offsets on all three; only the preamble and
+the cu-mask writes differ, as hw_oracle_drm.c documents.
 """
 import glob
 import hashlib
@@ -49,8 +51,8 @@ def find_node(environ=None, sysfs="/sys/class/drm"):
     environ = os.environ if environ is None else environ
     node = environ.get("LEONIDA_HW_DRM_NODE")
     if not node:
-        raise Unavailable("set LEONIDA_HW_DRM_NODE to the render node of a GFX10 AMD GPU that drives no display "
-                          "(`ls -l /dev/dri/by-path` lists them)")
+        raise Unavailable("set LEONIDA_HW_DRM_NODE to the render node of a GFX10, GFX11 or GFX12 AMD GPU that "
+                          "drives no display (`ls -l /dev/dri/by-path` lists them)")
     if not os.path.exists(node):
         raise Unavailable(f"LEONIDA_HW_DRM_NODE={node} does not exist")
     displays = connected_displays(node, sysfs)
@@ -193,7 +195,9 @@ class DrmOracle(runner.Oracle):
         if not head.startswith("#"):
             raise Unavailable((r.stderr.strip() or "the launcher printed no device line")[:300])
         arch = next((field[5:] for field in head.split() if field.startswith("arch=")), "")
-        return "gfx1030" if arch in ("", "gfx10xx") else arch   # every GFX10 chip takes the same encodings
+        # A chip the launcher could only label by generation (an unannounced revision): any member takes the
+        # same encodings, so a representative assembles for it. asm.family() groups the names the same way.
+        return {"": "gfx1030", "gfx10xx": "gfx1030", "gfx11xx": "gfx1100", "gfx12xx": "gfx1201"}.get(arch, arch)
 
     def _assemble(self, text, wave=32):
         s = os.path.join(self.workdir, "k.s")

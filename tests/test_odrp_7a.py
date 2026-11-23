@@ -749,6 +749,36 @@ class ArchiveAndCliTest(unittest.TestCase):
                 if not m.closed:
                     m.close()
 
+    def test_failed_output_write_preserves_existing_json_and_csv_reports(self):
+        real_named_temp = tempfile.NamedTemporaryFile
+
+        def failing(*args, **kwargs):
+            handle = real_named_temp(*args, **kwargs)
+
+            def fail_write(data):
+                handle.file.write(data[:4])
+                raise OSError(28, "No space left on device")
+
+            handle.write = fail_write
+            return handle
+
+        for name, old_text in (("kept.json", '{"previous": true}\n'), ("kept.csv", "offset,kind\n0x0,old\n")):
+            out = os.path.join(self.root, name)
+            with open(out, "w", encoding="utf-8", newline="\n") as f:
+                f.write(old_text)
+            for label, patch in (
+                ("write", unittest.mock.patch.object(odrp_7a.tempfile, "NamedTemporaryFile", side_effect=failing)),
+                ("replace", unittest.mock.patch.object(odrp_7a.os, "replace",
+                                                       side_effect=PermissionError(13, "Permission denied"))),
+            ):
+                with self.subTest(name=name, label=label), patch:
+                    with self.assertRaises(SystemExit) as cm:
+                        odrp_7a.main([self.rpf, out, "--quiet"])
+                    self.assertNotEqual(cm.exception.code, 0)
+                    with open(out, encoding="utf-8") as f:
+                        self.assertEqual(f.read(), old_text)
+                    self.assertFalse([n for n in os.listdir(self.root) if n.startswith(".odrp_7a-")])
+
 
 if __name__ == "__main__":
     unittest.main()

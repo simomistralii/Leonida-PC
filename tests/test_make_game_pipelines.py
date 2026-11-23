@@ -155,6 +155,15 @@ class PipelinesCrashRetryTest(unittest.TestCase):
         return ("--count" in args and args[args.index("--count") + 1] == "1"
                 and "--jobs" in args and args[args.index("--jobs") + 1] == "1")
 
+    def test_bom_marked_index_reaches_the_native_checker_and_preserves_range(self):
+        with open(os.path.join(self.spirv, "index.json"), "w", encoding="utf-8-sig", newline="\n") as f:
+            f.write('{"b_mod": {}, "a_mod": {}, "c_mod": {}}')
+        failed, _ = self.stage(lambda args, n: 0)
+        self.assertIsNone(failed)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0][self.calls[0].index("--count") + 1], "3")
+        self.assertEqual(make_game.pipeline_names(self.spirv), ["a_mod", "b_mod", "c_mod"])
+
     def test_a_named_module_is_skipped_and_the_rest_checked(self):
         def script(args, n):
             if self.is_probe(args):

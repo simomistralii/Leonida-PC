@@ -53,6 +53,17 @@ This page collects the setup steps and the problems testers have run into so far
 
 ## Build the test programs
 
+On a Windows runtime build with Vulkan enabled, CMake only registers `d3d12_translated_draw`, `d3d12_m2_textured`,
+`d3d12_m2_formats`, `d3d12_m3_frame`, `d3d12_m4_compute` and `d3d12_buffer_uav` when it finds `llvm-mc`,
+`spirv-as` and `spirv-val`. It registers `d3d12_subgroup` only when it finds `llvm-mc` and `glslangValidator`.
+Without `glslangValidator`, other tests are also omitted, including `d3d12_compute`, `d3d12_draw`,
+`d3d12_set0_compute` and `d3d12_mesh`; some registered tests run only part of their checks. These tests can be
+**absent**, not reported as skipped, when their build prerequisites are missing, so a passing `ctest` percentage
+alone does not establish that they ran. Check the CMake configure messages and list the
+configured tests with `ctest --test-dir runtime/build -C RelWithDebInfo -N` before comparing test counts. After
+installing missing tools, rerun CMake in an environment where they are visible and rebuild.
+
+
 Windows, from a "Developer PowerShell for VS 2022" or a plain shell:
 
 ```powershell
@@ -267,6 +278,29 @@ against Microsoft's answers recorded in the test (`d3d12_subresource_copy` and `
 A few still compare with the host (`root_sig`, `device_proxy`, and some of `d3d12_vulkan_device`'s cases), so some
 of those fail for that reason.
 
+### Run a Windows CI artifact under Wine
+
+The `Runtime` workflow uploads `runtime-windows` for seven days. It contains the Windows executables, DLLs,
+synthetic test shaders, CTest inventory and the path of the Windows checkout. From a clean checkout of the commit
+used by the Windows job, set `run_id` to the Actions run ID and download the artifact to `runtime/build`:
+
+```sh
+gh run download "$run_id" --repo ItsNotRexed/Leonida --name runtime-windows --dir runtime/build
+
+WINE=wine WINEPREFIX="$(mktemp -d)" WINEDLLOVERRIDES="mscoree,mshtml=" WINEDEBUG=-all \
+  bash scripts/run_wine_session.sh python3 -I scripts/run_wine_tests.py \
+  --tests runtime/build/ctest.json \
+  --windows-root "$(cat runtime/build/windows-root.txt)" \
+  --require loader --require pe_loader --require loader_tls --require unimplemented_policy \
+  --require run_tiny_game --require run_tiny_game_exit_code
+```
+
+The session script initializes a dedicated prefix and stops its Wine processes at exit. On a headless host,
+put `xvfb-run -a` before `bash` so prefix initialization and the tests share one virtual display. The test runner
+maps the recorded Windows drive to the Linux checkout for shaders referenced by absolute Windows paths. It prints
+every verdict and returns a failure status if any required test fails, skips or is missing. Check the printed
+verdicts for failures outside the required set.
+
 ## GPUs with 32-wide subgroups (NVIDIA, Intel, Apple)
 
 The game's shaders are mostly wave64. A GPU that can't run 64-wide compute subgroups skips the wave64 tests
@@ -276,6 +310,20 @@ To test the wave64 emulation that makes them exact on these GPUs, set `LEONIDA_W
 `build.py` and `check.py`**: `build.py` translates with emulation only when it's set. If you set it only for
 `check.py`, the shaders are checked against the emulated expectations without being emulated, and every wave64 test
 fails.
+
+`scripts/bench_wave64.py` normally compares emulation on AMD and NVIDIA with a native-wave64 AMD reference. On a
+machine without that reference, use `--emulated-only` to time the current Vulkan device instead:
+
+```sh
+python3 -I scripts/bench_wave64.py --build runtime/build/linux \
+  --llvm-mc "$(brew --prefix llvm)/bin/llvm-mc" --emulated-only
+```
+
+This mode builds only the emulated shader, requires every benchmark process to finish the shader's `0 mismatches`
+self-check and requires the output hash to stay identical between processes. It says `no native reference` in the
+result: the run establishes deterministic self-consistency on that device, not equality with native Wave64. The mode
+leaves `LEONIDA_VK_DEVICE`, `VK_DRIVER_FILES` and `VK_LOADER_DRIVERS_SELECT` untouched; on macOS the test tools use
+MoltenVK directly by default.
 
 `ps_bitmask_perm` is a wave32 pixel shader, and a pixel shader's width can't be requested on every device. Intel
 drivers report subgroups of 8..32 and may run it 8 or 16 wide; its second pattern reads lanes 16-31, which then
@@ -662,15 +710,4 @@ range, OS, the commit you built, the tool versions and the counts each script pr
 lines only, never shaders or logs from the game. A failure that isn't in the table above gets its own issue, linked
 from your entry.
 
-The CPU, GPU, VRAM and RAM fields come from `tools/pc_checker.py`, which compares this PC with the Xbox Series X
-reference specs (or `--profile 2` for the community 1080p Low estimate). Run it in text mode; the default form opens a
-window:
-
-```powershell
-python -I tools/pc_checker.py --cli --check    # spec lines, then exit 0 good, 1 weak, 2 unknown
-python -I tools/pc_checker.py --cli --check --json
-```
-
-`--cpu`, `--gpu` and `--ram` override the detected values when a VM or a remote session hides them. Its scores are
-rough estimates made for this tool, not benchmarks, so put the detected model names in the #166 entry, not the score.
-`python -I tests/test_pc_checker.py` checks the parsing and the comparison with the window mocked.
+Use your system's detected CPU, GPU, VRAM and RAM model names in the #166 entry, not benchmark scores. For a rough browser-based check against reference profiles, you can use [Can I Run Leonida](https://assttro.github.io/can-i-run-leonida/).

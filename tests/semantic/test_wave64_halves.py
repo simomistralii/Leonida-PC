@@ -182,6 +182,26 @@ class Classification(unittest.TestCase):
             "buffer_store_dword v0, v13, s[0:3], 0 offen offset:256", "s_mov_b64 exec, s[10:11]"]), "B", [],
             ["aggregated-atomic", "elected-lane"])
 
+    def test_c_aggregated_atomic_at_a_per_lane_address(self):
+        # the elected lane runs the atomic at its own address; each half elects its own lane, so an address made from
+        # a per-lane value (here the pixel's y, untainted) bumps another counter there and the slots collide
+        base = _load_ps_w64_lines("ps_w64_b_ballot_atomic")
+        per_lane = []
+        for line in base:
+            per_lane += (["v_lshrrev_b32_e32 v12, 2, v3", "v_lshlrev_b32_e32 v12, 2, v12"]
+                         if line == "v_mov_b32_e32 v12, 0" else [line])
+        self.assertNotEqual(per_lane, base)
+        push = [0, 0, 65536, 0x30000000]
+        for name, lines, tier, reasons in (("ps_b_atomic_uniform_addr", base, "B", []),
+                                           ("ps_c_atomic_per_lane_addr", per_lane, "C", ["elected-lane"])):
+            with self.subTest(name):
+                (t, r, _), asm = meta_of(name, lines)
+                self.assertEqual((t, r), (tier, reasons))
+                whole, halves = {0: 0}, {0: 0}
+                _run_ps_cut(asm, 64, push=push, memory=whole)
+                _run_ps_cut(asm, 32, push=push, memory=halves)
+                self.assertEqual(whole == halves, tier == "B")
+
     def test_b_spill_and_reload_in_half(self):
         self.tier("ps_b_spill", ps(["v_writelane_b32 v20, s4, 3", "v_readlane_b32 s21, v20, 3",
                                     "v_add_nc_u32_e32 v6, s21, v0"]), "B", [], ["lane-spill"])
