@@ -217,7 +217,7 @@ def decode(buf, off: int, base_rva: int) -> Insn | None:
         if b in _M1_IMM8:
             imm = 1
         elif b in _M1_IMMZ:
-            imm = 2 if p66 else 4
+            imm = 2 if (p66 and not (rex & 8)) else 4
         elif b in _M1_REL8:
             rel = 1
         elif b in (0xE8, 0xE9):
@@ -266,7 +266,7 @@ def decode(buf, off: int, base_rva: int) -> Insn | None:
             disp = struct.unpack_from("<i", buf, p)[0]
         p += dsize
         if op in (0xF6, 0xF7) and reg & 7 in (0, 1):    # test r/m, imm
-            imm = 1 if op == 0xF6 else (2 if p66 else 4)
+            imm = 1 if op == 0xF6 else (2 if (p66 and not (rex & 8)) else 4)
     target = None
     if rel:
         if p + rel > n:
@@ -337,7 +337,7 @@ class RuntimeTable:
 
     @classmethod
     def load(cls, path: str) -> "RuntimeTable":
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             return cls(json.load(f))
 
     def ids(self) -> set[str]:

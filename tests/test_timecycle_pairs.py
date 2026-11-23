@@ -1,6 +1,8 @@
 """Synthetic unit tests for tools/timecycle_pairs.py (no game files)."""
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import sys
@@ -73,6 +75,16 @@ class TimecyclePairsTests(unittest.TestCase):
         self.assertEqual(fc["a_lt_b"], 1)
         self.assertEqual(fc["keyframe_range"], [500.0, 700.0])
 
+    def test_modifier_patterns_do_not_round_values_onto_endpoints(self):
+        values = ("-0.0000001", "0.0000001", "0.9999999", "1.0000001", "0", "1")
+        modifiers = "".join(f"<modifier><v>2 {b}</v></modifier>" for b in values)
+        blob = f"<timecycle_modifier_data>{modifiers}</timecycle_modifier_data>".encode()
+        summary = tp.summarize_documents([("timecycle_modifier_data", blob)])
+        self.assertEqual(summary["per_modifier_b_pattern"], {
+            "outside_0_1": 2, "in_0_1_with_frac": 2, "all_b_eq_0": 1, "all_b_eq_1": 1,
+        })
+        self.assertEqual(summary["second_number"]["distinct_round6"], 2)
+
     def test_cli_xml_directory_and_out(self):
         with tempfile.TemporaryDirectory() as tmp:
             with open(os.path.join(tmp, "kf.xml"), "wb") as f:
@@ -101,6 +113,93 @@ class TimecyclePairsTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 tp.main([os.path.join(tmp, "missing.rpf")])
             self.assertEqual(cm.exception.code, 2)
+
+
+
+class DirectoryReportTests(unittest.TestCase):
+    def fixture(self, folder, carved):
+        if carved:
+            chunks = (SYNTH_MOD[:256], SYNTH_MOD[256:])
+            rows, paths = [], []
+            for i, chunk in enumerate(chunks):
+                offset = 0x1000 + i * 256
+                path = os.path.join(folder, f"{offset:012x}.bin")
+                with open(path, "wb") as f:
+                    f.write(chunk)
+                paths.append(path)
+                rows.append({"off": offset, "stored": len(chunk), "size": len(chunk),
+                             "head": chunk[:16].hex(), "pre": "00" * 16})
+            with open(os.path.join(folder, "index.json"), "w",
+                      encoding="utf-8", newline="\n") as f:
+                json.dump({"files": rows}, f)
+            return paths
+        paths = [os.path.join(folder, name) for name in ("modifier.xml", "keyframes.XML")]
+        for path, data in zip(paths, (SYNTH_MOD, SYNTH_KF)):
+            with open(path, "wb") as f:
+                f.write(data)
+        return paths
+
+    def run_cli(self, *args):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                status = tp.main(list(args))
+            except SystemExit as exc:
+                status = exc.code
+        return status, out.getvalue(), err.getvalue()
+
+    def test_reports_cannot_replace_directory_sources(self):
+        for carved in (False, True):
+            for index in (0, 1):
+                with self.subTest(carved=carved, index=index), tempfile.TemporaryDirectory() as tmp:
+                    paths = self.fixture(tmp, carved)
+                    before = {}
+                    for path in paths:
+                        with open(path, "rb") as f:
+                            before[path] = f.read()
+                    status, out, err = self.run_cli(tmp, "--out", paths[index])
+                    self.assertEqual(status, 2, err)
+                    self.assertIn("would overwrite", err)
+                    self.assertNotIn("Traceback", err)
+                    self.assertEqual(out, "")
+                    for path, data in before.items():
+                        with open(path, "rb") as f:
+                            self.assertEqual(f.read(), data)
+
+    def test_external_hard_link_alias_of_directory_source_is_refused(self):
+        for carved in (False, True):
+            with self.subTest(carved=carved), tempfile.TemporaryDirectory() as tmp:
+                folder = os.path.join(tmp, "input")
+                os.mkdir(folder)
+                source = self.fixture(folder, carved)[0]
+                report = os.path.join(tmp, "report.json")
+                try:
+                    os.link(source, report)
+                except OSError as exc:
+                    self.skipTest(f"hard links unavailable: {exc}")
+                with open(source, "rb") as f:
+                    before = f.read()
+                status, _, err = self.run_cli(folder, "--out", report)
+                self.assertEqual(status, 2, err)
+                self.assertIn("would overwrite", err)
+                with open(source, "rb") as f:
+                    self.assertEqual(f.read(), before)
+                with open(report, "rb") as f:
+                    self.assertEqual(f.read(), before)
+
+    def test_distinct_report_in_directory_can_be_created_and_replaced(self):
+        for carved in (False, True):
+            with self.subTest(carved=carved), tempfile.TemporaryDirectory() as tmp:
+                self.fixture(tmp, carved)
+                report = os.path.join(tmp, "report.json")
+                for _ in range(2):
+                    status, out, err = self.run_cli(tmp, "--out", report)
+                    self.assertEqual(status, 0, err)
+                    self.assertEqual(out, "")
+                    with open(report, encoding="utf-8") as f:
+                        summary = json.load(f)
+                    self.assertEqual(summary["modifiers"]["plain"], 2)
+                    self.assertEqual(summary["second_number"]["count"], 7)
 
 
 if __name__ == "__main__":

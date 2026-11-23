@@ -1,3 +1,4 @@
+; regen_fixtures: this source has a translator fixture in tests/semantic/fixtures/disasm
 ; group: 32,1,1
 ; v_pk_mul_lo_u16 with a constant operand (an SGPR, a literal, an inline constant), one half of the constant 0 or
 ; small, the other operand computed at run time from the output buffer's 0xEEEEEEEE fill (so no compiler can fold it).

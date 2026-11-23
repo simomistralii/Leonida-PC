@@ -1,3 +1,4 @@
+; regen_fixtures: this source has a translator fixture in tests/semantic/fixtures/disasm
 ; ds_cmpst_f32 / ds_cmpst_rtn_f32 and buffer_atomic_fcmpswap (#3153): a float compare, so -0 matches +0 and a NaN
 ; never matches, not even its own bits. Lane 0 of a wave32 group stores eight dwords:
 ;   out[0] = ds_cmpst_rtn_f32 old value (LDS +0, CMP -0, DATA 1.0)                       = 0x00000000

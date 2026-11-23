@@ -389,6 +389,15 @@ prints its mesh, skin (joint count) and animation counts, the POSITION bounding 
 field the exporter dropped; [models.md](models.md#skinned-glb-export) lists what the rest of
 the report carries.
 
+`python -I tools/glb_skinning.py out.glb` checks the skin data itself: each skin's joint and
+`inverseBindMatrices` counts, the accessor types and finite values, which primitives carry
+skinning data and which are static, `JOINTS_n`/`WEIGHTS_n` pairing, every vertex's weight sum
+as FLOAT or normalized `UNSIGNED_BYTE`/`UNSIGNED_SHORT`, the joint-index range and the POSITION
+bounds computed from the accessor. A malformed container, a file with no skin, or a skin whose
+`inverseBindMatrices` count differs from its joint count exits nonzero; `--json report.json`
+writes the same report as LF-only JSON. `python -I tests/test_glb_skinning.py` runs its 17
+synthetic tests and needs no game files.
+
 ## Texture parameter split
 
 The character material blocks carry several 32-bit parameter hashes before each 64-bit asset

@@ -144,6 +144,16 @@ instruction family per file; the list below describes some of them, not every fi
   `v_pk_fma_f16`, `v_fma_f16 op_sel`, `v_subrev_co_ci_u32`, `v_cmpx_eq_u64`, `v_mul_i32_i24`, `v_ffbh_i32`,
   `v_pk_lshlrev_b16`, `v_sin_f16` and `v_mul_legacy_f32`) and requires `test_ps_semantics.py` to fail for the
   matching shader.
+- To check a new test file the same way before sending it, run `python -I tools/semantic_mutants.py
+  tests/semantic/test_x.py --op <op>` (or `--function NAME`, `--lines A-B`). It makes one-line mutants of the
+  translator code for that op (swapped opcode and GLSL pairs, comparisons, small constants ±1, swapped `OpSelect`
+  arms, a repeated operand) in a private copy of `tools/`, and lists the ones the file still passes. An op that is
+  translated through a lookup table (`F1`, `LDS_ATOMICS`, ...) also gets its table entry swapped for the table's other
+  values. A survivor
+  usually means a case asserts on the file's own reference model rather than on translated output, or that its
+  inputs can't tell the variants apart (all bytes of S0 >= S1, no bits overlapping, only lanes 0–3 checked). Some
+  survivors are equivalent mutants, and in a branch shared by several ops the other ops' lines are listed too, so
+  read each one before adding a case. `tests/test_semantic_mutants.py` tests the tool.
 - `test_f32_valu.py` runs `ps_f32_mods` (`v_mac_f32` rounds the product before the add; VOP3 clamp and output
   modifiers on `v_cvt_f32_ubyte*`/`u32`/`f16` and `v_rcp_iflag_f32`), found by `tools/f32_fuzz.py` (FUZZ-3), and
   tests the interpreter's float operations against GLSL.std.450 (signed zeros, undefined inputs, a single-rounding

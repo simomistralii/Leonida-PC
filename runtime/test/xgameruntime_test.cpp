@@ -185,11 +185,11 @@ void check_measured_classes(QueryFn query, XSystemAnalyticsInfo (*named_analytic
     if (f) {
         using Available = bool(STDMETHODCALLTYPE*)(void*, uint32_t);  // bool, per Microsoft's reference page
         auto available = method<Available>(f, 3);
-        // XGameRuntimeFeature values: XAsync 2, XAsyncProvider 3, XDisplay 4, XGame 5, XGameSave 7, XGameUI 8,
+        // XGameRuntimeFeature values: XAccessibility 0, XLauncher 9, XSpeechSynthesizer 13, XAsync 2, XAsyncProvider 3, XDisplay 4, XGame 5, XGameSave 7, XGameUI 8,
         // XNetworking 10, XPackage 11, XPersistentLocalStorage 12, XStore 14, XSystem 15, XTaskQueue 16, XThread 17,
         // XUser 18, XError 19, XGameEvent 20, XGameStreaming 21.
         bool served = true;
-        for (uint32_t v : {2u, 3u, 5u, 7u, 8u, 10u, 11u, 12u, 14u, 15u, 16u, 17u, 18u, 19u, 20u, 21u})
+        for (uint32_t v : {0u, 2u, 3u, 5u, 7u, 9u, 13u, 8u, 10u, 11u, 12u, 14u, 15u, 16u, 17u, 18u, 19u, 20u, 21u})
             served = served && available(f, v);
         check(served, "slot 3 (XGameRuntimeIsFeatureAvailable): true for the features whose classes are served, "
                       "XPersistentLocalStorage among them");
@@ -252,10 +252,9 @@ void check_measured_classes(QueryFn query, XSystemAnalyticsInfo (*named_analytic
         release_object(a);
     }
 
-    // Classes nobody serves yet are still refused, and logged, as before.
+    // Classes nobody serves are still refused, and logged, as before.
     const GUID refused[] = {
-        {0x1b339674, 0x328d, 0x4283, {0xa2, 0x00, 0x31, 0x71, 0xf1, 0x8d, 0x36, 0x39}},  // XLauncherImpl
-        {0x3e241977, 0x6237, 0x41e9, {0x85, 0x59, 0x10, 0x2c, 0x2d, 0x99, 0x83, 0xf1}},  // XAccessibilityImpl
+        {0xa4f1aee2, 0x4bf1, 0x4485, {0xb0, 0x08, 0xa7, 0xc2, 0x6d, 0x52, 0xac, 0x27}},  // XAppCaptureImpl
         {0x12345678, 0x9abc, 0xdef0, {0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0}},  // no such class
     };
     bool all_refused = true;
@@ -263,7 +262,7 @@ void check_measured_classes(QueryFn query, XSystemAnalyticsInfo (*named_analytic
         void* out = reinterpret_cast<void*>(1);
         all_refused = all_refused && query(&cls, cls, &out) == static_cast<HRESULT>(0x80070032) && out == nullptr;
     }
-    check(all_refused, "XLauncherImpl, XAccessibilityImpl and an unknown class are still refused");
+    check(all_refused, "XAppCaptureImpl and an unknown class are still refused");
 }
 
 // xgameruntime.lib's thunks don't import the runtime: they LoadLibraryW(L"xgameruntime.dll") and GetProcAddress five

@@ -35,6 +35,8 @@ happens **on your PC, from your own copy of the game**.
 > from your game and stays on your PC. Never share those files.
 
 Discord: https://discord.gg/rexed
+
+Custom Git Mirror: https://git.notrexed.dev/notrexed/Leonida
 <br>
 
 ## Project status
@@ -165,7 +167,8 @@ them translates them again: `--no-float-controls` (drop `SignedZeroInfNanPreserv
 skips a shader without `shaderSignedZeroInfNanPreserveFloat32`; needs PR #664's translator flag), `--bary-fallback`
 (read raw barycentrics from an interpolated input, for devices without `VK_KHR_fragment_shader_barycentric`),
 `--texel-offset-fallback` (fold `image_sample*_o` offsets into the coordinate, for devices without
-`VK_KHR_maintenance8`) and `--mesh-compute` (mesh shaders as compute, for devices without `VK_EXT_mesh_shader`).
+`VK_KHR_maintenance8`) and `--mesh-compute` (mesh shaders as compute, for devices without `VK_EXT_mesh_shader`;
+on by itself on Intel's Windows Vulkan driver, whose native mesh draws crash, BUILD-2202, unless `--native-mesh`).
 Each is documented in [docs/design.md](docs/design.md).
 
 The build records which llvm-mc command and version produced the disassembly. Changing either, or reusing a work

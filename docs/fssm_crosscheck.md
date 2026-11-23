@@ -226,7 +226,15 @@ PR description.
   measured on the Leonida corpus; the shared FSSM v0x101/DXBC shape makes the same layout
   likely, but it is not directly verified against SCARAB's title.
 - Which of the two `$VS_*` XBCH payloads the game's pipeline actually uses is not
-  established. The 24-byte descriptor is the same in both, so it does not disambiguate.
+  established against pipeline bytes. The 24-byte descriptor is the same in both, so
+  it does not disambiguate, but the PAL stage descriptors do name two different
+  hardware stages for them (`tools/pal_stages.py`): the first payload is stage 2
+  (`es`) and the last stage 4 (`vs`), and `scripts/vs_layout_census.py` confirms the
+  code matches those stages — the ES payload has no `exp` (it writes the vertex
+  outputs to LDS for the geometry stage), takes its lane id from `v_mbcnt` and reads
+  `v5`, `v9`-`v11` and `v13`-`v14` on entry, while the VS payload is the legacy non-NGG VS of
+  `docs/design.md`. `fssm_unpack.py` defaults to the last payload, so the translated
+  one is the VS variant; which payload a GS-bound pipeline selects is still open.
 - The meaning of the 24-byte descriptor (two 12-byte records with a `0xD580` tag) is not
   established. It is a fixed header, not code.
 - The vendor disassembler's `asic(CI)` label is unexplained; it does not override the
@@ -240,7 +248,7 @@ PR description.
 
 ```
 python -I tests/test_fssm_crosscheck.py
-# 4 tests, 1 expected failure (the duplicate-XBCH loss)
+# 6 tests, all pass (the duplicate-XBCH payloads are pinned; no expected failure)
 ```
 
 The test uses synthetic `FSSM` and `DXBC` bytes only. No game data is read or written.

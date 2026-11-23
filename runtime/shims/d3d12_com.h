@@ -365,6 +365,7 @@ struct RootArgumentLayout {
         std::uint32_t compute_offset = rt::rootsig::kNoSgpr;  // compute: first user SGPR
     };
     std::vector<Parameter> parameters;
+    std::uint32_t flags = 0;  // D3D12_ROOT_SIGNATURE_FLAGS from the serialized blob
     bool graphics_ok = true;
     bool compute_ok = true;
 };
@@ -376,6 +377,16 @@ std::uintptr_t compute_pipeline_id(ID3D12PipelineState* pipeline);
 std::uintptr_t graphics_pipeline_id(ID3D12PipelineState* pipeline);
 // What each stage of a Vulkan device's PSO asked for (src/subgroup_size.h), in creation order; null for another PSO.
 const std::vector<leonida::SubgroupRequest>* pipeline_subgroup_requests(ID3D12PipelineState* pipeline);
+
+// Unwraps an Xbox-ABI heap proxy if needed and inspects one of this module's descriptor heaps; returns its owning
+// device identity pointer, or nullptr when `heap` is null or belongs to another implementation.
+IUnknown* descriptor_heap_info(ID3D12DescriptorHeap* heap, D3D12_DESCRIPTOR_HEAP_DESC& desc,
+                               D3D12_GPU_VIRTUAL_ADDRESS& gpu_base);
+
+// Reads the shader-visible descriptor heap GPU base addresses currently bound on `list` (0 when unbound).
+// Returns false when `list` is not one of this module's command lists.
+bool bound_descriptor_heap_bases(ID3D12GraphicsCommandList* list, D3D12_GPU_VIRTUAL_ADDRESS& cbv_srv_uav,
+                                 D3D12_GPU_VIRTUAL_ADDRESS& sampler);
 
 // The size of every descriptor slot (GetDescriptorHandleIncrementSize), for handle ranges.
 inline constexpr UINT descriptor_size = 32;

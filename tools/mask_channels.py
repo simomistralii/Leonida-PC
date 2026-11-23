@@ -13,6 +13,7 @@ Only counts are written. The input is the user's own export and stays local.
 
 `--json` is published from a staging file next to the destination, creating the folder when it is missing, so
 a run that fails while writing leaves an older report in place; a write error is one `ERROR:` line and exit 2.
+Usage: `python -I tools/mask_channels.py --help` lists the options.
 """
 from __future__ import annotations
 
@@ -27,6 +28,7 @@ if _TOOLS_DIR not in sys.path:
     sys.path.insert(0, _TOOLS_DIR)
 import dds_png  # noqa: E402
 from file_mode import published_mode  # noqa: E402
+from report_paths import same_report_path  # noqa: E402
 
 CHANNELS = "RGBA"
 
@@ -70,16 +72,6 @@ def channel_counts(width: int, height: int, rgba: bytes, thresholds=(64, 128, 19
     return out
 
 
-def same_file(first: str, second: str) -> bool:
-    """True when opening ``second`` for writing would truncate ``first`` (same path, symlink or hard link)."""
-    if os.path.normcase(os.path.realpath(first)) == os.path.normcase(os.path.realpath(second)):
-        return True
-    try:
-        return os.path.samefile(first, second)
-    except OSError:
-        return False
-
-
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("dds", help="an exported .dds texture")
@@ -92,7 +84,7 @@ def main(argv=None) -> int:
         ap.error("--thresholds takes integers")
     if not thresholds or any(not 0 < t <= 255 for t in thresholds):
         ap.error("--thresholds must be within 1..255")
-    if a.json and same_file(a.dds, a.json):
+    if a.json and same_report_path(a.dds, a.json):
         ap.error("--json names the input texture; writing it would replace the DDS")
     if a.json and os.path.isdir(a.json):
         print(f"error: --json path is a directory: {a.json}", file=sys.stderr)

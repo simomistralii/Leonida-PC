@@ -361,7 +361,8 @@ def main(argv=None):
     ap.add_argument("--max-skip", type=int, default=MAX_SKIP,
                     help="most list entries skipped before, between or after stream matches "
                          "(an empty source leaves all entries unmatched)")
-    ap.add_argument("--out", help="names.csv or names.json; default is a summary only")
+    ap.add_argument("--out", help="names.csv or names.json; index.json in a source or mount directory is reserved "
+                                  "for the carve manifest (default: a summary only)")
     a = ap.parse_args(argv)
     if a.max_skip < 0:
         ap.error("--max-skip must be 0 or more")
@@ -377,8 +378,8 @@ def main(argv=None):
     if a.out:
         for folder in [p for p in [a.source, *a.mount] if os.path.isdir(p)]:
             manifest = os.path.join(folder, "index.json")
-            if os.path.isfile(manifest) and bink_index.same_output_path(a.out, manifest):
-                ap.error(f"--out would overwrite the carve manifest: {a.out}")
+            if bink_index.same_output_path(a.out, manifest):
+                ap.error(f"--out is reserved for the carve manifest: {a.out}")
             if os.path.isfile(a.out):
                 for root, _dirs, names in os.walk(folder):
                     for name in names:

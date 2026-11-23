@@ -134,6 +134,27 @@ class ExeChecklist(unittest.TestCase):
         text = ec.render(ec.collect(self.root), ec.called_classes([report]))
         self.assertIn("demo.cpp:3` ASSUMPTION (not called)", text)
 
+    def test_verify_notes_in_code_are_collected(self):
+        verify = "// pad demo.\n//\n// The pads (VERIFY: against the game).\n// VERIFY: the timeout is not honoured.\n"
+        with open(os.path.join(self.root, "runtime", "shims", "verify.cpp"), "w", encoding="utf-8", newline="\n") as f:
+            f.write(verify)
+        notes = [n for n in ec.collect(self.root) if n["file"] == "runtime/shims/verify.cpp"]
+        self.assertEqual([(n["line"], n["kind"]) for n in notes], [(3, "VERIFY"), (4, "VERIFY")])
+        self.assertEqual(notes[0]["text"], "against the game).")
+        self.assertEqual(notes[1]["text"], "the timeout is not honoured.")
+
+    def test_a_root_that_is_not_a_directory_is_exit_2(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ec.main(["--root", os.path.join(self.root, "no_such")]), 2)
+        self.assertIn("not a directory", stderr.getvalue())
+
+    def test_an_out_that_is_a_directory_is_exit_2(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ec.main(["--root", self.root, "--out", os.path.join(self.root, "docs")]), 2)
+        self.assertIn("is a directory", stderr.getvalue())
+
     def test_an_unreadable_report_is_exit_1(self):
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
@@ -152,6 +173,14 @@ class ExeChecklist(unittest.TestCase):
         self.assertEqual(raised.exception.code, 2)
         self.assertIn("would overwrite", stderr.getvalue())
         self.assertEqual([report.read_bytes() for report in reports], original)
+
+    def test_an_out_that_cannot_be_written_is_exit_1(self):
+        # --out under a folder that does not exist was a FileNotFoundError traceback.
+        out = os.path.join(self.root, "missing_dir", "notes.md")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ec.main(["--root", self.root, "--out", out]), 1)
+        self.assertIn("cannot write the checklist", stderr.getvalue())
 
     def test_out_cannot_overwrite_any_input_report(self):
         first = Path(self.root, "first.json")
@@ -180,6 +209,10 @@ class ExeChecklist(unittest.TestCase):
         self.assertTrue(any(n["file"] == "runtime/shims/xgameruntime_store.cpp" and "SKU_ID_SIZE" in n["text"]
                             for n in notes))
         self.assertTrue(any(n["file"] == "docs/runtime_imports.md" and n["kind"] == "UNVERIFIED" for n in notes))
+        # d3d12_vulkan.md's console assumptions carry the page-wide uppercase marker, so the first look lists them
+        self.assertTrue(any(n["file"] == "docs/d3d12_vulkan.md" and n["kind"] == "ASSUMPTION" for n in notes))
+        # so does modding.md's note on the three settings only the executable can confirm
+        self.assertTrue(any(n["file"] == "docs/modding.md" and n["kind"] == "ASSUMPTION" for n in notes))
 
 
 if __name__ == "__main__":

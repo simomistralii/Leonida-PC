@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOL = os.path.join(ROOT, "tools", "awc_markers.py")
@@ -176,6 +177,26 @@ class ScanTest(unittest.TestCase):
                              payload=inner)
         stray = b"ADAT" + b"\xff" * 12                         # the magic alone is not a bank
         return b"\x78\x9c" + b"\0" * 30 + stray + music + b"\0" * 100 + plain_music + b"\0" * 7 + speech + b"\0" * 9
+
+    def test_unlistable_child_preserves_the_previous_report(self):
+        self.write("visible.awc", self.archive())
+        report = self.write("markers.json", b"previous report\n")
+        blocked = os.path.join(self.tmp.name, "blocked")
+        os.mkdir(blocked)
+        scandir = os.scandir
+
+        def scan_directory(path):
+            if path == blocked:
+                raise PermissionError(13, "permission denied", blocked)
+            return scandir(path)
+
+        with mock.patch.object(os, "scandir", scan_directory), contextlib.redirect_stdout(io.StringIO()) as out, \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(awc_markers.main([self.tmp.name, "--out", report]), 1)
+        self.assertIn(blocked, err.getvalue())
+        self.assertEqual(out.getvalue(), "")
+        with open(report, "rb") as f:
+            self.assertEqual(f.read(), b"previous report\n")
 
     def test_archive_census(self):
         report = awc_markers.scan(self.write("fake.rpf", self.archive()))

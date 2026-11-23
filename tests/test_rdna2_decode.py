@@ -107,6 +107,21 @@ class Rdna2DecodeUnitTests(unittest.TestCase):
         self.assertIn("s_cbranch_scc1 -4", text)
         self.assertIn("s_branch -20", text)
 
+    def test_s_ttracedata_imm_keeps_simm16(self):
+        for word, value in ((0xBFA80000, 0x0), (0xBFA80001, 0x1),
+                            (0xBFA80063, 0x63), (0xBFA80064, 0x64),
+                            (0xBFA81234, 0x1234), (0xBFA8FFFF, 0xFFFF)):
+            with self.subTest(word=hex(word)):
+                code = words(word)
+                info = rdna2_decode.decode_bytes(code)
+                self.assertEqual(info["invalid"], 0)
+                self.assertEqual(info["insns"][0]["op"], "s_ttracedata_imm")
+                self.assertEqual(info["insns"][0]["args"],
+                                 [{"k": "imm", "v": value}])
+                text, invalid = rdna2_decode.disasm_bytes(code)
+                self.assertEqual(invalid, 0)
+                self.assertIn(f"s_ttracedata_imm 0x{value:x}", text)
+
     def test_disasm_formats_each_instruction_before_decoding_the_next(self):
         code = words(0xBF800000, 0xBF810000)  # s_nop 0; s_endpgm
         events = []

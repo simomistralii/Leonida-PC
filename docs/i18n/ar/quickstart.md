@@ -54,6 +54,7 @@ cd Leonida
 
 ```powershell
 python -I make_game.py --find
+python -I make_game.py --pick
 python -I make_game.py --check
 python -I make_game.py --check --full-check
 python -I make_game.py --game "D:\path\to\package" --out "D:\Games\Leonida" --work "E:\leonida-work"

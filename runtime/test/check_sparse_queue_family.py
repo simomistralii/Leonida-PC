@@ -40,26 +40,31 @@ CASE = re.compile(r"^RESULT (LAYER_MAP_(?:DIRECT|COPY|COMPUTE)_COPY_COMPUTE) PAS
 
 def check_trace(path: Path, expect_exclusive: bool) -> tuple[int, int]:
     rows = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    seen = []
+    records = 0
     for i, line in enumerate(rows):
         if SPARSE_FLAGS not in line:
             continue
-        tail = "\n".join(rows[i + 1 : i + 13])
+        end = i + 1
+        while end < len(rows) and "VkBufferCreateFlags =" not in rows[end] and not CALL_HEAD.match(rows[end]):
+            end += 1
+        tail = "\n".join(rows[i + 1:end])
         mode, count = MODE.search(tail), COUNT.search(tail)
         if not mode or not count:
             raise AssertionError(f"incomplete API dump sparse VkBuffer at line {i+1}")
-        inds = tuple(int(index) for _, index in INDICES.findall(tail))
-        seen.append((mode.group(1), int(count.group(1)), inds))
-    if len(seen) < 6 or len(seen) % 2:
-        raise AssertionError(f"insufficient sparse VkBuffer create-info records: {len(seen)}")
-    if expect_exclusive:
-        assert all(mode == "VK_SHARING_MODE_EXCLUSIVE" and count == 0
-                   for mode, count, _ in seen), f"baseline negative control not reproduced: {set(seen)}"
-    else:
-        assert all(mode == "VK_SHARING_MODE_CONCURRENT" and count >= 2 and len(inds) == count
-                   and len(set(inds)) == count
-                   for mode, count, inds in seen), f"BUG: not all sparse buffers share active families: {set(seen)}"
-    return len(seen) // 2, len(seen)
+        sharing, n = mode.group(1), int(count.group(1))
+        indices = [(int(slot), int(family)) for slot, family in INDICES.findall(tail)]
+        if expect_exclusive:
+            if sharing != "VK_SHARING_MODE_EXCLUSIVE" or n != 0 or indices:
+                raise AssertionError(f"baseline negative control not reproduced at line {i+1}")
+        elif (sharing != "VK_SHARING_MODE_CONCURRENT" or n < 2 or len(indices) != n
+              or len({slot for slot, _ in indices if slot < n}) != n
+              or len({family for _, family in indices}) != n):
+            raise AssertionError(f"incomplete or non-concurrent sparse buffer at line {i+1}: "
+                                 f"{sharing}, count={n}, indices={indices}")
+        records += 1
+    if records < 6 or records % 2:
+        raise AssertionError(f"insufficient sparse VkBuffer create-info records: {records}")
+    return records // 2, records
 
 
 def main() -> int:

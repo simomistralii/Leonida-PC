@@ -88,6 +88,15 @@ int main(int argc, char** argv) {
     }
     VkPhysicalDeviceProperties props; vkGetPhysicalDeviceProperties(pd, &props);
     std::fprintf(stderr, "device: %s\n", props.deviceName);
+    // 144 push-constant bytes by default, or 128 under LEONIDA_PC_TAIL_UBO=1 (rdna2spirv.py --pc-tail-ubo).
+    // A 128-byte device cannot declare a 144-byte range (VUID-VkPushConstantRange-size-00298): exit 77 (D3D-14).
+    const bool pc_tail = leonida::vk_test::pc_tail_requested();
+    const uint32_t pc_bytes = pc_tail ? 128u : 144u;
+    if (props.limits.maxPushConstantsSize < pc_bytes) {
+        std::printf("unsupported: need %u push constant bytes, device has %u\n", pc_bytes,
+                    props.limits.maxPushConstantsSize);
+        return 77;
+    }
     uint32_t qn = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(pd, &qn, nullptr);
     std::vector<VkQueueFamilyProperties> qf(qn);
@@ -351,8 +360,6 @@ int main(int argc, char** argv) {
     VkShaderModule sm; CHECK(vkCreateShaderModule(dev, &smi, nullptr, &sm));
     // LEONIDA_PC_TAIL_UBO=1 (rdna2spirv.py --pc-tail-ubo): s0..s31 only, 128 bytes; a module that reads the tail
     // gets it, all zero as without the flag, from a uniform block at set 1 (vk_pc_tail.h).
-    const bool pc_tail = leonida::vk_test::pc_tail_requested();
-    const uint32_t pc_bytes = pc_tail ? 128u : 144u;
     const bool tail_block = pc_tail &&
         leonida::vk_test::spirv_declares_set(code.data(), code.size(), leonida::vk_test::pc_tail_set);
     leonida::vk_test::PcTail tail;

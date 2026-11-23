@@ -20,7 +20,8 @@ it is missing. Never share what it makes.
 
 Stages (each skips work that is already done, so a stopped build continues where it left off):
     check     always first: file names and sizes against game/<version>.json (add --full-check for SHA-256, slow)
-    shaders   carve shaders.rpf, unpack the native RDNA2 code, disassemble, translate to SPIR-V
+    shaders   carve shaders.rpf, unpack the native RDNA2 code, disassemble, translate to SPIR-V; then the same for the
+              compute programs inside amd_fidelityfx_upscaler_xbox.dll and XboxBvhBuilder.dll
     assets    models (OBJ), texture dictionaries and texture pools (DDS), audio banks (AWC; --wav adds PCM WAV)
               BCPack uses strict decoding by default. For local calibration use <work>/bcpack-calibration.json.
     runtime   build the loader (needs the game's executable to run, not to build). On Linux it is cross-built with
@@ -539,9 +540,70 @@ def find_dumps(containers: list | None = None) -> list:
     return list(found.values())
 
 
+PICK_TITLE = "Choose the folder that holds MicrosoftGame.Config"
+PICK_UNSUPPORTED = ("That folder isn't a supported version of the game. Choose the folder that holds "
+                    "MicrosoftGame.Config and the .rpf archives.")
+
+
+def native_picker():
+    """The desktop's own folder dialog on Linux and the BSDs, where Tk's is a bare one of its own: kdialog on
+    KDE, zenity elsewhere (GNOME and the rest), either one when only that one is installed. Returns
+    (tool, path) or None: on Windows and macOS Tk already opens the system dialog, and with no display there
+    is nothing to open."""
+    if os.name == "nt" or sys.platform == "darwin":
+        return None
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return None
+    kde = "KDE" in os.environ.get("XDG_CURRENT_DESKTOP", "").upper()
+    for tool in (("kdialog", "zenity") if kde else ("zenity", "kdialog")):
+        exe = shutil.which(tool)
+        if exe:
+            return tool, exe
+    return None
+
+
+def native_ask(tool: str, exe: str, start: str) -> str:
+    """One folder dialog from `tool`: the chosen folder, or "" on cancel. OSError when the tool itself fails."""
+    if tool == "kdialog":
+        cmd = [exe, "--title", "Leonida", "--getexistingdirectory", start]
+    else:
+        cmd = [exe, "--file-selection", "--directory", "--title=" + PICK_TITLE,
+               "--filename=" + os.path.join(start, "")]
+    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    if r.returncode == 1:       # both tools: the dialog was cancelled or closed
+        return ""
+    if r.returncode != 0:
+        raise OSError(f"{tool} exited with {r.returncode}")
+    return r.stdout.strip("\r\n")
+
+
+def native_warn(tool: str, exe: str, msg: str) -> None:
+    cmd = ([exe, "--title", "Leonida", "--sorry", msg] if tool == "kdialog"
+           else [exe, "--warning", "--title=Leonida", "--text=" + msg])
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def pick_game() -> str:
     """--pick: choose the game folder in the system's folder dialog. Asks again until the folder is a supported
     version; cancelling stops the build."""
+    native = native_picker()
+    if native:
+        start = os.path.expanduser("~")
+        try:
+            while True:
+                d = native_ask(*native, start)
+                if not d:
+                    fail("No folder chosen: choose one with --pick or --game.")
+                d = os.path.normpath(d)
+                v = match_version(d)
+                if v:
+                    log(f"chose {v['title']} {v['version']} in {d}")
+                    return d
+                notes = "".join(f"\n\n{container_message(p, h)}" for p, h in containers_in(d))
+                native_warn(*native, PICK_UNSUPPORTED + notes)
+                start = d           # open the next dialog where the last one left off
+        except OSError as e:        # the tool is there but won't run (no portal, broken install): try Tk
+            log(f"the {native[0]} folder dialog couldn't open ({e}); using Tk's")
     try:
         import tkinter
         from tkinter import filedialog, messagebox
@@ -552,8 +614,7 @@ def pick_game() -> str:
     root.attributes("-topmost", True)
     try:
         while True:
-            d = filedialog.askdirectory(parent=root, mustexist=True,
-                                        title="Choose the folder that holds MicrosoftGame.Config")
+            d = filedialog.askdirectory(parent=root, mustexist=True, title=PICK_TITLE)
             if not d:
                 fail("No folder chosen: choose one with --pick or --game.")
             d = os.path.normpath(d)
@@ -562,9 +623,7 @@ def pick_game() -> str:
                 log(f"chose {v['title']} {v['version']} in {d}")
                 return d
             notes = "".join(f"\n\n{container_message(p, h)}" for p, h in containers_in(d))
-            messagebox.showwarning("Leonida", "That folder isn't a supported version of the game. Choose the "
-                                   "folder that holds MicrosoftGame.Config and the .rpf archives." + notes,
-                                   parent=root)
+            messagebox.showwarning("Leonida", PICK_UNSUPPORTED + notes, parent=root)
     finally:
         root.destroy()
 
@@ -1257,6 +1316,7 @@ def shaders(game: str, work: str, jobs: int, emulate: bool = False, keep_emulate
         translate(disasm, spirv, jobs, emulate=emulate, fallbacks=fallbacks)
     verify_translation_completeness(dxbc, spirv)
     fspx_shaders(game, work, signature, emulate=emulate, fallbacks=fallbacks)
+    bvh_shaders(game, work, signature, jobs, emulate=emulate, fallbacks=fallbacks)
     log("shaders: done")
 
 
@@ -1359,6 +1419,113 @@ def fspx_key_clash(spirv: str):
         if modules[0] is None or modules[0] != modules[1]:
             return first[key], name
     return None
+
+
+BVH_DLL = "XboxBvhBuilder.dll"
+BVH_TOOLS = ("pe_shader_containers.py", "fssm_unpack.py", "shader_disasm.py")   # as FSPX_TOOLS, for the builder
+# rdna2spirv.py's --max-shared-memory for the builder's programs: 32768, the maxComputeSharedMemorySize of the AMD
+# Windows and Intel drivers (docs/design.md, "Workgroup memory limit"). The constructor creates a pipeline for every
+# program and gives up at the first one that fails, so one module over the device's limit costs the whole builder.
+# Measured on 1.0.2.1 (docs/embedded_shaders.md section 7): with --wave64-emulate RadixAlloc declares 37,084 B under
+# the translator's 65536 default and 22,236 B under this cap; no other module changes, natively none does, and the
+# same 51 programs translate either way.
+BVH_MAX_SHARED_MEMORY = 32768
+
+
+def bvh_settings(dll: str, mc_signature: str, emulate: bool, fallbacks: tuple[str, ...]) -> str:
+    """What the builder's outputs depend on, as one line: the DLL, the extracting, unpacking and translating tools,
+    llvm-mc, the wave64 mode, the fallback flags and the workgroup-memory cap."""
+    return json.dumps({"dll": file_sha256(dll), "tools": sources_digest(TOOLS, BVH_TOOLS),
+                       "translator": translation_sources_digest(), "llvm_mc": mc_signature,
+                       "wave64_emulate": bool(emulate), "fallbacks": list(fallbacks),
+                       "max_shared_memory": BVH_MAX_SHARED_MEMORY}, sort_keys=True)
+
+
+def bvh_programs(unpacked: str, spirv: str) -> "tuple[list[str], list[str]] | None":
+    """The programs pe_shader_containers.py extracted, by file stem, and the ones among them the runtime cannot
+    find: no entry with an fssm_sha256 in <spirv>/index.json, or no module beside it. None when either index is
+    missing or unreadable, or names a module that is not there."""
+    try:
+        extracted = sorted(shader_stems(os.path.join(unpacked, "index.json"), "file", ".dxbc"))
+        with open(os.path.join(spirv, "index.json"), encoding="utf-8") as f:
+            index = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(index, dict) or not all(os.path.isfile(os.path.join(spirv, name + ".spv")) for name in index):
+        return None
+    found = {name for name, meta in index.items()
+             if isinstance(meta, dict) and isinstance(meta.get("fssm_sha256"), str)}
+    return extracted, [name for name in extracted if name not in found]
+
+
+def bvh_report(programs: "tuple[list[str], list[str]]") -> None:
+    """One line with the counts, and one that names every program left without a module. It is printed on every
+    run, also when the step itself is reused: a program the translator has no rule for is never dropped quietly."""
+    extracted, missing = programs
+    log(f"shaders: {len(extracted) - len(missing)} of {len(extracted)} {BVH_DLL} programs translated")
+    if missing:
+        log(f"shaders: NOT translated: {', '.join(missing)}. The runtime has no module for "
+            f"{'it' if len(missing) == 1 else 'them'}, so that compute pipeline is refused (E_INVALIDARG) and the "
+            "builder's constructor, which creates all of them, gives up there. When the step runs, rdna2spirv.py "
+            "prints the instruction each one stops at (docs/embedded_shaders.md, section 4)")
+
+
+def bvh_shaders(game: str, work: str, mc_signature: str, jobs: int = 1, emulate: bool = False,
+                fallbacks: tuple[str, ...] = ()) -> None:
+    """XboxBvhBuilder.dll's compute programs (docs/embedded_shaders.md): pe_shader_containers.py extracts the DLL's
+    DXBC containers into <work>/shaders/bvh, fssm_unpack.py and shader_disasm.py unpack and disassemble their FSSM
+    programs there, as for a shader from shaders.rpf, and rdna2spirv.py translates them into
+    <work>/shaders/spirv/bvh, where the runtime's shader library finds them by fssm_sha256, the key of the game's
+    own shaders. Those neither feed nor depend on this step.
+
+    The 52 programs take seconds, so the step runs whole. Reuse requires both indexes, the translated modules and a
+    matching bvh_build.json (bvh_settings)."""
+    dll = os.path.join(game, BVH_DLL)
+    unpacked = os.path.join(work, "shaders", "bvh")
+    spirv = os.path.join(work, "shaders", "spirv", "bvh")
+    extracted = os.path.join(unpacked, "index.json")
+    unpack_index = os.path.join(unpacked, "fssm_index.json")
+    translated = os.path.join(spirv, "index.json")
+    settings_file = os.path.join(spirv, "bvh_build.json")
+    if not os.path.isfile(dll):
+        # A work folder used before with a package that had the DLL still holds that run's index, and the runtime
+        # loads <shaders>/bvh/index.json whenever it is there. Without the index the old modules are not found.
+        drop(translated, settings_file)
+        log(f"shaders: no {BVH_DLL} in the game folder, so no BVH builder programs to translate")
+        return
+    settings = bvh_settings(dll, mc_signature, emulate, fallbacks)
+    programs = bvh_programs(unpacked, spirv) if read_shader_setting(settings_file) == settings else None
+    if programs:
+        bvh_report(programs)
+        return
+    log(f"shaders: extracting and translating the compute programs of {BVH_DLL}")
+    drop(translated, settings_file, extracted, unpack_index)
+    # pe_shader_containers.py never overwrites a container (a second run would write <module>_NN.dxbc beside the
+    # first), and a program that no longer translates must not keep a module from the run before.
+    for folder, suffixes in ((unpacked, (".dxbc",)), (os.path.join(unpacked, "fssm"), (".fssm",)),
+                             (os.path.join(unpacked, "disasm"), (".s",)), (spirv, (".spv", ".spvasm"))):
+        if os.path.isdir(folder):
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    if entry.name.endswith(suffixes) and entry.is_file(follow_symlinks=False):
+                        os.unlink(entry.path)
+    py("pe_shader_containers.py", dll, "--extract", unpacked)
+    py("fssm_unpack.py", unpacked, "--carve-index", extracted)
+    # rdna2spirv.py reads each program's stage from index.json and its FSSM blob from fssm/, both in the parent of
+    # the listings' folder, so the disassembly sits inside the extraction folder as it does for shaders.rpf.
+    disasm = os.path.join(unpacked, "disasm")
+    py("shader_disasm.py", os.path.join(unpacked, "fssm"), "--unpack-index", unpack_index, "--out", disasm,
+       "--mcpu", "gfx1013", "--jobs", jobs)
+    extra = (["--wave64-emulate"] if emulate else []) + list(fallbacks)
+    py("rdna2spirv.py", disasm, "--out", spirv, "--no-asm", "--max-shared-memory", BVH_MAX_SHARED_MEMORY, *extra)
+    programs = bvh_programs(unpacked, spirv)
+    if not programs or len(programs[1]) == len(programs[0]):
+        drop(translated)   # an empty or unreadable index would read as a finished step
+        fail(f"shaders: none of the {BVH_DLL} programs translated, so their index is not kept. Run the shaders "
+             "stage again; if it happens again, the tool output above is why.")
+    bvh_report(programs)
+    with open(settings_file, "w", encoding="utf-8", newline="\n") as f:
+        f.write(settings + "\n")
 
 
 WAVE64_MODES = ("auto", "on", "off")
@@ -1490,6 +1657,43 @@ def runtime_gpu_per_vertex():
         return None
 
 
+def runtime_gpu_barycentric_fallback():
+    """Whether the selected Vulkan GPU's driver has a known BaryCoordKHR bug (Mesa ANV, AMD Windows on gfx90c), or None
+    when it can't be told."""
+    try:
+        v = runtime_gpu_info().get("barycentric_fallback")
+        return v if isinstance(v, bool) else None
+    except (AttributeError, TypeError):
+        return None
+
+
+def barycentric_fallback_override():
+    """LEONIDA_BARY_FALLBACK=1/0 forces the same barycentric path as the GPU test runner; None leaves it automatic."""
+    v = (os.environ.get("LEONIDA_BARY_FALLBACK") or "").strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return None
+
+
+# VkDriverId of Intel's Windows Vulkan driver (igvk64.dll).
+VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS = 5
+
+
+def runtime_gpu_mesh_draws_crash():
+    """True where the GPU the runtime would use is on Intel's Windows Vulkan driver with VK_EXT_mesh_shader: there
+    vkCmdDrawMeshTasksEXT crashes (0xC0000409 in igvk64.dll) for a mesh shader with a live push-constant load at
+    byte offset 32 or more, which every corpus mesh shader has (BUILD-2202, measured on an Arc A770 with driver
+    32.0.101.9175; --mesh-compute is exact there). No fixed driver version is known, so every one counts. False
+    for any other GPU or one without mesh shaders, None when tools/vk_subgroup_info.py can't tell."""
+    info = runtime_gpu_info()
+    if not info or "driver_id" not in info:
+        return None
+    return info.get("driver_id") == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS and \
+        info.get("mesh_in_supported_stages") is True
+
+
 def runtime_gpu_max_push_constants():
     """max_push_constants_size as tools/vk_subgroup_info.py answers for the GPU the runtime would use, or None."""
     v = runtime_gpu_info().get("max_push_constants_size")
@@ -1526,6 +1730,22 @@ def drop(*paths: str) -> None:
 
 
 SHARD_PLAN = "shards.json"   # beside the index parts: the --jobs, mode and translator source that made them
+
+
+def drop_index(index: str) -> str:
+    """Remove a translated index the next run must not take as finished; "" once it is gone.
+
+    A remove that fails returns a sentence for the stage's failure message instead of raising: on Windows the
+    lock that stopped the index being read or merged (an antivirus scan, the search indexer) usually stops this
+    too, and the PermissionError traceback would hide why the stage failed. The reason is the strerror, not
+    str(error), which quotes the path a second time through repr() (every Windows backslash doubled)."""
+    try:
+        os.remove(index)
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        return f" {index} could not be removed ({error.strerror or error}): delete it before running the shaders stage again."
+    return ""
 
 
 def translator_digest() -> str:
@@ -1642,14 +1862,7 @@ def translate(disasm: str, spirv: str, jobs: int, emulate: bool = False,
     if bad:
         # An older index describes the corpus from the run before: keeping it would make the next run take the
         # failed translation as finished. The next successful --merge writes it again.
-        index = os.path.join(spirv, "index.json")
-        try:
-            os.remove(index)
-        except FileNotFoundError:
-            pass
-        except OSError as e:
-            log(f"  cannot remove the stale {index}: {e}")
-        fail("rdna2spirv.py: " + ", ".join(bad))
+        fail("rdna2spirv.py: " + ", ".join(bad) + "." + drop_index(os.path.join(spirv, "index.json")))
     py("rdna2spirv.py", disasm, "--out", spirv, "--merge")
     index = os.path.join(spirv, "index.json")
     if os.path.isfile(index):
@@ -1658,18 +1871,18 @@ def translate(disasm: str, spirv: str, jobs: int, emulate: bool = False,
             with open(index, encoding="utf-8") as f:
                 merged = json.load(f)
         except (OSError, ValueError) as e:
-            os.remove(index)
-            fail(f"rdna2spirv.py --merge wrote an unreadable {index}: {e}")
+            fail(f"rdna2spirv.py --merge wrote an unreadable {index}: {getattr(e, 'strerror', None) or e}."
+                 + drop_index(index))
         if not merged:
             # A marker left behind would look like a finished translation to the next run; drop it with the failure.
-            os.remove(index)
+            left = drop_index(index)
             # The plan would make the retry reuse the same empty parts even after the disassembly was repaired.
             try:
                 os.remove(plan_path)
             except OSError:
                 pass
             fail("rdna2spirv.py translated 0 shaders, so the empty index is not kept. Run the shaders stage again; "
-                 "if it happens again, the disassembly logged above is why.")
+                 "if it happens again, the disassembly logged above is why." + left)
 
 
 def verify_translation_completeness(dxbc: str, spirv: str) -> None:
@@ -2050,6 +2263,18 @@ def build_pipeline_check(jobs: int) -> None:
 
 def runtime(game: str, out: str, v: dict, runtime_build: str | None = None, jobs: int = 1,
             *, work: str | None = None) -> None:
+    destinations = [*RUNTIME_FILES, "game_path.txt"]
+    if work is not None:
+        destinations.append("shader_path.txt")
+    if os.name != "nt":
+        destinations.append("gta6rt.sh")
+    # Check the complete set before compiling or copying, so a later conflict leaves the old runtime usable.
+    for name in destinations:
+        destination = os.path.join(out, name)
+        if os.path.isdir(destination):
+            fail(f"runtime: {destination} is a directory and the runtime needs it as a file. "
+                 "Use another --out folder or move the directory before retrying.")
+
     if runtime_build:
         log(f"runtime: using the build in {runtime_build}")
         build = runtime_build
@@ -2137,7 +2362,8 @@ def require_translated_shaders(work: str) -> str:
         with open(index, encoding="utf-8") as f:
             translated = json.load(f)
     except (OSError, ValueError) as e:
-        fail(f"The translated shader index {index} is unreadable ({e}): run the shaders stage again.")
+        fail(f"The translated shader index {index} is unreadable ({getattr(e, 'strerror', None) or e}): "
+             "run the shaders stage again.")
     if not translated:
         # A build from before the shaders stage refused an empty merge can carry this marker.
         fail(f"The translated shader index {index} is empty, so there is nothing to check. Run the shaders stage again.")
@@ -2283,7 +2509,7 @@ def pipeline_names(spirv: str) -> "list[str]":
         with open(path, encoding="utf-8") as f:
             index = json.load(f)
     except (OSError, ValueError) as e:
-        fail(f"pipelines: cannot read {path}: {e}")
+        fail(f"pipelines: cannot read {path}: {getattr(e, 'strerror', None) or e}")
     if not isinstance(index, dict):
         fail(f"pipelines: {path} must contain a JSON object")
     return sorted(index, key=lambda n: n.encode("utf-8"))
@@ -2478,7 +2704,11 @@ def main() -> int:
                          "PerVertexKHR inputs; on by itself when the runtime's GPU can't use them (MoltenVK)")
     ap.add_argument("--mesh-compute", action="store_true",
                     help="translate mesh shaders to compute shaders writing an output buffer, for devices "
-                         "without VK_EXT_mesh_shader")
+                         "without VK_EXT_mesh_shader; on by itself on Intel's Windows Vulkan driver, whose mesh "
+                         "draws crash on the corpus' mesh shaders (BUILD-2202)")
+    ap.add_argument("--native-mesh", action="store_true",
+                    help="keep native mesh shaders on Intel's Windows Vulkan driver instead of turning on "
+                         "--mesh-compute (for a driver that fixes BUILD-2202's crash)")
     ap.add_argument("--pc-tail-ubo", action="store_true",
                     help="keep s0..s31 in 128 push-constant bytes and move heap/code base to a set-1 uniform "
                          "block; on by itself when the runtime's GPU reports maxPushConstantsSize below what "
@@ -2521,19 +2751,17 @@ def main() -> int:
     is_game_drive_root = os.path.splitdrive(real_game)[1] in ("\\", "/")
     game_entries = []
     if is_game_drive_root:
-        try:
-            game_entries = [
-                os.path.normcase(os.path.realpath(os.path.join(real_game, e)))
-                for e in os.listdir(real_game)
-            ]
-        except OSError:
-            game_entries = []
+        # The dump's own top-level names, from the version manifest: os.listdir(real_game) would also count an
+        # unrelated --out or --work folder on the drive, so the rerun that resumes the build was rejected.
+        top_level = {rel.replace("\\", "/").split("/", 1)[0] for rel in [v["expected_exe"], *v["files"]]}
+        game_entries = [os.path.normcase(os.path.realpath(os.path.join(real_game, e)))
+                        for e in sorted(top_level) if e]
     for p in (out, work):
         # normcase: Windows paths compare without case, so C:\Games\X and c:\games\x\out are inside.
         real_destination = os.path.normcase(os.path.realpath(p))
         if is_game_drive_root:
             # If the game is at drive root (e.g. D:\), reject the drive root itself and anything
-            # inside the dump's existing top-level entries, but allow separate top-level folders.
+            # inside the dump's own top-level entries, but allow separate top-level folders.
             inside = (real_destination == real_game) or any(
                 path_is_within(real_destination, entry) for entry in game_entries
             )
@@ -2548,6 +2776,14 @@ def main() -> int:
             stages = [s for s in stages if s not in WINDOWS_ONLY]
             log(f"{', '.join(WINDOWS_ONLY)}: left out, the cross-build needs {'; '.join(lacking)} "
                 "(or pass --runtime-build)")
+    if "shaders" in stages and not a.mesh_compute and not a.native_mesh:
+        crash = runtime_gpu_mesh_draws_crash()
+        if crash:
+            log("shaders: the GPU the runtime would use is on Intel's Windows Vulkan driver, whose mesh draws crash on "
+                "these mesh shaders (BUILD-2202): translating with --mesh-compute (--native-mesh keeps them native)")
+            a.mesh_compute = True
+        elif crash is None:
+            a.mesh_compute = keep_recorded_fallback("--mesh-compute", work)
     emulate, keep_emulated = (wave64_settings(a.wave64_emulate, mesh_compute=a.mesh_compute) if "shaders" in stages
                               else (False, a.wave64_emulate == "auto"))
     if "shaders" in stages and not a.f16_interp_fallback:
@@ -2558,6 +2794,26 @@ def main() -> int:
             a.f16_interp_fallback = True
         elif per_vertex is None:
             a.f16_interp_fallback = keep_recorded_fallback("--f16-interp-fallback", work)
+    if "shaders" in stages:
+        if a.bary_fallback:
+            # Command-line precedence: --bary-fallback wins over LEONIDA_BARY_FALLBACK=0.
+            pass
+        else:
+            override = barycentric_fallback_override()
+            if override is True:
+                log("shaders: LEONIDA_BARY_FALLBACK=1 forces --bary-fallback")
+                a.bary_fallback = True
+            elif override is False:
+                log("shaders: LEONIDA_BARY_FALLBACK=0 forces native barycentrics")
+                a.bary_fallback = False
+            else:
+                bary_fallback = runtime_gpu_barycentric_fallback()
+                if bary_fallback is True:
+                    log("shaders: this GPU's driver has a known BaryCoordKHR bug (Mesa ANV, or AMD's Windows driver "
+                        "on gfx90c): translating with --bary-fallback")
+                    a.bary_fallback = True
+                elif bary_fallback is None:
+                    a.bary_fallback = keep_recorded_fallback("--bary-fallback", work)
     if "shaders" in stages and not a.pc_tail_ubo:
         need_pc = 152 if a.mesh_compute else 144
         max_pc = runtime_gpu_max_push_constants()

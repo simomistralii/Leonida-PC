@@ -26,6 +26,11 @@ MISSING_INPUT_TOOLS = (
     "rtti_scan",
     "shader_disasm",
     "tile_probe",
+    "d3d12_guid_sites",
+    "gamedata_blobs",
+    "navmesh_cell_fit",
+    "psin_psch",
+    "root_spill_census",
 )
 
 # One process per tool; a hung import is a failure, not an infinite test.

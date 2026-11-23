@@ -36,6 +36,7 @@ prints the program. Exit code: 0 when every program that ran matches, 1 on a mis
 A wave32 program is skipped where vk_compute_test can't pin 32-lane subgroups ("compute subgroup size: 32 not
 available", e.g. Mesa llvmpipe, whose subgroups are 8 wide): its words would come from another wave size. Wave64
 programs translated with --emulate use no subgroup operations, so they are compared at any subgroup size.
+Usage: `python -I tools/lds_fuzz.py --help` lists the options.
 """
 import argparse
 import copy

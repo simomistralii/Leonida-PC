@@ -51,6 +51,24 @@ std::string narrow_module_key(const std::filesystem::path& path) {
     return {};
 }
 
+// Windows matches module names case-insensitively with its own upcase table (RtlEqualUnicodeString); the
+// ordinal ignore-case compare is that table.
+bool same_module_name(const wchar_t* a, const wchar_t* b) {
+    return CompareStringOrdinal(a, -1, b, -1, TRUE) == CSTR_EQUAL;
+}
+
+// A narrow (ANSI code page) module name widened for a case-insensitive compare; empty when it is not valid in the
+// code page.
+std::wstring acp_to_wide(const std::string& narrow) {
+    if (narrow.empty()) return {};
+    const int n = MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, narrow.data(), static_cast<int>(narrow.size()),
+                                      nullptr, 0);
+    if (n <= 0) return {};
+    std::wstring wide(static_cast<size_t>(n), L'\0');
+    MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, narrow.data(), static_cast<int>(narrow.size()), wide.data(), n);
+    return wide;
+}
+
 std::string path_utf8(const std::filesystem::path& path) {
     const auto bytes = path.u8string();
     return {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
@@ -324,6 +342,8 @@ struct ThreadTlsSlot {
     void* saved = nullptr;
     void* block = nullptr;
     uint32_t index = kNoTlsIndex;
+    void** ga_view = nullptr;           // the thread's slot-0 view for a /GA EXE (Module::tls_ga_slot)
+    uint32_t ga_slot = kNoTlsIndex;
 };
 
 // Per-thread installation state for each reserved TLS slot.
@@ -352,6 +372,10 @@ void release_thread_slot(size_t slot) {
     if (slot >= kMaxMappedTlsModules) return;
     ThreadTlsSlot& entry = g_thread_tls_slots[slot];
     if (!entry.module && !entry.block) return;
+    if (entry.ga_view) {
+        if (TlsGetValue(entry.ga_slot) == entry.ga_view) TlsSetValue(entry.ga_slot, nullptr);
+        VirtualFree(entry.ga_view, 0, MEM_RELEASE);
+    }
     if (entry.block) {
         void** slots = module_tls_slots();
         if (slots && entry.index < kMaxModuleTlsSlots && slots[entry.index] == entry.block)
@@ -433,6 +457,20 @@ void install_thread_block(Module& m) {
     if (m.tls_zero_fill)
         std::memset(static_cast<uint8_t*>(block) + m.tls_raw_size, 0, m.tls_zero_fill);
 
+    void** view = nullptr;
+    if (m.tls_ga_slot != kNoTlsIndex) {
+        // The /GA view: [0] and [tls_index] are this thread's block, the rest stays null (the image reads no other).
+        view = static_cast<void**>(
+            VirtualAlloc(nullptr, kMaxModuleTlsSlots * sizeof(void*), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+        if (!view) {
+            VirtualFree(block, 0, MEM_RELEASE);
+            throw std::runtime_error(m.name + ": TLS view allocation failed");
+        }
+        view[0] = block;
+        view[m.tls_index] = block;
+        TlsSetValue(m.tls_ga_slot, view);
+    }
+
     void* saved = slots[m.tls_index];
     slots[m.tls_index] = block;
     entry.module = &m;
@@ -440,6 +478,45 @@ void install_thread_block(Module& m) {
     entry.saved = saved;
     entry.block = block;
     entry.index = m.tls_index;
+    entry.ga_view = view;
+    entry.ga_slot = m.tls_ga_slot;
+}
+
+// Rewrites a /GA EXE's slot-0 TLS reads (Module::tls_ga_slot): every `mov r64, gs:[58h]` (65 REX.W 8B /r with
+// mod=00, r/m=100, SIB=25, disp32=58h; REX 48 or 4C for r8-r15) in an executable section becomes the same
+// instruction with disp32 = 1480h + 8 * slot, TEB->TlsSlots[slot]. Same length, so nothing else moves. The 9-byte
+// form, with its segment prefix, SIB 25 and that displacement, is not something code or tables produce by accident.
+// Must run before protect_sections() and before any of the image's code (its TLS callbacks included).
+size_t patch_ga_tls_reads(Module& m, uint32_t slot) {
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(m.base);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(m.base + dos->e_lfanew);
+    const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+    const uint32_t disp = 0x1480u + 8u * slot;
+    size_t sites = 0;
+    for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++sec) {
+        if (!(sec->Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+        const uint32_t size = (std::min)(sec->Misc.VirtualSize, sec->SizeOfRawData);
+        if (sec->VirtualAddress > m.size || size > m.size - sec->VirtualAddress || size < 9) continue;
+        uint8_t* p = m.base + sec->VirtualAddress;
+        for (uint32_t k = 0; k + 9 <= size; ++k) {
+            if (p[k] != 0x65 || (p[k + 1] != 0x48 && p[k + 1] != 0x4C) || p[k + 2] != 0x8B) continue;
+            const uint8_t modrm = p[k + 3];
+            if ((modrm & 0xC7) != 0x04 || p[k + 4] != 0x25) continue;
+            uint32_t d;
+            std::memcpy(&d, p + k + 5, 4);
+            if (d != 0x58) continue;
+            std::memcpy(p + k + 5, &disp, 4);
+            ++sites;
+            k += 8;
+        }
+    }
+    return sites;
+}
+
+bool ga_tls_patch_enabled() {
+    char v[8] = {};
+    size_t n = 0;
+    return !(getenv_s(&n, v, "LEONIDA_TLS_GA_PATCH") == 0 && n == 2 && v[0] == '0');
 }
 
 void uninstall_thread_block(Module& m) {
@@ -898,11 +975,30 @@ bool bundled_owns_handle(void* ctx, void* module) {
     return static_cast<Loader*>(ctx)->owns_module_handle(module);
 }
 
+void* bundled_find_loaded_w(void* ctx, const std::wstring& basename) {
+    return static_cast<Loader*>(ctx)->find_loaded_module_w(basename);
+}
+
+void* bundled_load_w(void* ctx, const std::wstring& basename, uint32_t flags, bool& handled) {
+    return static_cast<Loader*>(ctx)->load_runtime_module_w(basename, flags, handled);
+}
+
 const shims::BundledModuleOps kBundledOps{
     &bundled_find_loaded,
     &bundled_load,
     &bundled_get_proc,
     &bundled_owns_handle,
+    &bundled_find_loaded_w,
+    &bundled_load_w,
+};
+
+// Marks what a run-time load maps as a dynamic load for as long as it is in scope (the caller holds the mutex).
+struct RuntimeLoadScope {
+    explicit RuntimeLoadScope(int& depth) : depth_(depth) { ++depth_; }
+    ~RuntimeLoadScope() { --depth_; }
+    RuntimeLoadScope(const RuntimeLoadScope&) = delete;
+    RuntimeLoadScope& operator=(const RuntimeLoadScope&) = delete;
+    int& depth_;
 };
 }  // namespace
 
@@ -965,6 +1061,7 @@ Module& Loader::load(const std::filesystem::path& image) {
     Module* mapped = nullptr;
     try {
         mapped = &map_image(image, narrow_key);
+        mapped->dynamic_load = runtime_loads_ > 0;  // before bind_imports: its dependencies are marked the same way
         bind_imports(*mapped);  // loads every bundled module m imports first, so they land in init_order_ before m
         protect_sections(*mapped);
         register_unwind(*mapped);
@@ -986,11 +1083,33 @@ Module& Loader::load(const std::filesystem::path& image) {
 
 Module* Loader::find_narrow_module(const std::string& dll_lower) const {
     if (dll_lower.empty()) return nullptr;
-    // library_loader and PE import names keep their existing narrow-byte contract. Do not reinterpret them
-    // as UTF-8 or widen already-folded bytes (which could be part of a multibyte code-page character).
+    // library_loader and PE import names keep their existing narrow-byte contract: the exact compare below is
+    // bytewise, and the key is never reinterpreted as UTF-8.
     for (const auto& entry : by_name_)
         if (entry.second->narrow_key == dll_lower) return entry.second;
+    // The key is ASCII case-folded only. A name with letters outside ASCII (Cyrillic in code page 1251, say)
+    // compares case-insensitively through the code page, as GetModuleHandleA does: GUEST_ДА.EXE finds guest_да.exe.
+    // Widening the folded key is safe here: rt::lower() folds ASCII letters only, and no ANSI code page's multibyte
+    // sequences contain ASCII letter bytes, so both sides widen to the same characters they were spelt with.
+    if (const std::wstring wide = acp_to_wide(dll_lower); !wide.empty())
+        for (const auto& entry : by_name_)
+            if (!entry.second->narrow_key.empty() &&
+                same_module_name(acp_to_wide(entry.second->narrow_key).c_str(), wide.c_str()))
+                return entry.second;
     return nullptr;
+}
+
+Module* Loader::find_wide_module(const std::wstring& basename) const {
+    if (basename.empty()) return nullptr;
+    for (const auto& entry : by_name_)
+        if (same_module_name(entry.first.c_str(), basename.c_str())) return entry.second;
+    return nullptr;
+}
+
+void* Loader::find_loaded_module_w(const std::wstring& basename) const {
+    std::lock_guard lock(mutex_);
+    Module* m = find_wide_module(basename);
+    return m ? static_cast<void*>(m->base) : nullptr;
 }
 
 void* Loader::find_loaded_module(const std::string& dll_lower) const {
@@ -1004,6 +1123,7 @@ void* Loader::load_runtime_module(const std::string& dll_lower, uint32_t flags, 
     if (dll_lower.empty() || prefer_host_copy(dll_lower)) return nullptr;
 
     std::lock_guard lock(mutex_);
+    const RuntimeLoadScope dynamic(runtime_loads_);
     Module* existing = find_narrow_module(dll_lower);
     const std::filesystem::path candidate = game_dir_ / dll_lower;
     std::error_code ec;
@@ -1011,12 +1131,34 @@ void* Loader::load_runtime_module(const std::string& dll_lower, uint32_t flags, 
     if (!is_bundled) return nullptr;
 
     handled = true;
+    return load_runtime_candidate(existing, candidate, flags, dll_lower);
+}
+
+void* Loader::load_runtime_module_w(const std::wstring& basename, uint32_t flags, bool& handled) {
+    handled = false;
+    if (basename.empty()) return nullptr;
+    // A name the code page can spell takes the narrow path's host-copy rule as well.
+    if (const std::string narrow = narrow_module_key(std::filesystem::path(basename)); !narrow.empty())
+        if (prefer_host_copy(narrow)) return nullptr;
+
+    std::lock_guard lock(mutex_);
+    Module* existing = find_wide_module(basename);
+    const std::filesystem::path candidate = game_dir_ / basename;
+    std::error_code ec;
+    if (!existing && !std::filesystem::is_regular_file(candidate, ec)) return nullptr;
+
+    handled = true;
+    return load_runtime_candidate(existing, candidate, flags, path_utf8(basename));
+}
+
+void* Loader::load_runtime_candidate(Module* existing, const std::filesystem::path& candidate, uint32_t flags,
+                                     const std::string& display) {
     // Win32 DONT_RESOLVE_DLL_REFERENCES (0x1) forbids resolving dependencies or running TLS/DllMain; refuse it
     // explicitly instead of silently performing a normal resolving + initialising load.
     if ((flags & DONT_RESOLVE_DLL_REFERENCES) != 0) {
         std::fprintf(stderr,
                      "[rt] loader: LoadLibraryEx(%s, DONT_RESOLVE_DLL_REFERENCES) is not supported for bundled DLLs\n",
-                     dll_lower.c_str());
+                     display.c_str());
         SetLastError(ERROR_NOT_SUPPORTED);
         return nullptr;
     }
@@ -1026,7 +1168,7 @@ void* Loader::load_runtime_module(const std::string& dll_lower, uint32_t flags, 
             initialise();
             return static_cast<void*>(existing->base);
         } catch (const std::exception& e) {
-            std::fprintf(stderr, "[rt] loader: run-time initialise of %s failed: %s\n", dll_lower.c_str(), e.what());
+            std::fprintf(stderr, "[rt] loader: run-time initialise of %s failed: %s\n", display.c_str(), e.what());
             SetLastError(ERROR_DLL_INIT_FAILED);
             return nullptr;
         }
@@ -1043,7 +1185,7 @@ void* Loader::load_runtime_module(const std::string& dll_lower, uint32_t flags, 
         // load() drops a module that failed to map or bind (dependencies included); this also drops one whose
         // initialise() failed, so later GetModuleHandle/LoadLibrary calls don't see it. ~Loader frees it via order_.
         by_name_.erase(module_key(mapped ? mapped->path : candidate));
-        std::fprintf(stderr, "[rt] loader: run-time load of %s failed: %s\n", dll_lower.c_str(), e.what());
+        std::fprintf(stderr, "[rt] loader: run-time load of %s failed: %s\n", display.c_str(), e.what());
         SetLastError(ERROR_DLL_INIT_FAILED);
         return nullptr;
     }
@@ -1065,6 +1207,7 @@ void* Loader::resolve_module_export(void* module_handle, const std::string& sym,
     if (auto it = target->exports.find(sym); it != target->exports.end()) return it->second;
     if (auto it = target->forwarders.find(sym); it != target->forwarders.end()) {
         try {
+            const RuntimeLoadScope dynamic(runtime_loads_);
             Binding binding = Binding::Unimplemented;
             void* fn = resolve_forwarder(it->second, binding, 0);
             if (binding == Binding::Module) initialise();
@@ -1151,7 +1294,11 @@ void Loader::initialise(Module& m) {
     auto* nt = at<IMAGE_NT_HEADERS64>(m.base, reinterpret_cast<IMAGE_DOS_HEADER*>(m.base)->e_lfanew);
     if ((nt->FileHeader.Characteristics & IMAGE_FILE_DLL) && m.entry_rva) {
         auto entry = reinterpret_cast<BOOL(NTAPI*)(void*, DWORD, void*)>(m.base + m.entry_rva);
-        const BOOL ok = entry(m.base, DLL_PROCESS_ATTACH, nullptr);
+        // lpvReserved "is NULL for dynamic loads and non-NULL for static loads" (DllMain docs). What Windows points
+        // it at is its own; a static load gets a CONTEXT captured here, so a DLL that reads through it reads memory.
+        CONTEXT context{};
+        if (!m.dynamic_load) RtlCaptureContext(&context);
+        const BOOL ok = entry(m.base, DLL_PROCESS_ATTACH, m.dynamic_load ? nullptr : &context);
         if (startup_trace::enabled())
             startup_trace::event("dllmain", "\"module\":" + startup_trace::quote(m.name) +
                                                 ",\"result\":" + std::to_string(ok));
@@ -1356,6 +1503,26 @@ void Loader::initialize_tls(Module& m) {
         // The index lives in a writable section and protect_sections() has not run yet, so the write needs no
         // VirtualProtect dance.
         if (index_rva) *reinterpret_cast<uint32_t*>(m.base + index_rva) = index;
+    }
+    {
+        // An EXE's code may read its TLS at index 0 directly (/GA); index 0 is gta6rt.exe's here (pe_loader.h,
+        // tls_ga_slot). Patched before any of the image's code runs, TLS callbacks included.
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(m.base);
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(m.base + dos->e_lfanew);
+        if (!(nt->FileHeader.Characteristics & IMAGE_FILE_DLL) && total && index != 0 && ga_tls_patch_enabled()) {
+            static const DWORD ga_slot = TlsAlloc();
+            if (ga_slot == TLS_OUT_OF_INDEXES || ga_slot >= 64) {
+                std::fprintf(stderr, "[rt] loader: %s: no TlsAlloc slot below 64 for its index-0 TLS reads\n",
+                             m.name.c_str());
+            } else {
+                m.tls_ga_sites = patch_ga_tls_reads(m, ga_slot);
+                if (m.tls_ga_sites) m.tls_ga_slot = ga_slot;
+                std::fprintf(stderr,
+                             "[rt] loader: %s: %zu index-0 TLS reads (gs:[58h]) now read its own TLS (TlsSlots[%lu]); "
+                             "its module TLS index is %u\n",
+                             m.name.c_str(), m.tls_ga_sites, static_cast<unsigned long>(ga_slot), index);
+            }
+        }
     }
     try {
         install_thread_block(m);

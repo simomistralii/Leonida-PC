@@ -105,6 +105,9 @@ Read the startup trace first; the first event that is not the expected one is th
    submission ran the supported commands from a list. The runtime's `[rt]` diagnostic names the command it left out.
    Compare the method's position with the public SDK vtable. An unknown slot is expected until the executable names it
    (Q2, Q6). The `[rt]` lines in the same log carry the 24 device words, feature IDs and warnings.
+   The summary expects `#1` first, then one more than the last observed number. It counts each mismatch once and
+   shows up to `--limit` expected/observed pairs. A break can reflect an excerpt, restart, duplicate or reordered
+   line; it is not a count of missing calls.
 7. **First frame** — after the device and queues, the first `CreateRootSignature`, PSO, `Draw*` and `PresentX` (or
    DXGI) calls are the frame's critical path. The layer's M0–M4 tests already exercise the offscreen parts; the
    present slots are the part that cannot be measured from the package alone.

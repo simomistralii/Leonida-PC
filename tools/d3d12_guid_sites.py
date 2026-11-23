@@ -375,6 +375,9 @@ def main(argv: list[str] | None = None) -> int:
 
     results = []
     for path in args.images:
+        if not os.path.isfile(path):
+            print(f"ERROR: cannot read {path}: no such file", file=sys.stderr)
+            return 2
         try:
             r = scan(path, known)
         except (ValueError, struct.error) as e:

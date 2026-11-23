@@ -289,6 +289,19 @@ class BadCarveIndexTest(unittest.TestCase):
         folder = self.make_folder()
         self.assert_one_error(self.run_tool(os.path.join(folder, "nope.rpf")), "nope.rpf", "no such file or folder")
 
+    def test_reads_carve_index_with_utf8_bom(self):
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, True)
+        payload = fixed_table_1296_blob(1)
+        with open(os.path.join(folder, f"{0x1000:012x}.bin"), "wb") as f:
+            f.write(payload)
+        doc = {"files": [{"off": 0x1000, "stored": len(payload), "size": len(payload), "head": payload[:16].hex(), "pre": ""}]}
+        with open(os.path.join(folder, "index.json"), "wb") as f:
+            f.write(b"\xef\xbb\xbf" + json.dumps(doc).encode("utf-8"))
+        r = self.run_tool(folder)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("fixed_table_1296", r.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

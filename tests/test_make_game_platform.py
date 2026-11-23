@@ -559,12 +559,50 @@ class PipelineCheckExeTest(unittest.TestCase):
 class RuntimeStageCopyTest(unittest.TestCase):
     """runtime() with --runtime-build: the build's files go to the output folder, which may be the build folder."""
 
-    def run_stage(self, build, out):
+    def run_stage(self, build, out, *, work=None):
         for name in make_game.RUNTIME_FILES:
             with open(os.path.join(build, name), "wb") as f:
                 f.write(name.encode())
         with mock.patch.object(make_game, "log"), mock.patch.object(make_game.os, "name", "posix"):
-            make_game.runtime(os.path.join(build, "game"), out, {"expected_exe": "game.exe"}, runtime_build=build)
+            make_game.runtime(os.path.join(build, "game"), out, {"expected_exe": "game.exe"},
+                              runtime_build=build, work=work)
+
+    def test_directory_at_a_generated_path_leaves_the_previous_runtime_untouched(self):
+        outputs = (*make_game.RUNTIME_FILES, "game_path.txt", "shader_path.txt", "gta6rt.sh")
+        for blocked in outputs:
+            with self.subTest(blocked=blocked), tempfile.TemporaryDirectory() as build, \
+                    tempfile.TemporaryDirectory() as out:
+                directory = os.path.join(out, blocked)
+                os.mkdir(directory)
+                marker = os.path.join(directory, "marker")
+                with open(marker, "wb") as f:
+                    f.write(b"existing directory content")
+                previous = {name: b"previous " + name.encode() for name in outputs if name != blocked}
+                for name, contents in previous.items():
+                    with open(os.path.join(out, name), "wb") as f:
+                        f.write(contents)
+
+                error = io.StringIO()
+                with mock.patch.object(sys, "stderr", error), self.assertRaises((SystemExit, OSError)) as failure:
+                    self.run_stage(build, out, work=os.path.join(build, "work"))
+
+                for name, contents in previous.items():
+                    with open(os.path.join(out, name), "rb") as f:
+                        self.assertEqual(f.read(), contents, name)
+                with open(marker, "rb") as f:
+                    self.assertEqual(f.read(), b"existing directory content")
+                self.assertIsInstance(failure.exception, SystemExit)
+                self.assertIn(directory, error.getvalue())
+
+    def test_directory_collision_is_checked_before_building(self):
+        with tempfile.TemporaryDirectory() as out:
+            os.mkdir(os.path.join(out, "game_path.txt"))
+            with mock.patch.object(make_game, "run") as build, \
+                    mock.patch.object(make_game, "cross_build_runtime") as cross_build, \
+                    mock.patch.object(sys, "stderr"), self.assertRaises(SystemExit):
+                make_game.runtime(out, out, {"expected_exe": "game.exe"})
+            build.assert_not_called()
+            cross_build.assert_not_called()
 
     def test_the_build_is_copied_to_another_folder(self):
         with tempfile.TemporaryDirectory() as build, tempfile.TemporaryDirectory() as out:

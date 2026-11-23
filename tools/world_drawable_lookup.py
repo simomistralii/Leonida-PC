@@ -82,15 +82,50 @@ def lookup(placements, archetypes, names, manifests):
     return {"archive": archive, "placements": counts, "outcomes": outcomes, "candidates": candidates}
 
 
+def export_window(report, budget):
+    """Maximize single-offset placement predictions within one archive's scan budget."""
+    if not 0 < budget <= (1 << 63) - 1:
+        raise ValueError("window bytes must be a positive signed 64-bit integer")
+
+    weights = Counter()
+    identities = Counter()
+    for row in report["candidates"]:
+        if row["status"] == "candidate":
+            offset, = row["offsets"]
+            weights[offset] += row["placements"]
+            identities[offset] += 1
+
+    offsets = sorted(weights)
+    best = None
+    left = total = count = best_total = 0
+    for end in offsets:
+        total += weights[end]
+        count += identities[end]
+        while end - offsets[left] >= budget:
+            start = offsets[left]
+            total -= weights[start]
+            count -= identities[start]
+            left += 1
+        if total > best_total:
+            best_total = total
+            start = offsets[left]
+            best = {"archive": report["archive"], "start": start, "length": end - start + 1,
+                    "predicted_placements": total, "predicted_identities": count}
+    return best
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("placements", help="world_index entity JSONL")
     parser.add_argument("archetypes", help="world_archetypes JSON")
     parser.add_argument("names", help="rpf9_names JSON for the source archive")
     parser.add_argument("--manifest", action="append", default=[], help="exclude identities already listed (repeatable)")
+    parser.add_argument("--window-bytes", type=int, help="recommend one model scan of at most this many bytes")
     args = parser.parse_args()
     try:
         result = lookup(args.placements, args.archetypes, args.names, args.manifest)
+        if args.window_bytes is not None:
+            result["export_window"] = export_window(result, args.window_bytes)
     except (OSError, ValueError, TypeError) as exc:
         parser.exit(1, f"{parser.prog}: {exc}\n")
     print(json.dumps(result, indent=1))

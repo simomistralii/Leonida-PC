@@ -42,6 +42,10 @@ struct Module {
     void* function_table = nullptr;
     uint32_t function_count = 0;
 
+    // Mapped for a run-time LoadLibrary or a GetProcAddress forwarder (a dynamic load), not by a host load() (the
+    // start-up graph, a static load). DllMain's DLL_PROCESS_ATTACH gets lpvReserved NULL only for a dynamic load.
+    bool dynamic_load = false;
+
     std::vector<ImportRecord> imports;
     std::map<std::string, void*> exports;           // by name, plus "#ordinal"
     std::map<std::string, std::string> forwarders;  // same keys, holding "module.symbol" for re-exports
@@ -62,6 +66,12 @@ struct Module {
     const uint8_t* tls_template = nullptr;  // raw template in the mapped image
     uint32_t tls_raw_size = 0;
     uint32_t tls_zero_fill = 0;
+    // An EXE built with /GA reads its own TLS as ThreadLocalStoragePointer[0] without _tls_index: the process EXE
+    // always has index 0. Mapped into gta6rt, index 0 belongs to gta6rt.exe, so load() rewrites each such read
+    // (`mov r64, gs:[58h]`) to `mov r64, gs:[1480h + 8 * tls_ga_slot]`, a TlsAlloc slot (TEB->TlsSlots) whose value in
+    // each thread is a small array with this image's block at [0] and at [tls_index]. kNoTlsIndex when not patched.
+    uint32_t tls_ga_slot = kNoTlsIndex;
+    size_t tls_ga_sites = 0;
 };
 
 class Loader {
@@ -117,6 +127,10 @@ public:
     // Run-time module lookup/loading used by the library_loader shim for bundled package DLLs.
     void* find_loaded_module(const std::string& dll_lower) const;
     void* load_runtime_module(const std::string& dll_lower, uint32_t flags, bool& handled);
+    // The same by the module's native basename (any Unicode name, matched case-insensitively as Windows matches
+    // module names), for the W entries of LoadLibrary / GetModuleHandle.
+    void* find_loaded_module_w(const std::wstring& basename) const;
+    void* load_runtime_module_w(const std::wstring& basename, uint32_t flags, bool& handled);
     void* resolve_module_export(void* module_handle, const std::string& sym, bool& owns_handle);
     bool owns_module_handle(void* module_handle) const;
 
@@ -124,6 +138,9 @@ private:
     void initialise(Module& m);
     static void set_initialised(Module& m, bool value);
     Module* find_narrow_module(const std::string& dll_lower) const;  // caller holds mutex_
+    Module* find_wide_module(const std::wstring& basename) const;    // caller holds mutex_
+    void* load_runtime_candidate(Module* existing, const std::filesystem::path& candidate, uint32_t flags,
+                                 const std::string& display);        // caller holds mutex_
     Module& map_image(const std::filesystem::path& path, const std::string& narrow_key);
     void initialize_tls(Module& m);
     void bind_imports(Module& m);
@@ -138,6 +155,7 @@ private:
     std::map<std::filesystem::path::string_type, Module*> by_name_;  // native basename, ASCII case folded
     std::vector<Module*> order_;       // mapping order; owns the modules
     std::vector<Module*> init_order_;  // dependencies first, see initialisation_order()
+    int runtime_loads_ = 0;  // > 0 while a run-time load or forwarder maps modules (under mutex_): they are dynamic
 
     // What find_address reads: one entry per mapped image, added once its memory exists. Under ranges_mutex_, a leaf
     // lock: mutex_ is held while image code runs and the registry holds its own lock around the lookup, so the

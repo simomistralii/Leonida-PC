@@ -842,6 +842,27 @@ class WorldIndexTest(unittest.TestCase):
         stats = WN.resolve_archetypes(agg.to_json(), WN.NameDictionary())
         self.assertEqual((stats["entities"], stats["unique_hashes"], stats["unresolved_hashes"]), (1, 1, 1))
 
+    def test_csv_report_writes_content_flags_and_covers_json_keys(self):
+        path = os.path.join(self.dir, "sample.rpf")
+        with open(path, "wb") as f:
+            f.write(make_rpf_streams([make_resource()]))
+        out = os.path.join(self.dir, "out.json")
+        csv_out = os.path.join(self.dir, "out.csv")
+        self.assertEqual(WI.main([path, "--out", out, "--csv", csv_out]), 0)
+        with open(out, encoding="utf-8") as f:
+            json_row = json.load(f)["resources"][0]
+        with open(csv_out, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            fieldnames = list(reader.fieldnames or [])
+            rows = list(reader)
+        self.assertEqual(len(rows), 1)
+        self.assertIn("content_flags", fieldnames)
+        self.assertNotIn("contentFlags", fieldnames)
+        self.assertEqual(rows[0]["content_flags"], str(json_row["content_flags"]))
+        self.assertEqual(rows[0]["map_flags"], str(json_row["map_flags"]))
+        # Every resource field emitted by parse_resource() for this map must have a matching CSV column.
+        self.assertEqual(set(json_row) - set(fieldnames), set())
+
 
 def setUpModule():
     # The tools' main() prints its summary JSON; keep it out of the test log (tests that check it redirect again).

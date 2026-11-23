@@ -463,6 +463,13 @@ class AllNaNSrc0PayloadTests(unittest.TestCase):
                 for args in ((snan_a, NAN_B, M25), (snan_a, M25, NAN_B), (M25, snan_a, NAN_B)):
                     self.assertEqual(run_op(f"{op} v0, v1, v2, v3", args), M25)
 
+    def test_f32_two_input_minmax_modifiers_keep_signaling_nan(self):
+        snan = 0x7F800001
+        for op in ("v_min_f32_e64", "v_max_f32_e64"):
+            with self.subTest(op=op):
+                self.assertEqual(run_op(f"{op} v0, -v1, v2", (snan, NAN_A)), snan ^ SIGN_BIT32)
+                self.assertEqual(run_op(f"{op} v0, |v1|, v2", (snan, NAN_A)), snan)
+
     def test_non_nan_constant_fast_path(self):
         # f16_bits emits 1 OpUGreaterThan (%float |x| > inf); all-NaN tracking adds 0 when a constant is non-NaN.
         for line, reg_line, extra_gt in (

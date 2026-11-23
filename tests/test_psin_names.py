@@ -207,6 +207,44 @@ class TestCli(unittest.TestCase):
             with open(payload, "rb") as f:
                 self.assertEqual(f.read(), original)
 
+    def test_uses_shared_same_report_path_for_refs_and_carve_index(self):
+        import report_paths
+        from unittest import mock
+        self.assertIs(N.same_report_path, report_paths.same_report_path)
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, "carved")
+            os.mkdir(src)
+            payload = os.path.join(src, "0001.bin")
+            index_path = os.path.join(src, "index.json")
+            names = os.path.join(tmp, "names.txt")
+            with open(payload, "wb") as f:
+                f.write(sample())
+            with open(index_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write('{"files": []}\n')
+            with open(names, "w", encoding="utf-8", newline="\n") as f:
+                f.write("prop_crate_01\n")
+
+            folded_names = os.path.join(tmp, "NAMES.TXT")
+            with (mock.patch.object(report_paths, "path_key", side_effect=str),
+                  mock.patch.object(report_paths.os.path, "samefile", side_effect=OSError("not same")),
+                  mock.patch.object(report_paths, "same_name_on_folding_volume", return_value=True) as probe,
+                  mock.patch.object(sys, "argv", ["psin_names.py", src, "--names", names, "--refs", folded_names])):
+                with self.assertRaises(SystemExit) as cm:
+                    N.main()
+                self.assertEqual(cm.exception.code, 2)
+            self.assertGreaterEqual(probe.call_count, 1)
+
+            index_link = os.path.join(tmp, "index_alias.tsv")
+            try:
+                os.link(index_path, index_link)
+            except (OSError, NotImplementedError) as e:
+                self.skipTest(f"hard links unavailable: {e}")
+            result = self.run_tool(src, "--names", names, "--refs", index_link)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("--refs must not overwrite an input", result.stderr)
+            with open(index_path, encoding="utf-8") as f:
+                self.assertEqual(f.read(), '{"files": []}\n')
+
     def test_refs_unwritable_parent_dir_returns_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             src = os.path.join(tmp, "one.bin")

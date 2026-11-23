@@ -169,6 +169,46 @@ class IidScan(unittest.TestCase):
 
         self.assertIsNone(scan.d3d12_xs_imports(bytes(hdr) + bytes(sect1) + bytes(sect2)))
 
+    def test_zero_virtual_size_section_falls_back_to_raw_size(self):
+        pe = bytearray(pe32plus({"d3d12_xs.dll": ["D3D12CreateRootSignatureDeserializer", 80]}))
+        # Section 0 header starts at pe(0x80) + 24 + opt_size(240) = 0x188; VirtualSize is at +8 (0x190).
+        struct.pack_into("<I", pe, 0x190, 0)
+        self.assertEqual(
+            scan.d3d12_xs_imports(bytes(pe)),
+            ["D3D12CreateRootSignatureDeserializer", "#80"],
+        )
+
+    def test_truncated_file_rva_past_eof_keeps_prior_imports(self):
+        # Two d3d12_xs.dll descriptors in one section whose header declares SizeOfRawData = VirtualSize = 0x400,
+        # but the file is truncated at sect_raw + 0x100. Descriptor 1's thunks live before EOF; descriptor 2's
+        # lookup RVA maps to sect_raw + 0x100 (exactly len(data), inside the declared section bounds), so offset()
+        # must return None rather than letting struct.unpack_from raise and discard descriptor 1's imports.
+        sect_rva, sect_raw, declared_size = 0x1000, 0x200, 0x400
+        body = bytearray(0x100)
+        # Descriptor table at +0x00 (2 descriptors + null terminator = 60 bytes):
+        #   name "d3d12_xs.dll\0" at +0x40, descriptor 1 thunks at +0x60 (ordinal #80 + 0),
+        #   descriptor 2 lookup RVA at sect_rva + 0x100 (exact EOF boundary, inside declared_size).
+        body[0x40:0x40 + 13] = b"d3d12_xs.dll\0"
+        struct.pack_into("<QQ", body, 0x60, (1 << 63) | 80, 0)
+        struct.pack_into("<IIIII", body, 0, sect_rva + 0x60, 0, 0, sect_rva + 0x40, sect_rva + 0x60)
+        struct.pack_into("<IIIII", body, 20, sect_rva + 0x100, 0, 0, sect_rva + 0x40, sect_rva + 0x100)
+
+        pe, opt_size = 0x80, 240
+        hdr = bytearray(sect_raw)
+        hdr[0:2] = b"MZ"
+        struct.pack_into("<I", hdr, 0x3C, pe)
+        hdr[pe:pe + 4] = b"PE\0\0"
+        struct.pack_into("<HHIIIHH", hdr, pe + 4, 0x8664, 1, 0, 0, 0, opt_size, 0x2022)
+        opt = pe + 24
+        struct.pack_into("<H", hdr, opt, 0x20B)
+        struct.pack_into("<I", hdr, opt + 108, 16)
+        struct.pack_into("<II", hdr, opt + 112 + 8, sect_rva, 60)
+        sec = opt + opt_size
+        hdr[sec:sec + 8] = b".rdata\0\0"
+        struct.pack_into("<IIII", hdr, sec + 8, declared_size, sect_rva, declared_size, sect_raw)
+
+        self.assertEqual(scan.d3d12_xs_imports(bytes(hdr) + bytes(body)), ["#80"])
+
     def test_not_a_pe_still_scans_bytes(self):
         iids = scan.read_iids(self.header)
         r = scan.scan(self.image("blob.bin", QUEUE.bytes_le), iids)

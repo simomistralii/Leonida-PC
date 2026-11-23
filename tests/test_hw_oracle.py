@@ -423,14 +423,18 @@ class VcvarsScript(unittest.TestCase):
 
     def test_ascii_paths_give_the_same_commands_as_before(self):
         with tempfile.TemporaryDirectory() as tmp:
-            work = os.path.join(tmp, "work")
-            os.makedirs(work)
-            argv = runner.build_command("vcvars", "vcvars64.bat", "hw_oracle.c", "hw_oracle.exe", work)
-            with open(os.path.join(work, argv[-1]), "rb") as f:
-                # UTF-8, not ASCII: the /Fo folder sits in %TEMP%, which can hold a non-ASCII user name.
-                lines = f.read().decode("utf-8").split("\r\n")
-        self.assertEqual(lines[3], 'call "vcvars64.bat" >nul || exit /b 1')
-        self.assertTrue(lines[4].startswith("cl /nologo /O1 hw_oracle.c /Fehw_oracle.exe /Fo"))
+            for name in ("work", "a b", "a & b"):
+                with self.subTest(name=name):
+                    work = os.path.join(tmp, name)
+                    os.makedirs(work)
+                    argv = runner.build_command("vcvars", "vcvars64.bat", "hw_oracle.c", "hw_oracle.exe", work)
+                    with open(os.path.join(work, argv[-1]), "rb") as f:
+                        # UTF-8, not ASCII: the /Fo folder sits in %TEMP%, which can hold a non-ASCII user name.
+                        lines = f.read().decode("utf-8").split("\r\n")
+                    self.assertEqual(lines[3], 'call "vcvars64.bat" >nul || exit /b 1')
+                    self.assertTrue(lines[4].startswith("cl /nologo /O1 hw_oracle.c /Fehw_oracle.exe "))
+                    # list2cmdline quotes /Fo when the work folder holds a space or a cmd metacharacter such as &.
+                    self.assertIn(f"/Fo{work}{os.sep}", lines[4].replace('"', ""))
 
     def test_the_direct_compilers_write_no_script(self):
         with tempfile.TemporaryDirectory() as tmp:

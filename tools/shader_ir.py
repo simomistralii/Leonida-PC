@@ -6,6 +6,7 @@ label/offset (for branches), hw register, and raw text for anything else.
 
 As a module: parse_file(path) -> {"name", "code_start", "insns": [...], "invalid": [pc...]}
 As a tool:  python -I shader_ir.py <disasm dir> [--limit N]   (parses everything and reports coverage)
+Usage: `python -I tools/shader_ir.py --help` lists the options.
 """
 import argparse
 import os
@@ -34,10 +35,19 @@ _ATTR = re.compile(r"attr(\d+)\.([xyzw])")
 _TARGET = re.compile(r"(pos|param|mrt|mrtz|null|prim)(\d*)")
 _INT = re.compile(r"-?(0x[0-9a-fA-F]+|\d+)")
 _FLOAT = re.compile(r"-?\d+\.\d+(e[+-]?\d+)?")
+# LLVM 23 prints a literal it could also show as an inline constant as lit(V), e.g. a v_fma_mix* f32 source
+# `lit(0x42200000)`, where LLVM 21 printed the inline constant of the low half (0) and dropped the literal.
+# Only a numeric constant is unwrapped: lit(v2) is no literal and stays raw (Unsupported), as before.
+_LIT = re.compile(r"lit\((-?(?:0x[0-9a-fA-F]+|\d+(?:\.\d+(?:e[+-]?\d+)?)?))\)")
 
 
 def operand(tok):
     t = tok.strip()
+    if "lit(" in t:
+        # lit(V) is the constant V. A leading '-' on it is the VOP3 neg modifier, as neg(V) (not integer negation).
+        t = _LIT.sub(r"\1", t)
+        if t.startswith("-"):
+            t = "neg(" + t[1:] + ")"
     neg = t.startswith("-")
     core = t[1:] if neg else t
     absm = len(core) > 2 and core.startswith("|") and core.endswith("|")

@@ -416,6 +416,132 @@ class SpirvOptTests(unittest.TestCase):
         _validate(opt)
         self.assertEqual(support.mrt0_words(opt), [42] * 4)
 
+    def test_trivial_phi_requires_strict_dominance(self):
+        # 1. Reachable loop header %hdr has:
+        #    - %p_dead whose sole non-self operand %u comes from unreachable %dead,
+        #    - %p_body whose sole non-self operand %x comes from non-dominating %latch, and
+        #    - %p_self whose sole non-self operand %s is defined later in %hdr itself
+        #      (cand_blk == b, exercising strict vs. non-strict dominance).
+        #    None of %u, %x, or %s strictly dominates %hdr, so trivial OpPhi simplification
+        #    must leave all three phis intact instead of creating a use-not-dominated-by-def
+        #    or self-referential '%s = OpIAdd %uint %s %c1' violation.
+        # 2. Control: %p_ok = OpPhi %uint %v0 %entry %p_ok %latch IS strictly dominated by
+        #    %entry's %v0 and must still fold to %v0.
+        spv = "\n".join([
+            "               OpCapability Shader",
+            "               OpMemoryModel Logical GLSL450",
+            '               OpEntryPoint Fragment %main "main" %in0 %out0',
+            "               OpExecutionMode %main OriginUpperLeft",
+            "               OpDecorate %in0 Location 0",
+            "               OpDecorate %in0 Flat",
+            "               OpDecorate %out0 Location 0",
+            "       %void = OpTypeVoid",
+            "       %fn_t = OpTypeFunction %void",
+            "       %uint = OpTypeInt 32 0",
+            "     %v4uint = OpTypeVector %uint 4",
+            "       %bool = OpTypeBool",
+            "  %ptr_in_u  = OpTypePointer Input %uint",
+            " %ptr_out_v4 = OpTypePointer Output %v4uint",
+            "        %in0 = OpVariable %ptr_in_u Input",
+            "       %out0 = OpVariable %ptr_out_v4 Output",
+            "         %c0 = OpConstant %uint 0",
+            "         %c1 = OpConstant %uint 1",
+            "      %false = OpConstantFalse %bool",
+            "       %main = OpFunction %void None %fn_t",
+            "      %entry = OpLabel",
+            "         %v0 = OpLoad %uint %in0",
+            "               OpBranch %hdr",
+            "       %dead = OpLabel",
+            "         %u0 = OpLoad %uint %in0",
+            "          %u = OpIAdd %uint %u0 %c1",
+            "               OpBranch %hdr",
+            "        %hdr = OpLabel",
+            "     %p_dead = OpPhi %uint %p_dead %entry %u %dead",
+            "     %p_body = OpPhi %uint %p_body %entry %x %latch",
+            "     %p_self = OpPhi %uint %p_self %entry %s %latch",
+            "       %p_ok = OpPhi %uint %v0 %entry %p_ok %latch",
+            "          %s = OpIAdd %uint %p_self %c1",
+            "               OpLoopMerge %exit %latch None",
+            "               OpBranchConditional %false %latch %exit",
+            "      %latch = OpLabel",
+            "          %x = OpIAdd %uint %p_body %c1",
+            "               OpBranch %hdr",
+            "       %exit = OpLabel",
+            "        %vec = OpCompositeConstruct %v4uint %p_dead %p_body %p_ok %p_self",
+            "               OpStore %out0 %vec",
+            "               OpReturn",
+            "               OpFunctionEnd",
+            "",
+        ])
+        opt = spirv_opt.optimize(spv)
+        # Non-strictly-dominating phis (including %p_self where cand_blk == b) must survive.
+        self.assertIn("%p_dead = OpPhi", opt)
+        self.assertIn("%p_body = OpPhi", opt)
+        self.assertIn("%p_self = OpPhi", opt)
+        self.assertIn("%s = OpIAdd %uint %p_self %c1", opt)
+        # Strictly dominated trivial phi %p_ok must still fold away.
+        self.assertNotIn("%p_ok = OpPhi", opt)
+        self.assertIn("OpCompositeConstruct %v4uint %p_dead %p_body %v0 %p_self", opt)
+
+    def test_decorate_id_string_and_group_preserved_or_cleaned(self):
+        # Live ops decorated via OpDecorateString, OpDecorateStringGOOGLE, OpDecorateId, or
+        # OpGroupDecorate (including tab-separated lines) must not be folded/CSE'd away; dead
+        # ones removed by DCE must have their decoration lines dropped (or target removed from
+        # OpGroupDecorate) with no dangling SSA IDs left in the module header.
+        spv = "\n".join([
+            "               OpCapability Shader",
+            '               OpExtension "SPV_GOOGLE_decorate_string"',
+            "               OpMemoryModel Logical GLSL450",
+            '               OpEntryPoint Fragment %main "main" %out0',
+            "               OpExecutionMode %main OriginUpperLeft",
+            "               OpDecorate %out0 Location 0",
+            "        %grp = OpDecorationGroup",
+            "               OpDecorate %grp NoContraction",
+            "               OpGroupDecorate %grp %live_grp %dead_grp",
+            "               OpGroupDecorate\t%grp %dead_only",
+            '               OpDecorateString\t%live_str UserSemantic "keep"',
+            '               OpDecorateString\t%dead_str UserSemantic "drop"',
+            '               OpDecorateStringGOOGLE %live_g HlslSemanticGOOGLE "KEEP"',
+            '               OpDecorateStringGOOGLE\t%dead_g HlslSemanticGOOGLE "DROP"',
+            "               OpDecorateId %live_id CounterBuffer %out0",
+            "               OpDecorateId\t%dead_id CounterBuffer %out0",
+            "       %void = OpTypeVoid",
+            "       %fn_t = OpTypeFunction %void",
+            "       %uint = OpTypeInt 32 0",
+            "     %v4uint = OpTypeVector %uint 4",
+            " %ptr_out_v4 = OpTypePointer Output %v4uint",
+            "       %out0 = OpVariable %ptr_out_v4 Output",
+            "         %c0 = OpConstant %uint 0",
+            "         %c1 = OpConstant %uint 1",
+            "       %main = OpFunction %void None %fn_t",
+            "      %entry = OpLabel",
+            "   %live_grp = OpIAdd %uint %c1 %c0",
+            "   %dead_grp = OpIAdd %uint %c1 %c0",
+            "  %dead_only = OpIAdd %uint %c1 %c0",
+            "   %live_str = OpIAdd %uint %c1 %c0",
+            "   %dead_str = OpIAdd %uint %c1 %c0",
+            "     %live_g = OpIAdd %uint %c1 %c0",
+            "     %dead_g = OpIAdd %uint %c1 %c0",
+            "    %live_id = OpIAdd %uint %c1 %c0",
+            "    %dead_id = OpIAdd %uint %c1 %c0",
+            "        %vec = OpCompositeConstruct %v4uint %live_grp %live_str %live_g %live_id",
+            "               OpStore %out0 %vec",
+            "               OpReturn",
+            "               OpFunctionEnd",
+            "",
+        ])
+        opt = spirv_opt.optimize(spv)
+        # All four live decorated ops must survive (not folded to %c1) along with their decorations.
+        for live in ("%live_grp", "%live_str", "%live_g", "%live_id"):
+            self.assertIn(f"{live} = OpIAdd", opt)
+        self.assertIn('OpDecorateString\t%live_str UserSemantic "keep"', opt)
+        self.assertIn('OpDecorateStringGOOGLE %live_g HlslSemanticGOOGLE "KEEP"', opt)
+        self.assertIn("OpDecorateId %live_id CounterBuffer %out0", opt)
+        self.assertIn("OpGroupDecorate %grp %live_grp", opt)
+        # All dead decorated ops and their dangling decorations must be gone.
+        for dead in ("%dead_grp", "%dead_only", "%dead_str", "%dead_g", "%dead_id"):
+            self.assertNotIn(dead, opt)
+
 
 if __name__ == "__main__":
     unittest.main()

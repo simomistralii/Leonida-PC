@@ -1,3 +1,4 @@
+; regen_fixtures: this source has a translator fixture in tests/semantic/fixtures/disasm
 ; 8/16-bit MUBUF d16 loads and stores (#1864, BUFFER_SUB16), on the output V# (base 0, num_records 0xFFFFFFFF). Lane 0
 ; seeds dword 0x40 = 0x8899AABB, 0x50 = 0x11223344, 0x60 = 0x55667788, and loads into a register holding 0xBEEF1234, so
 ; each d16 load shows the half it writes and the half it keeps. Eight dwords:

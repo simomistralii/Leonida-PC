@@ -23,6 +23,7 @@ Sources, each optional and reported as missing rather than counted as zero when 
 
 No game data leaves the inputs: the page and the JSON carry counts, pass/fail, error classes and the project's
 own document text; never a shader name, a carved file name or a path into the game copy.
+Usage: `python -I tools/progress_dashboard.py --help` lists the options.
 """
 import argparse
 import base64
@@ -277,7 +278,7 @@ def run_one_test(rel, timeout):
         return {"test": rel, "result": "fail", "seconds": timeout, "detail": f"timed out after {timeout} s"}
 
 
-CODE_DIRS = ("tools", "scripts")
+CODE_DIRS = ("tools", "scripts", "runtime/test/shaders")
 
 
 def file_digest(rel):
@@ -289,8 +290,7 @@ def file_digest(rel):
 
 
 def code_digest():
-    """One digest over the Python code the unit tests exercise: tools/, scripts/ and make_game.py (content, not
-    timestamps, so it does not depend on git or on whether the change is committed)."""
+    """Hash make_game.py and the Python files in CODE_DIRS by content, including uncommitted edits."""
     h = hashlib.sha256()
     rels = ["make_game.py"]
     for d in CODE_DIRS:
@@ -354,7 +354,8 @@ def collect_unit(col, out_dir, args):
     n = len(data["results"])
     col.metric("tests.passed", "tests", "Unit-test files passing (last run)", passed, n, "files whose last run exited 0 / files run")
     col.metric("tests.current", "tests", "Unit-test files passing on the current code", current, n,
-               "files that passed with no change since to themselves or to tools/, scripts/, make_game.py / files run")
+               "files that passed with no change since to themselves, make_game.py or Python files under "
+               + ", ".join(d + "/" for d in CODE_DIRS) + " / files run")
 
 
 def group_of_test(name):
@@ -1005,6 +1006,10 @@ def main(argv=None):
     ap.add_argument("--repo", default=DEFAULT_REPO, help=f"GitHub repository (default {DEFAULT_REPO})")
     ap.add_argument("--login", help="with --github, show this account's claims and pull requests")
     args = ap.parse_args(argv)
+    if args.jobs < 1:
+        ap.error("--jobs must be a positive integer")
+    if args.test_timeout < 1:
+        ap.error("--test-timeout must be a positive integer")
     if args.run_tests and args.tests:
         try:
             args.tests = re.compile(args.tests)
@@ -1021,7 +1026,14 @@ def main(argv=None):
         args.test_files = [f for f in ci_test_files() if not args.tests or re.search(args.tests, f)]
         if args.tests and not args.test_files:
             ap.error("--tests did not match any test files")
-    os.makedirs(out_dir, exist_ok=True)
+    if os.path.exists(out_dir) and not os.path.isdir(out_dir):
+        print(f"--out {args.out} is not a directory", file=sys.stderr)
+        return 2
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError as exc:
+        print(f"--out {args.out}: {exc.strerror or exc}", file=sys.stderr)
+        return 2
     try:
         snap = build(args, out_dir)
     except OSError as exc:

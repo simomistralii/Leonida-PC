@@ -1,10 +1,12 @@
 """Synthetic unit tests for tools/fog_volumes.py (ASSET-308). No game files."""
+import concurrent.futures
 import json
 import os
 import struct
 import sys
 import tempfile
 import unittest
+import unittest.mock
 import zlib
 from unittest import mock
 
@@ -241,6 +243,46 @@ class FogVolumesTests(unittest.TestCase):
                 with self.assertRaises(SystemExit) as cm:
                     fv.main([td, "--jobs", bad])
                 self.assertEqual(cm.exception.code, 2)
+    @unittest.skipIf(pool_workers.MAX_PROCESS_WORKERS is None, "this platform has no process-pool worker cap")
+    def test_jobs_above_the_pool_cap_ask_for_the_cap(self):
+        # ProcessPoolExecutor takes at most 61 workers on Windows (WaitForMultipleObjects' handle limit), so a
+        # --jobs of 1000 used to reach it unchanged and the run died with ValueError before the first chunk.
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "big.rpf")
+            with open(path, "wb") as f:
+                f.truncate(16 * 1024 * 1024)  # four chunks of the 4 MiB floor, so the pool path is taken
+            asked = []
+
+            class RecordingPool:
+                def __init__(self, max_workers=None, **_kwargs):
+                    asked.append(max_workers)
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_exc):
+                    return False
+
+                def map(self, fn, items):
+                    return [fn(item) for item in items]
+
+            with unittest.mock.patch.object(concurrent.futures, "ProcessPoolExecutor", RecordingPool):
+                result = fv._scan_rpf_offsets(path, jobs=1000)
+        self.assertEqual(asked, [pool_workers.MAX_PROCESS_WORKERS])
+        self.assertEqual(result, ([], 0, 0))
+
+    def test_one_chunk_input_is_scanned_without_a_pool(self):
+        # A file that fits in one chunk is scanned in the calling process, whatever --jobs says.
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "small.rpf")
+            with open(path, "wb") as f:
+                f.write(b"\x00" * 1024)
+
+            def no_pool(*_args, **_kwargs):
+                raise AssertionError("a one-chunk input must not start a pool")
+
+            with unittest.mock.patch.object(concurrent.futures, "ProcessPoolExecutor", no_pool):
+                self.assertEqual(fv._scan_rpf_offsets(path, jobs=1000), ([], 0, 0))
 
 
     def test_pool_is_capped_at_the_platform_limit(self):

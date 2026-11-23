@@ -208,7 +208,7 @@ def main():
         if a.refs:
             if os.path.isdir(a.refs):
                 ap.error("--refs must be a file path, not a directory")
-            if os.path.exists(a.refs) and any(os.path.samefile(path, a.refs) for path in inputs):
+            if any(same_report_path(path, a.refs) for path in inputs):
                 ap.error("--refs must not overwrite an input")
             if os.path.isdir(a.src):
                 src_real = os.path.realpath(a.src)
@@ -219,8 +219,8 @@ def main():
                     inside_src = False
                 if inside_src:
                     ap.error("--refs must not overwrite an input")
-                if os.path.isfile(a.refs) and any(same_report_path(path, a.refs)
-                                                   for path in psin_index.input_paths(a.src)):
+                carve_inputs = [os.path.join(a.src, "index.json"), *psin_index.input_paths(a.src)]
+                if any(same_report_path(path, a.refs) for path in carve_inputs):
                     ap.error("--refs must not overwrite an input")
         names = load_names(a.names)
         if a.refs:

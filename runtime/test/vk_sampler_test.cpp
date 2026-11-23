@@ -119,6 +119,15 @@ int main(int argc, char** argv) {
     std::printf("device: %s, driver 0x%x, Vulkan %u.%u.%u\n", props.deviceName, props.driverVersion,
                 VK_API_VERSION_MAJOR(props.apiVersion), VK_API_VERSION_MINOR(props.apiVersion),
                 VK_API_VERSION_PATCH(props.apiVersion));
+    // 144 push-constant bytes by default, or 128 under LEONIDA_PC_TAIL_UBO=1 (rdna2spirv.py --pc-tail-ubo).
+    // A 128-byte device cannot declare a 144-byte range (VUID-VkPushConstantRange-size-00298): exit 77 (D3D-14).
+    const bool pc_tail = leonida::vk_test::pc_tail_requested();
+    const std::uint32_t push_bytes = pc_tail ? 128u : 144u;
+    if (props.limits.maxPushConstantsSize < push_bytes) {
+        std::printf("unsupported: need %u push constant bytes, device has %u\n", push_bytes,
+                    props.limits.maxPushConstantsSize);
+        return unsupported;
+    }
     VkPhysicalDeviceVulkan11Features have11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
     VkPhysicalDeviceVulkan12Features have12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, &have11};
     VkPhysicalDeviceFeatures2 have{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &have12};
@@ -383,8 +392,6 @@ int main(int argc, char** argv) {
     const auto vertex_code = read_spv(argv[1]);
     // LEONIDA_PC_TAIL_UBO=1 (rdna2spirv.py --pc-tail-ubo): s0..s31 in 128 push-constant bytes; the heap base, if a
     // stage reads it, in a uniform block at set 1 (vk_pc_tail.h).
-    const bool pc_tail = leonida::vk_test::pc_tail_requested();
-    const std::uint32_t push_bytes = pc_tail ? 128u : 144u;
     bool tail_block = false;
     for (int stage = 0; stage < 2; ++stage) {
         const auto& code = stage == 0 ? vertex_code : fragment_code;

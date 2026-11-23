@@ -1093,8 +1093,15 @@ def _invocation(text, inputs, push_constants, memory, step=False, workgroup=None
             else:
                 values[res] = fma_f32(x, y, z)
         elif op == "OpFNegate":
-            negated = -val(a[1])
-            values[res] = negated if types.t[a[0]] == ("float", 64) else f32(negated)
+            # IEEE 754 negate only flips the sign bit: it keeps a NaN's payload and does not quiet a signalling NaN.
+            # A binary32 operand is negated on its bits, because the float round trip in f32() sets the quiet bit
+            # of a signalling NaN before CPython 3.14 (issue #509), as on CI's 3.12: -v1 on 0x7F800001 must give
+            # 0xFF800001, not 0xFFC00001 (AllNaNSrc0PayloadTests).
+            x = val(a[1])
+            if types.t[a[0]] == ("float", 64):
+                values[res] = -x
+            else:
+                values[res] = bits_f32(f32_bits(x) ^ 0x80000000)
         elif op == "OpQuantizeToF16":
             # Single-instruction f32 -> f16 -> f32 round to nearest, with the
             # SPIR-V subnormal rule: a magnitude too small for a normal f16

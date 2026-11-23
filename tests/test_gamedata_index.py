@@ -102,6 +102,22 @@ class GamedataIndexTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("--csv and --json must use different paths", result.stderr)
 
+    def test_a_report_cannot_land_on_a_carved_stream(self):
+        # A carve folder holds one <offset>.bin/.bk2 per stream; a report written over one would eat the input.
+        self.add(b"<a/>")
+        self.finish()
+        stream = os.path.join(self.carve, f"{self.rows[0]['off']:012x}.bin")
+        with open(stream, "rb") as f:
+            before = f.read()
+        for flag in ("--json", "--csv"):
+            with self.subTest(flag=flag):
+                p = self.run_tool(self.carve, flag, stream)
+                self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+                self.assertIn("would overwrite the carved stream", p.stderr)
+                self.assertNotIn("Traceback", p.stderr)
+        with open(stream, "rb") as f:
+            self.assertEqual(f.read(), before)
+
     def test_bad_targets_are_one_line(self):
         empty = os.path.join(self.root, "empty.rpf")
         open(empty, "wb").close()
@@ -242,6 +258,19 @@ class GamedataIndexTest(unittest.TestCase):
                 self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
                 self.assertIn("ERROR: cannot write", p.stderr)
                 self.assertNotIn("Traceback", p.stderr)
+
+    def test_reads_carve_index_with_utf8_bom(self):
+        self.add(b'<?xml version="1.0"?><RootA/>')
+        index_path = os.path.join(self.carve, "index.json")
+        doc = {"summary": {"archive": "synthetic", "files": len(self.rows)}, "files": self.rows}
+        with open(index_path, "wb") as f:
+            f.write(b"\xef\xbb\xbf" + json.dumps(doc).encode("utf-8"))
+        out = os.path.join(self.root, "bom_out.json")
+        p = self.run_tool(self.carve, "--json", out)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        with open(out, encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["summary"]["xml_documents"], 1)
 
 
 class XmlClassificationTest(unittest.TestCase):

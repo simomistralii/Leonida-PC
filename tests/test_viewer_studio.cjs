@@ -98,6 +98,28 @@ test('hostile model and texture file names render as text, not as elements or at
     }
 });
 
+test('a texture preview that fails to load fires its error handler once, not in a loop', () => {
+    // Chromium fires "error" again for every src='' it is given, so a handler that sets src='' without clearing
+    // itself first runs forever (about 424,000 times in 3 s for one card in Chromium 156). This fake image fires the
+    // handler again on every src write, as that browser does, and both card paths (first 80, "show all") are used.
+    const cards = renderTextureGrid('plain name');
+    const handlers = [...cards.matchAll(/<img\b[^>]*\sonerror="([^"]*)"/g)].map(m => m[1]);
+    assert.equal(handlers.length, 2);
+    for (const code of handlers) {
+        let fired = 0;
+        const img = {
+            alt: '',
+            onerror: null,
+            set src(_value) { if (this.onerror && fired < 1000) { fired++; this.onerror(); } },
+        };
+        img.onerror = new Function(code);
+        fired++;
+        img.onerror();
+        assert.equal(fired, 1, `the handler ran ${fired} times: ${code}`);
+        assert.equal(img.alt, 'DDS / Pre-converted');
+    }
+});
+
 test('a download that finishes or fails after a later click does not replace the model last clicked', () => {
     const studio = loadStudio();
     studio.run(`loadModel('/models/a.glb', 'a.glb', '', 1);

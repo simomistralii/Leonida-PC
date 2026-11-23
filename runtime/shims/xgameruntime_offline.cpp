@@ -1,5 +1,5 @@
-// xgameruntime: XGameEventImpl, XGameUiImpl, XGameStreamingImpl, XDisplayImpl and XUserDeviceImpl, offline: small
-// classes a title calls early.
+// xgameruntime: XGameEventImpl, XGameUiImpl, XGameStreamingImpl, XDisplayImpl, XUserDeviceImpl, XAccessibilityImpl and
+// XLauncherImpl, offline: small classes a title calls early.
 //
 // Each XGameEvent*, XGameUi* and XGameStreaming* function in xgameruntime.lib asks QueryApiImpl for its class and
 // calls one slot with its own arguments after `this`. The class and interface ids and the method order are
@@ -17,6 +17,11 @@
 //   XDisplayImpl        XDisplayTryEnableHdrMode: Disabled (the host output is SDR), Enabled with LEONIDA_HDR=1.
 //   XUserDeviceImpl     every device belongs to the offline user; associations and audio endpoints never change; the
 //                       user has no audio endpoint of its own; finding a controller shows no UI (as on desktop).
+//   XAccessibilityImpl  high contrast is Off, closed captions can't be configured, no voice is installed (enumerating
+//                       calls back zero times), XSpeechSynthesizerCreate fails (E_FAIL) with a null handle, the other
+//                       speech calls refuse the handle they were never given (E_INVALIDARG), speech-to-text display
+//                       calls fail (E_FAIL).
+//   XLauncherImpl       XLaunchUri and the display timeout deferral calls fail (E_FAIL); nothing is launched.
 //
 // Slots whose signature the public pages don't give answer with a value that is safe whichever way the caller reads
 // it: see `client_not_connected` (XGameStreaming) and `offline_failure`.
@@ -521,6 +526,123 @@ HRESULT STDMETHODCALLTYPE device_query_interface(void*, REFIID iid, void** out) 
     return answer(&g_user_device_object, std::begin(kUserDeviceInterfaces), std::end(kUserDeviceInterfaces), iid, out);
 }
 
+// ======================= XAccessibilityImpl =======================
+
+constexpr char kAccessibilityName[] = "XAccessibilityImpl";
+constexpr GUID kAccessibilityClass = {0x3e241977, 0x6237, 0x41e9, {0x85, 0x59, 0x10, 0x2c, 0x2d, 0x99, 0x83, 0xf1}};
+const GUID kAccessibilityInterfaces[] = {
+    kAccessibilityClass,   // IXAccessibilityImpl: the class id
+    {0xd722b373, 0x8c4d, 0x4692, {0x9e, 0x51, 0xd6, 0xad, 0x9b, 0x37, 0xaa, 0x7d}},   // IXAccessibilityImpl2
+};
+
+// 5: HRESULT XHighContrastGetMode(XHighContrastMode* mode): Off, the first enumerator. ASSUMPTION: the signature and
+// that Off is 0 (GDK reference, not re-checked for this file).
+HRESULT STDMETHODCALLTYPE accessibility_high_contrast(void*, uint32_t* mode) {
+    if (!mode) return E_POINTER;
+    *mode = 0;
+    return S_OK;
+}
+
+// 4: HRESULT XClosedCaptionSetEnabled(bool enabled): there are no captions to show; accepted and dropped.
+HRESULT STDMETHODCALLTYPE accessibility_captions_set_enabled(void*, bool) { return S_OK; }
+
+// 8: HRESULT XSpeechSynthesizerEnumerateInstalledVoices(callback, void* context): no voice is installed, so the
+// callback runs zero times. ASSUMPTION: the argument order (GDK reference), only the count (2) was measured.
+HRESULT STDMETHODCALLTYPE speech_enumerate_voices(void*, void* callback, void*) {
+    return callback ? S_OK : E_INVALIDARG;
+}
+
+// 9: HRESULT XSpeechSynthesizerCreate(XSpeechSynthesizerHandle* handle): no synthesizer offline.
+HRESULT STDMETHODCALLTYPE speech_create(void* self, void** handle) {
+    if (handle) *handle = nullptr;
+    return offline_failure<kAccessibilityName, 9>(self);
+}
+
+// 10-12, 14: a synthesizer or stream handle is the first argument, and none was ever handed out: E_INVALIDARG.
+HRESULT STDMETHODCALLTYPE speech_bad_handle(void*) { return E_INVALIDARG; }
+
+// 13, 21: HRESULT XSpeechSynthesizerCreateStreamFromText/Ssml(synthesizer, const char* text,
+//                                                             XSpeechSynthesizerStreamHandle* stream)
+HRESULT STDMETHODCALLTYPE speech_create_stream(void*, void*, const char*, void** stream) {
+    if (stream) *stream = nullptr;
+    return E_INVALIDARG;
+}
+
+// 15: HRESULT XSpeechSynthesizerGetStreamDataSize(stream, size_t* size)
+HRESULT STDMETHODCALLTYPE speech_stream_size(void*, void*, size_t* size) {
+    if (size) *size = 0;
+    return E_INVALIDARG;
+}
+
+// 16: HRESULT XSpeechSynthesizerGetStreamData(stream, size_t size, void* buffer, size_t* used)
+HRESULT STDMETHODCALLTYPE speech_stream_data(void*, void*, size_t, void*, size_t* used) {
+    if (used) *used = 0;
+    return E_INVALIDARG;
+}
+
+// The slots with no offline counterpart whose arguments the layout doesn't give: the caption properties (3) and
+// speech-to-text display (6, 7, 17-20). Nothing is written.
+template <int Slot> HRESULT STDMETHODCALLTYPE accessibility_offline(void* self) {
+    return offline_failure<kAccessibilityName, Slot>(self);
+}
+
+HRESULT STDMETHODCALLTYPE accessibility_query_interface(void*, REFIID iid, void** out);
+const void* const kAccessibilityVtable[] = {
+    FN(accessibility_query_interface), FN(object_add_ref), FN(object_release),   // 0-2 IUnknown
+    FN(accessibility_offline<3>),            // 3  XClosedCaptionGetProperties
+    FN(accessibility_captions_set_enabled),  // 4  XClosedCaptionSetEnabled
+    FN(accessibility_high_contrast),         // 5  XHighContrastGetMode
+    FN(accessibility_offline<6>),            // 6  XSpeechToTextSetPositionHint
+    FN(accessibility_offline<7>),            // 7  XSpeechToTextSendString
+    FN(speech_enumerate_voices),             // 8  XSpeechSynthesizerEnumerateInstalledVoices
+    FN(speech_create),                       // 9  XSpeechSynthesizerCreate
+    FN(speech_bad_handle),                   // 10 XSpeechSynthesizerCloseHandle
+    FN(speech_bad_handle),                   // 11 XSpeechSynthesizerSetDefaultVoice
+    FN(speech_bad_handle),                   // 12 XSpeechSynthesizerSetCustomVoice
+    FN(speech_create_stream),                // 13 XSpeechSynthesizerCreateStreamFromText
+    FN(speech_bad_handle),                   // 14 XSpeechSynthesizerCloseStreamHandle
+    FN(speech_stream_size),                  // 15 XSpeechSynthesizerGetStreamDataSize
+    FN(speech_stream_data),                  // 16 XSpeechSynthesizerGetStreamData
+    FN(accessibility_offline<17>),           // 17 XSpeechToTextBeginHypothesisString
+    FN(accessibility_offline<18>),           // 18 XSpeechToTextUpdateHypothesisString
+    FN(accessibility_offline<19>),           // 19 XSpeechToTextFinalizeHypothesisString
+    FN(accessibility_offline<20>),           // 20 XSpeechToTextCancelHypothesisString
+    FN(speech_create_stream),                // 21 XSpeechSynthesizerCreateStreamFromSsml
+};
+static_assert(std::size(kAccessibilityVtable) == 22, "IUnknown + IXAccessibilityImpl's 19 methods");
+ClassObject g_accessibility_object{kAccessibilityVtable};
+HRESULT STDMETHODCALLTYPE accessibility_query_interface(void*, REFIID iid, void** out) {
+    return answer(&g_accessibility_object, std::begin(kAccessibilityInterfaces), std::end(kAccessibilityInterfaces),
+                  iid, out);
+}
+
+// ======================= XLauncherImpl =======================
+
+constexpr char kLauncherName[] = "XLauncherImpl";
+constexpr GUID kLauncherClass = {0x1b339674, 0x328d, 0x4283, {0xa2, 0x00, 0x31, 0x71, 0xf1, 0x8d, 0x36, 0x39}};
+
+// 3: HRESULT XLaunchUri(XUserHandle user, const char* uri): nothing is launched; E_FAIL.
+// 4: HRESULT XDisplayAcquireTimeoutDeferral(XDisplayTimeoutDeferralHandle* handle): none is handed out.
+// 5: XDisplayCloseTimeoutDeferralHandle(handle): no handle exists; E_FAIL, which a void caller ignores.
+HRESULT STDMETHODCALLTYPE launcher_acquire_deferral(void* self, void** handle) {
+    if (handle) *handle = nullptr;
+    return offline_failure<kLauncherName, 4>(self);
+}
+
+HRESULT STDMETHODCALLTYPE launcher_query_interface(void*, REFIID iid, void** out);
+const void* const kLauncherVtable[] = {
+    FN(launcher_query_interface), FN(object_add_ref), FN(object_release),   // 0-2 IUnknown
+    FN((offline_failure<kLauncherName, 3>)),   // 3 XLaunchUri
+    FN(launcher_acquire_deferral),             // 4 XDisplayAcquireTimeoutDeferral
+    FN((offline_failure<kLauncherName, 5>)),   // 5 XDisplayCloseTimeoutDeferralHandle
+};
+static_assert(std::size(kLauncherVtable) == 6, "IUnknown + IXLauncherImpl's 3 methods");
+ClassObject g_launcher_object{kLauncherVtable};
+HRESULT STDMETHODCALLTYPE launcher_query_interface(void*, REFIID iid, void** out) {
+    // IXLauncherImpl's id is the class id.
+    return answer(&g_launcher_object, &kLauncherClass, &kLauncherClass + 1, iid, out);
+}
+
 #undef FN
 
 }  // namespace
@@ -547,6 +669,14 @@ bool xgameruntime_offline_query(const GUID& class_id, REFIID interface_id, void*
     }
     if (class_id == kUserDeviceClass) {
         *hr = device_query_interface(nullptr, interface_id, out);
+        return true;
+    }
+    if (class_id == kAccessibilityClass) {
+        *hr = accessibility_query_interface(nullptr, interface_id, out);
+        return true;
+    }
+    if (class_id == kLauncherClass) {
+        *hr = launcher_query_interface(nullptr, interface_id, out);
         return true;
     }
     return false;

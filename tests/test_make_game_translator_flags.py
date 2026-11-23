@@ -183,7 +183,8 @@ class RecordedFlagsTest(unittest.TestCase):
 class MainWiringTest(unittest.TestCase):
     """main() parses the fallback flags and hands the same tuple to preflight() and shaders()."""
 
-    def run_main(self, *extra_argv, per_vertex=None, max_push_constants=None):
+    def run_main(self, *extra_argv, per_vertex=None, barycentric_fallback=None, max_push_constants=None,
+                 mesh_crash=False):
         # An empty --out: main() reads the flags an existing translation was made with, and the default folder
         # is the user's own.
         out = tempfile.TemporaryDirectory()
@@ -195,7 +196,9 @@ class MainWiringTest(unittest.TestCase):
                 mock.patch("make_game.check", return_value={"expected_exe": "game.exe"}), \
                 mock.patch("make_game.wave64_settings", return_value=(False, True)), \
                 mock.patch("make_game.runtime_gpu_per_vertex", return_value=per_vertex), \
+                mock.patch("make_game.runtime_gpu_barycentric_fallback", return_value=barycentric_fallback), \
                 mock.patch("make_game.runtime_gpu_max_push_constants", return_value=max_push_constants), \
+                mock.patch("make_game.runtime_gpu_mesh_draws_crash", return_value=mesh_crash), \
                 mock.patch("make_game.preflight") as preflight, \
                 mock.patch("make_game.shaders") as shaders, \
                 mock.patch("make_game.log"):
@@ -219,6 +222,41 @@ class MainWiringTest(unittest.TestCase):
         self.assertEqual(self.run_main(per_vertex=True), ((), ()))
         self.assertEqual(self.run_main("--f16-interp-fallback", per_vertex=True), (("--f16-interp-fallback",),) * 2)
 
+    def test_barycentric_fallback_follows_anv_probe(self):
+        self.assertEqual(self.run_main(barycentric_fallback=True), (("--bary-fallback",),) * 2)
+        self.assertEqual(self.run_main(barycentric_fallback=False), ((), ()))
+        self.assertEqual(self.run_main("--bary-fallback", barycentric_fallback=False),
+                         (("--bary-fallback",),) * 2)
+        self.assertEqual(self.run_main(barycentric_fallback=None), ((), ()))
+
+    def test_barycentric_environment_override_matches_gpu_runner(self):
+        for value, probe, want in (("1", False, ("--bary-fallback",)),
+                                   ("0", True, ())):
+            with self.subTest(value=value, probe=probe), \
+                    mock.patch.dict(os.environ, {"LEONIDA_BARY_FALLBACK": value}, clear=False):
+                self.assertEqual(self.run_main(barycentric_fallback=probe), (want, want))
+
+    def test_explicit_barycentric_cli_flag_wins_over_environment_off(self):
+        with mock.patch.dict(os.environ, {"LEONIDA_BARY_FALLBACK": "0"}, clear=False):
+            self.assertEqual(self.run_main("--bary-fallback", barycentric_fallback=True),
+                             (("--bary-fallback",),) * 2)
+
+    def test_barycentric_environment_override_parser(self):
+        for value, want in (("1", True), ("true", True), ("yes", True), ("on", True),
+                            ("0", False), ("false", False), ("no", False), ("off", False),
+                            ("", None), ("unknown", None)):
+            with self.subTest(value=value), mock.patch.dict(os.environ,
+                                                             {"LEONIDA_BARY_FALLBACK": value},
+                                                             clear=False):
+                self.assertIs(make_game.barycentric_fallback_override(), want)
+
+    def test_runtime_gpu_barycentric_fallback_requires_a_boolean_probe_result(self):
+        for raw, want in (({"barycentric_fallback": True}, True),
+                          ({"barycentric_fallback": False}, False),
+                          ({}, None), ({"barycentric_fallback": "true"}, None)):
+            with self.subTest(raw=raw), mock.patch("make_game.runtime_gpu_info", return_value=raw):
+                self.assertIs(make_game.runtime_gpu_barycentric_fallback(), want)
+
     def test_pc_tail_ubo_follows_the_device(self):
         """On by itself where maxPushConstantsSize is below what the shaders need (144, or 152 with
         --mesh-compute), not where it fits or can't be read; asked for explicitly, it is on everywhere."""
@@ -230,6 +268,29 @@ class MainWiringTest(unittest.TestCase):
         self.assertEqual(self.run_main(max_push_constants=256), ((), ()))
         self.assertEqual(self.run_main(max_push_constants=None), ((), ()))
         self.assertEqual(self.run_main("--pc-tail-ubo", max_push_constants=256), (("--pc-tail-ubo",),) * 2)
+
+    def test_mesh_compute_follows_the_device(self):
+        """On by itself on Intel's Windows Vulkan driver with mesh shaders (BUILD-2202), not elsewhere or where the
+        probe can't tell; --native-mesh keeps native mesh shaders there, and asked for, it is on everywhere. It
+        comes before the push-constant check, so 152 bytes are what a 144-byte Intel device is measured against."""
+        self.assertEqual(self.run_main(mesh_crash=True), (("--mesh-compute",),) * 2)
+        self.assertEqual(self.run_main(mesh_crash=False), ((), ()))
+        self.assertEqual(self.run_main(mesh_crash=None), ((), ()))
+        self.assertEqual(self.run_main("--native-mesh", mesh_crash=True), ((), ()))
+        self.assertEqual(self.run_main("--mesh-compute", mesh_crash=False), (("--mesh-compute",),) * 2)
+        self.assertEqual(self.run_main(mesh_crash=True, max_push_constants=144),
+                         (("--mesh-compute", "--pc-tail-ubo"),) * 2)
+
+    def test_runtime_gpu_mesh_draws_crash_reads_the_probe(self):
+        intel = make_game.VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS
+        for raw, want in (({"driver_id": intel, "mesh_in_supported_stages": True}, True),
+                          ({"driver_id": intel, "mesh_in_supported_stages": False}, False),
+                          ({"driver_id": intel}, False),
+                          ({"driver_id": 4, "mesh_in_supported_stages": True}, False),
+                          ({"device": "x"}, None),
+                          ({}, None)):
+            with mock.patch("make_game.runtime_gpu_info", return_value=raw):
+                self.assertEqual(make_game.runtime_gpu_mesh_draws_crash(), want, raw)
 
     def test_runtime_gpu_max_push_constants_parses_probe(self):
         for raw, want in (({"max_push_constants_size": 128}, 128),
@@ -250,7 +311,7 @@ class ProbeFailureKeepsAutomaticFlagsTest(RecordedFlagsTest):
 
     AUTOMATIC = ("--f16-interp-fallback", "--pc-tail-ubo")
 
-    def build(self, *extra_argv, per_vertex, max_push_constants):
+    def build(self, *extra_argv, per_vertex, max_push_constants, mesh_crash=False):
         """One `make_game.py --stages shaders` run: (the fallbacks of each translation it started, its log)."""
         translations, lines = [], []
 
@@ -274,7 +335,9 @@ class ProbeFailureKeepsAutomaticFlagsTest(RecordedFlagsTest):
                 mock.patch("make_game.check", return_value={"expected_exe": "game.exe"}), \
                 mock.patch("make_game.wave64_settings", return_value=(False, True)), \
                 mock.patch("make_game.runtime_gpu_per_vertex", return_value=per_vertex), \
+                mock.patch("make_game.runtime_gpu_barycentric_fallback", return_value=None), \
                 mock.patch("make_game.runtime_gpu_max_push_constants", return_value=max_push_constants), \
+                mock.patch("make_game.runtime_gpu_mesh_draws_crash", return_value=mesh_crash), \
                 mock.patch("make_game.preflight"), \
                 mock.patch.object(make_game, "py", fake_py), \
                 mock.patch.object(make_game, "need", lambda *a: None), \

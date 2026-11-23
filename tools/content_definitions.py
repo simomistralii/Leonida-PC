@@ -3,6 +3,7 @@
 Accepts XML files or rpf9_carve directories. The CLI prints aggregate counts only.
 The Python API returns ordered records containing local game data: never publish
 those records. Archive offsets identify recovered spans, not named RPF entries.
+Usage: `python -I tools/content_definitions.py --help` lists the options.
 """
 from __future__ import annotations
 

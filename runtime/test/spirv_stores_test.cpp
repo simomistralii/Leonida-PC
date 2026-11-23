@@ -134,6 +134,33 @@ int main() {
           "a storage buffer block needs the feature");
     check(spirv_declares_writable_storage(buffer_module(StorageBuffer, Block, 1, false)),
           "a block with one writable member still needs it");
+    // Out-of-range member decorations must not satisfy the count for an undecorated writable member.
+    {
+        Words w = header();
+        inst(w, OpDecorate, {struct_t, Block});
+        inst(w, OpMemberDecorate, {struct_t, 0, NonWritable});
+        inst(w, OpMemberDecorate, {struct_t, 5, NonWritable});
+        inst(w, OpTypeInt, {uint_t, 32, 0});
+        inst(w, OpTypeStruct, {struct_t, uint_t, uint_t});
+        inst(w, OpTypePointer, {pointer_t, StorageBuffer, struct_t});
+        inst(w, OpVariable, {pointer_t, var, StorageBuffer});
+        check(spirv_declares_writable_storage(w),
+              "an out-of-range OpMemberDecorate cannot hide a writable member");
+    }
+    {
+        constexpr std::uint32_t group = 20;
+        Words w = header();
+        inst(w, OpDecorate, {group, NonWritable});
+        inst(w, OpDecorationGroup, {group});
+        inst(w, OpDecorate, {struct_t, Block});
+        inst(w, OpGroupMemberDecorate, {group, struct_t, 0, struct_t, 2});
+        inst(w, OpTypeInt, {uint_t, 32, 0});
+        inst(w, OpTypeStruct, {struct_t, uint_t, uint_t});
+        inst(w, OpTypePointer, {pointer_t, StorageBuffer, struct_t});
+        inst(w, OpVariable, {pointer_t, var, StorageBuffer});
+        check(spirv_declares_writable_storage(w),
+              "an out-of-range OpGroupMemberDecorate cannot hide a writable member");
+    }
     check(!spirv_declares_writable_storage(buffer_module(StorageBuffer, Block, 2, false)),
           "a block whose members are all NonWritable does not (GLSL `readonly buffer`)");
     check(!spirv_declares_writable_storage(buffer_module(StorageBuffer, Block, 0, true)),

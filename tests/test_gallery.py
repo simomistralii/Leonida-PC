@@ -1,4 +1,5 @@
 """Unit tests for tools/gallery.py standalone 3D Studio & Asset Gallery server."""
+import functools
 import json
 import io
 import os
@@ -35,21 +36,93 @@ def _make_1x1_rgba_dds() -> bytes:
     return bytes(hdr) + b"\x11\x22\x33\xff"
 
 
-def _raw_get(port: int, target: str, host: str | None = "127.0.0.1", extra_headers: tuple[str, ...] = ()):
-    """Send a raw HTTP/1.1 GET without client-side path normalization or header merging."""
+def _get_request_bytes(target: str, host: str | None, extra_headers: tuple[str, ...]) -> bytes:
     lines = [f"GET {target} HTTP/1.1"]
     if host is not None:
         lines.append(f"Host: {host}")
     lines.extend(extra_headers)
     lines.extend(["Connection: close", "", ""])
+    return "\r\n".join(lines).encode("latin-1")
+
+
+def _split_response(raw: bytes):
+    head, _, body = raw.partition(b"\r\n\r\n")
+    status = int(head.split(b"\r\n", 1)[0].split()[1])
+    return status, head.decode("latin-1"), body
+
+
+def _raw_get(port: int, target: str, host: str | None = "127.0.0.1", extra_headers: tuple[str, ...] = ()):
+    """Send a raw HTTP/1.1 GET without client-side path normalization or header merging."""
     with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
-        sock.sendall("\r\n".join(lines).encode("latin-1"))
+        sock.sendall(_get_request_bytes(target, host, extra_headers))
         chunks = []
         while data := sock.recv(65536):
             chunks.append(data)
-    head, _, body = b"".join(chunks).partition(b"\r\n\r\n")
-    status = int(head.split(b"\r\n", 1)[0].split()[1])
-    return status, head.decode("latin-1"), body
+    return _split_response(b"".join(chunks))
+
+
+class _MemoryConnection:
+    """Stands in for the accepted socket, so the handler reads exactly the bytes a test wrote: no loopback TCP, and so
+    nothing between the two ends that could rewrite the request (see _loopback_keeps_a_repeated_host)."""
+
+    def __init__(self, request: bytes):
+        self._request = io.BytesIO(request)
+        self.response = bytearray()
+
+    def makefile(self, mode, bufsize=-1):
+        return self._request
+
+    def sendall(self, data):
+        self.response += data
+
+
+def _memory_get(target: str, host: str | None = "127.0.0.1", extra_headers: tuple[str, ...] = ()):
+    """_raw_get without a socket: gallery.StudioHandler answers the same request bytes in this thread."""
+    connection = _MemoryConnection(_get_request_bytes(target, host, extra_headers))
+    gallery.StudioHandler(connection, ("127.0.0.1", 0), None)
+    return _split_response(bytes(connection.response))
+
+
+@functools.lru_cache(maxsize=1)
+def _loopback_keeps_a_repeated_host() -> bool:
+    """False when a request sent over loopback TCP arrives without its second Host field.
+
+    Security software that filters HTTP does this on some machines, on 127.0.0.1 too (measured with ESET Security on
+    Windows 11: `Host: a`, `Host: b` arrives as `Host: a`). The server then never sees the request the test wrote, so a
+    test of the duplicate-Host rule over a socket measures the filter, not gallery.py. Same probe as #4985 adds to
+    tests/test_viewer_serve.py."""
+    request = b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nHost: evil.example\r\nConnection: close\r\n\r\n"
+    received = bytearray()
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(10)
+
+        def accept():
+            try:
+                peer, _ = listener.accept()
+            except OSError:
+                return
+            with peer:
+                peer.settimeout(10)
+                try:
+                    while not received.endswith(b"\r\n\r\n"):
+                        data = peer.recv(65536)
+                        if not data:
+                            break
+                        received.extend(data)
+                except OSError:
+                    pass
+
+        thread = threading.Thread(target=accept, daemon=True)
+        thread.start()
+        try:
+            with socket.create_connection(listener.getsockname(), timeout=10) as sock:
+                sock.sendall(request)
+                thread.join(10)
+        except OSError:
+            return True          # no answer about a filter: let the socket test run and report what it sees
+    return bytes(received) == request or not received
 
 
 class TestGalleryCategorization(unittest.TestCase):
@@ -357,6 +430,73 @@ class TestGalleryServer(unittest.TestCase):
             self.assertEqual(r.status, 200)
             self.assertIn(b"console.log", r.read())
 
+    def _raw_get(self, path: str) -> bytes:
+        """The whole response, status line and headers included, as the socket delivered it."""
+        with socket.create_connection(("127.0.0.1", self.port), timeout=3) as sock:
+            sock.sendall(f"GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n".encode())
+            data = b""
+            while chunk := sock.recv(65536):
+                data += chunk
+        return data
+
+    def test_a_file_that_cannot_be_opened_is_one_500_response(self) -> None:
+        # _send_file used to send 200 and Content-Length before opening the file, then wrote a second status line
+        # (send_error's 500) into the body of the first.
+        def refuse(path, *args, **kwargs):
+            raise PermissionError(13, "Permission denied", path)
+
+        gallery.open = refuse
+        self.addCleanup(delattr, gallery, "open")
+        response = self._raw_get("/textures/test_tex.png")
+        self.assertEqual(response.count(b"HTTP/1."), 1, response)
+        self.assertTrue(response.startswith(b"HTTP/1.0 500 "), response)
+        self.assertNotIn(b"LOOT", response)
+
+    def test_a_read_error_after_the_headers_ends_the_response_short(self) -> None:
+        # Once 200 is out the status can't change: the body stops short and the connection closes, with no error
+        # page appended to it.
+        real_open = open
+
+        class FailingRead(io.BufferedReader):
+            def read(self, *args):
+                raise OSError(5, "Input/output error")
+
+        def failing(path, *args, **kwargs):
+            return FailingRead(real_open(path, "rb", buffering=0))
+
+        gallery.open = failing
+        self.addCleanup(delattr, gallery, "open")
+        response = self._raw_get("/textures/test_tex.png")
+        head, _, body = response.partition(b"\r\n\r\n")
+        self.assertEqual(response.count(b"HTTP/1."), 1, response)
+        self.assertTrue(head.startswith(b"HTTP/1.0 200 "), head)
+        size = os.path.getsize(os.path.join(self.textures_dir, "test_tex.png"))
+        self.assertIn(f"Content-Length: {size}".encode(), head)
+        self.assertEqual(body, b"")
+
+    def test_a_read_error_after_the_headers_closes_a_keep_alive_connection(self) -> None:
+        # The gallery answers HTTP/1.0, which closes after every response anyway. Under HTTP/1.1 the connection
+        # would stay open, so a short body must close it, or the client would wait for the missing bytes.
+        real_open = open
+
+        class FailingRead(io.BufferedReader):
+            def read(self, *args):
+                raise OSError(5, "Input/output error")
+
+        gallery.open = lambda path, *a, **k: FailingRead(real_open(path, "rb", buffering=0))
+        self.addCleanup(delattr, gallery, "open")
+        self.addCleanup(setattr, gallery.StudioHandler, "protocol_version", gallery.StudioHandler.protocol_version)
+        gallery.StudioHandler.protocol_version = "HTTP/1.1"
+        with socket.create_connection(("127.0.0.1", self.port), timeout=3) as sock:
+            sock.sendall(b"GET /textures/test_tex.png HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n")
+            data = b""
+            while chunk := sock.recv(65536):   # a socket.timeout here means the connection was left open
+                data += chunk
+        head, _, body = data.partition(b"\r\n\r\n")
+        self.assertTrue(head.startswith(b"HTTP/1.1 200 "), head)
+        self.assertEqual(data.count(b"HTTP/1."), 1, data)
+        self.assertEqual(body, b"")
+
     def test_traversal_and_sibling_prefix_escapes_are_forbidden(self) -> None:
         host = f"127.0.0.1:{self.port}"
         cases = (
@@ -388,23 +528,50 @@ class TestGalleryServer(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertNotIn(b"\x89PNG", body)
 
+    _GUARDED_TARGETS = ("/", "/api/models", "/api/textures", "/models/test_car.glb", "/textures/test_tex.png")
+
     def test_host_header_guards(self) -> None:
-        loopback = f"127.0.0.1:{self.port}"
-        for target in ("/", "/api/models", "/api/textures", "/models/test_car.glb", "/textures/test_tex.png"):
+        for target in self._GUARDED_TARGETS:
             with self.subTest(case="foreign", target=target):
                 status, _, body = _raw_get(self.port, target, host="evil.example:8080")
                 self.assertEqual(status, 403)
-                self.assertNotIn(b"test_car.glb", body)
-                self.assertNotIn(b"glTF", body)
-            with self.subTest(case="duplicate", target=target):
-                status, _, body = _raw_get(self.port, target, host=loopback, extra_headers=("Host: evil.example",))
-                self.assertEqual(status, 400)
                 self.assertNotIn(b"test_car.glb", body)
                 self.assertNotIn(b"glTF", body)
 
         status, _, body = _raw_get(self.port, "/models/test_car.glb", host=None)
         self.assertEqual(status, 200)
         self.assertTrue(body.startswith(b"glTF"))
+
+    def _check_duplicate_host_gets_400(self, get) -> None:
+        loopback = f"127.0.0.1:{self.port}"
+        for target in self._GUARDED_TARGETS:
+            with self.subTest(target=target):
+                status, _, body = get(target, host=loopback, extra_headers=("Host: evil.example",))
+                self.assertEqual(status, 400)
+                self.assertNotIn(b"test_car.glb", body)
+                self.assertNotIn(b"glTF", body)
+
+    def test_duplicate_host_gets_400(self) -> None:
+        # The handler reads the request from memory, so the rule is checked on every machine.
+        self._check_duplicate_host_gets_400(_memory_get)
+
+    def test_duplicate_host_gets_400_over_a_socket(self) -> None:
+        if not _loopback_keeps_a_repeated_host():
+            self.skipTest("something on this machine removes a repeated Host field from loopback HTTP requests "
+                          "(security software that filters HTTP)")
+        self._check_duplicate_host_gets_400(functools.partial(_raw_get, self.port))
+
+    def test_a_request_from_memory_is_answered_like_one_over_a_socket(self) -> None:
+        # _memory_get must reach the same guards and files as _raw_get, or test_duplicate_host_gets_400 checks nothing.
+        loopback = f"127.0.0.1:{self.port}"
+        for target, host in (("/models/test_car.glb", loopback), ("/textures/test_tex.png", loopback),
+                             ("/api/models", loopback), ("/models/test_car.glb", "evil.example"),
+                             ("/models/../secret.txt", loopback), ("/models/test_car.glb", None)):
+            with self.subTest(target=target, host=host):
+                over_socket = _raw_get(self.port, target, host=host)
+                from_memory = _memory_get(target, host=host)
+                self.assertEqual(from_memory[0], over_socket[0])
+                self.assertEqual(from_memory[2], over_socket[2])
 
     def test_windows_device_names_get_403_without_opening(self) -> None:
         host = f"127.0.0.1:{self.port}"

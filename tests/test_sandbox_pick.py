@@ -83,6 +83,15 @@ class PickPair(unittest.TestCase):
     def test_missing_index(self):
         self.assertIsNone(sandbox.pick_pair(os.path.join(self.root, "nowhere")))
 
+    def test_index_with_utf8_bom(self):
+        self.add("a_vs", {"stage": "vs", "input_signature": VS_SIG, "user_sgpr_reads": PTR8, "bindings": []}, VS_TEXT)
+        self.add("b_ps", {"stage": "ps", "input_signature": PS_SIG, "user_sgpr_reads": PTR8, "bindings": [0, 1, 2]}, PS_TEXT)
+        with open(os.path.join(self.root, "spirv", "index.json"), "w", encoding="utf-8-sig") as f:
+            json.dump(self.index, f)
+        pair = sandbox.pick_pair(self.root)
+        self.assertIsNotNone(pair)
+        self.assertEqual(tuple(os.path.splitext(os.path.basename(p))[0] for p in pair), ("a_vs", "b_ps"))
+
 
 class CheckFrame(unittest.TestCase):
     def frame(self, pixels, w, h):

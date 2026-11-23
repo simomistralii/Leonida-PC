@@ -118,12 +118,14 @@ inline bool spirv_declares_writable_storage(std::span<const std::uint32_t> words
         const bool storage_buffer = variable.storage_class == class_storage_buffer ||
                                     (variable.storage_class == class_uniform && buffer_blocks.count(type));
         if (!storage_buffer) continue;
-        // A block is read-only when every member is.
+        // A block is read-only only when every declared member [0, total) is NonWritable; counting the set's size
+        // alone would let an out-of-range member decoration mask an undecorated writable member.
         const auto members = member_count.find(type);
         const auto read_only = non_writable_members.find(type);
         const std::uint32_t total = members == member_count.end() ? 0 : members->second;
-        const std::size_t marked = read_only == non_writable_members.end() ? 0 : read_only->second.size();
-        if (total == 0 || marked < total) return true;
+        if (total == 0 || read_only == non_writable_members.end()) return true;
+        for (std::uint32_t member = 0; member < total; ++member)
+            if (!read_only->second.count(member)) return true;
     }
     return false;
 }

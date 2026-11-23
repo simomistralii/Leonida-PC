@@ -7,8 +7,9 @@ exporter agree on stream ids, codecs, sample rates and streamed-music descriptor
 scanned recursively for *.awc. CSV is the default on stdout; --out writes a file and a .json
 extension selects JSON unless --format says otherwise. A report cannot replace an input bank, including one
 found during a directory scan. Unreadable banks are reported on stderr, skipped,
-and excluded from bank_count. The bank column gives the path relative to the scanned directory or the basename
-for a single file.
+and excluded from bank_count, but a single named file that holds no bank is an error (exit 2) instead of an
+empty manifest, since then the path or the format is wrong. The bank column gives the path relative to the
+scanned directory or the basename for a single file.
 
 CSV columns: bank, stream, codec, codec_name, channels, sample_rate, declared_samples, duration_s,
 streamed_music, data_offset, data_size, bank_size, notes. JSON is an object with bank_count,
@@ -249,6 +250,11 @@ def main(argv=None) -> int:
     except OSError as e:
         print(f"awc_manifest: error: cannot read {e.filename or a.src}: {e.strerror or e}", file=sys.stderr)
         return 1
+    if not banks and not os.path.isdir(a.src):
+        # A named file that parsed as no bank is a wrong path or format, not an empty result; a directory scan
+        # keeps reporting 0 banks because scanning a folder with no bank in it is a valid answer.
+        print(f"awc_manifest: error: {a.src}: holds no AWC bank", file=sys.stderr)
+        return 2
     try:
         write_manifest(rows, banks, streamed, fmt, a.out)
     except OSError as e:

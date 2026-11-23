@@ -16,6 +16,7 @@ contain element values, entry names or payload bytes, so the CSV/JSON can be rev
 game data. Non-XML payloads follow the 64 KiB block rule; a file whose inflated size is an exact multiple of
 64 KiB can merge with the next stream. XML documents close on their root element, so their grouping is exact.
 The tool is standard library only and never writes outside the requested output files.
+Usage: `python -I tools/gamedata_index.py --help` lists the options.
 """
 from __future__ import annotations
 
@@ -175,12 +176,27 @@ def magic_name(data: bytes) -> str:
     return ""
 
 
+CARVED_STREAM = re.compile(r"[0-9a-f]{12}\.(?:bin|bk2)")
+
+
+def carved_stream(address: str, directory: str):
+    """The carved stream a report at `address` would overwrite in `directory`, or None.
+
+    rpf9_carve.py writes one `<offset:012x>.bin` (or `.bk2`) per stream beside its index.json, so it is an input,
+    not a place for a report; guarding only index.json left `--json`/`--csv` free to replace a carved stream.
+    """
+    if not CARVED_STREAM.fullmatch(os.path.basename(address)):
+        return None
+    candidate = os.path.join(directory, os.path.basename(address))
+    return candidate if os.path.isfile(candidate) and same_report_path(address, candidate) else None
+
+
 class DirectorySource:
     """Reads .bin/.bk2 files next to an rpf9_carve.py index.json."""
 
     def __init__(self, directory: str):
         self.directory = directory
-        with open(os.path.join(directory, "index.json"), encoding="utf-8") as f:
+        with open(os.path.join(directory, "index.json"), encoding="utf-8-sig") as f:
             self.index = json.load(f)
         self.rows = sorted(self.index["files"], key=lambda r: r["off"])
 
@@ -211,7 +227,7 @@ class ArchiveSource:
                                capture_output=True, text=True, encoding="utf-8", errors="replace")
             if r.returncode != 0:
                 raise RuntimeError((r.stdout + r.stderr).strip() or "rpf9_carve.py failed")
-        with open(os.path.join(index_dir, "index.json"), encoding="utf-8") as f:
+        with open(os.path.join(index_dir, "index.json"), encoding="utf-8-sig") as f:
             self.index = json.load(f)
         self.rows = sorted(self.index["files"], key=lambda r: r["off"])
         self._fh = open(archive, "rb")
@@ -422,6 +438,10 @@ def main() -> int:
             for input_path in protected:
                 if same_report_path(path, input_path):
                     ap.error(f"{flag} would overwrite the input {input_path}")
+            for directory in (a.target, a.carve_dir):
+                stream = directory and os.path.isdir(directory) and carved_stream(path, directory)
+                if stream:
+                    ap.error(f"{flag} would overwrite the carved stream {stream}")
     source = None
     try:
         if os.path.isdir(a.target):

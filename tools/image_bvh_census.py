@@ -63,6 +63,7 @@ registers only. A store counts as raw_other, and a value reloaded after it does 
 of static candidates: a read on a path the program never takes counts the same as one on a path it always takes.
 
 Standard library only. Nothing from the game is printed or written: counts, mnemonics and descriptor field values.
+Usage: `python -I tools/image_bvh_census.py --help` lists the options.
 """
 import argparse
 import json

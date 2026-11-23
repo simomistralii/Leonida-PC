@@ -184,6 +184,8 @@ def parse_d3d12(path: str, limit: int = 10) -> dict:
         "refused": [],
         "partial": [],
         "last_seq": 0,
+        "sequence_break_count": 0,
+        "sequence_breaks": [],
     }
     with _open_text(path) as fh:
         for line in fh:
@@ -194,6 +196,11 @@ def parse_d3d12(path: str, limit: int = 10) -> dict:
                 continue
             seq, method, outcome = int(match.group(1)), match.group(2), match.group(3)
             trace["calls"] += 1
+            expected = trace["last_seq"] + 1
+            if seq != expected:
+                trace["sequence_break_count"] += 1
+                if len(trace["sequence_breaks"]) < limit:
+                    trace["sequence_breaks"].append({"expected": expected, "observed": seq})
             trace["last_seq"] = seq
             trace["outcomes"][outcome] = trace["outcomes"].get(outcome, 0) + 1
             if method not in trace["first"]:
@@ -296,6 +303,10 @@ def format_text(summary: dict, limit: int) -> str:
             " (the [rt] diagnostics are not summarized)"
             + (f": {outcomes}" if outcomes else "")
         )
+        if d3d12["sequence_break_count"]:
+            out.append(f"  sequence breaks: {d3d12['sequence_break_count']}")
+            for item in d3d12["sequence_breaks"][:limit]:
+                out.append(f"    expected #{item['expected']}, observed #{item['observed']}")
         if d3d12["methods"]:
             out.append(f"  first per method: {_tail(d3d12['methods'], limit)}")
         if d3d12["unsupported"]:

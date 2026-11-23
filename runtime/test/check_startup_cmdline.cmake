@@ -5,6 +5,13 @@ foreach(mode args no_args fail_init)
   elseif(mode STREQUAL "fail_init")
     set(args fail-init)
   endif()
+  if(NOT mode STREQUAL "fail_init")
+    execute_process(COMMAND ${RUNNER} "${GUEST}" ${args} TIMEOUT 90
+      RESULT_VARIABLE native_code OUTPUT_VARIABLE native_output ERROR_VARIABLE native_error)
+    if(NOT native_code STREQUAL "0" OR NOT native_output MATCHES "tiny_startup_cmdline: PASS")
+      message(FATAL_ERROR "Native startup command line (${mode}) returned ${native_code}\n${native_output}\n${native_error}")
+    endif()
+  endif()
   execute_process(
     COMMAND ${RUNNER} "${LOADER}" --run "${GUEST}" -- ${args}
     TIMEOUT 90

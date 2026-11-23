@@ -61,9 +61,19 @@ $sdl = if ($FetchSdl3) { "-DLEONIDA_SDL3_FETCH=ON" } else { "" }
 $vk = if ($env:VULKAN_SDK) { "-DLEONIDA_REQUIRE_VULKAN=ON" } else { "" }
 
 if ($cmake -and $ninja) {
+    $configure = "`"$cmake`" -S `"$src`" -B `"$out`" -G Ninja `"-DCMAKE_MAKE_PROGRAM=$ninja`" -DCMAKE_BUILD_TYPE=$cfg $sdl $vk"
+    $build = "`"$cmake`" --build `"$out`" -j $jobs"
+    # CALL reparses even quoted arguments and doubles a ^ in a checkout path.
+    # A native executable returns directly; a PATH .cmd/.bat wrapper needs its own
+    # cmd.exe so it returns here too, without CALL's second expansion.
+    if ([System.IO.Path]::GetExtension($cmake) -in @(".cmd", ".bat")) {
+        # Escape the outer quotes for the parent batch parser, keeping paths quoted there too.
+        $configure = 'cmd.exe /d /s /c ^"' + $configure + '^"'
+        $build = 'cmd.exe /d /s /c ^"' + $build + '^"'
+    }
     $body = @"
-call "$cmake" -S "$src" -B "$out" -G Ninja "-DCMAKE_MAKE_PROGRAM=$ninja" -DCMAKE_BUILD_TYPE=$cfg $sdl $vk || exit /b 1
-call "$cmake" --build "$out" -j $jobs || exit /b 1
+$configure || exit /b 1
+$build || exit /b 1
 "@
 } else {
     # Keep this list in step with runtime\CMakeLists.txt. Optional parts that need a dependency are left out here:
@@ -103,6 +113,8 @@ if defined VULKAN_SDK cl /nologo /std:c++20 /EHsc /O2 /DWIN32_LEAN_AND_MEAN /DNO
 # (e.g. Spanish "Nota: inclusión del archivo:") match Ninja's msvc_deps_prefix instead of being mojibaked in OEM CP.
 $bat = Join-Path $out "_build.cmd"
 # Keep the paths encoded for CP 65001 and start with an ASCII command that cmd.exe can read before switching.
+# Here-strings follow the script's checkout line endings; cmd.exe needs CRLF in the generated UTF-8 batch.
+$body = $body -replace "`r?`n", "`r`n"
 $batchText = "@echo off`r`nchcp 65001 >nul`r`nset `"PATH=$installer;%PATH%`"`r`ncall `"$vcvars`" >nul || exit /b 1`r`n$body`r`n"
 [System.IO.File]::WriteAllText($bat, $batchText, [System.Text.UTF8Encoding]::new($false))
 

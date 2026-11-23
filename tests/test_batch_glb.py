@@ -83,6 +83,25 @@ class TestBatchGlb(unittest.TestCase):
                     self.assertIn(error, result.stderr)
                     self.assertEqual(result.stdout, "")
 
+    def test_a_textures_path_that_is_not_a_directory_is_a_usage_error(self) -> None:
+        # before the validator a typo'd --textures path returned an empty index and the run still
+        # embedded nothing and exited 0, as if the folder had no textures.
+        with tempfile.TemporaryDirectory() as in_dir, tempfile.TemporaryDirectory() as out_dir:
+            with open(os.path.join(in_dir, "m.obj"), "w", encoding="utf-8", newline="\n") as f:
+                f.write("o m\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n")
+            not_a_dir = os.path.join(in_dir, "textures.txt")
+            with open(not_a_dir, "wb") as f:
+                f.write(b"x")
+            result = subprocess.run(
+                [sys.executable, "-I", os.path.join(TOOLS, "batch_glb.py"),
+                 in_dir, out_dir, "--textures", not_a_dir],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("argument --textures", result.stderr)
+            self.assertIn("not a directory", result.stderr)
+            self.assertEqual(os.listdir(out_dir), [])
+
     def test_cli_accepts_valid_jobs_and_max_tex_size(self) -> None:
         with tempfile.TemporaryDirectory() as in_dir, tempfile.TemporaryDirectory() as out_dir:
             obj_path = os.path.join(in_dir, "test_model.obj")

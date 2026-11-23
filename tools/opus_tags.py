@@ -23,6 +23,7 @@ sequence numbers do not change. Streams without a name are left untouched, and s
 twice (counted as ``ambiguous name``): the archive stores only the low 29 bits of a name hash, so two names can claim
 one id, and writing either would put another stream's name and, through --dialogue, its subtitle in the file. Running
 the tool again replaces the tags it wrote. A tags packet larger than one Ogg page (65,024 bytes) is skipped and counted.
+Files with a bad page checksum or truncated page are also skipped and left untouched; all pages are checked before any replacement is written.
 
 Usage:
     python -I opus_tags.py <Opus folder> --names names.csv [--dialogue dialogue.csv] [--source LABEL] [--dry-run]
@@ -38,7 +39,7 @@ import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from awc_opus import ogg_page, write_file  # noqa: E402
+from awc_opus import ogg_crc, ogg_page, write_file  # noqa: E402
 
 VENDOR = b"leonida "
 MARKUP = re.compile(r"~[^~]*~")
@@ -72,11 +73,22 @@ def pages(data: bytes):
         at = end
 
 
+def checked_pages(data: bytes):
+    """Validate every page checksum before its bytes are used or copied to the output."""
+    for start, end in pages(data):
+        page = bytearray(data[start:end])  # bounded by one Ogg page, not the whole stream
+        expected, = struct.unpack_from("<I", page, 22)
+        page[22:26] = b"\0" * 4
+        if ogg_crc(page) != expected:
+            raise ValueError(f"Ogg checksum mismatch at byte {start}")
+        yield start, end
+
+
 def retag(data: bytes, packet: bytes) -> bytes:
-    """`data` with its OpusTags page replaced by one holding `packet`."""
+    """`data` with its OpusTags page replaced; refuse corrupt or truncated input."""
     if len(packet) > MAX_PACKET:
         raise ValueError("tags do not fit in one page")
-    it = pages(data)
+    it = checked_pages(data)
     try:
         _, (tags_at, tags_end) = next(it), next(it)
     except StopIteration:
@@ -89,6 +101,8 @@ def retag(data: bytes, packet: bytes) -> bytes:
         raise ValueError("the OpusTags packet continues past page 1")
     if any(segment != 255 for segment in segments[:-1]):
         raise ValueError("the OpusTags page contains another packet")
+    for _ in it:  # also check the audio tail before publishing any replacement
+        pass
     serial, seq = struct.unpack_from("<II", data, tags_at + 14)
     if seq != 1:
         raise ValueError("the OpusTags page is not page 1")
@@ -132,6 +146,8 @@ def load_dialogue(path):
         langs = [f[5:] for f in reader.fieldnames or [] if f.startswith("text_")]
         out = {}
         for row in reader:
+            if row["wave"] is None:
+                raise ValueError(f"{path}: line {reader.line_num} is missing wave")
             wave = row["wave"].lower()
             if wave in out:
                 previous = tags_packet(comments(wave, out[wave], langs))

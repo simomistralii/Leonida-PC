@@ -902,7 +902,7 @@ def _write_reports(a, rows, stats, agg):
         cols = ["source", "offset", "size", "signature", "version", "kind", "structs", "enums", "blocks",
                 "root_objects", "entities", "entity_size", "archetypes", "map_name", "map_name64", "parent",
                 "map_flags",
-                "contentFlags", "extent_min", "extent_max", "entities_min", "entities_max", "position_min",
+                "content_flags", "extent_min", "extent_max", "entities_min", "entities_max", "position_min",
                 "position_max", "lod", "lod_dist_min", "lod_dist_max"]
         os.makedirs(os.path.dirname(os.path.abspath(a.csv)), exist_ok=True)
         with open(a.csv, "w", newline="", encoding="utf-8") as f:

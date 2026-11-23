@@ -135,9 +135,29 @@ CONCURRENT_TRACE = (checker.SPARSE_FLAGS + ")\n"
                     "    sharingMode: VkSharingMode = VK_SHARING_MODE_CONCURRENT (1)\n"
                     "    queueFamilyIndexCount: uint32_t = 2\n"
                     "    pQueueFamilyIndices[0]: const uint32_t = 0\n"
-                    "    pQueueFamilyIndices[1]: const uint32_t = 1\n"
-                    # check_trace reads the 12 lines after each flags line; real records are longer than that.
-                    + "    pNext: const void* = NULL\n" * 12) * 6
+                    "    pQueueFamilyIndices[1]: const uint32_t = 1\n") * 6
+
+
+class TraceTest(unittest.TestCase):
+    def check(self, text):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "sparse.log"
+            path.write_text(text, encoding="utf-8", newline="\n")
+            return checker.check_trace(path, expect_exclusive=False)
+
+    def test_large_family_list_is_not_truncated(self):
+        record = (f"{checker.SPARSE_FLAGS})\nsharingMode: VkSharingMode = VK_SHARING_MODE_CONCURRENT\n"
+                  "queueFamilyIndexCount: uint32_t = 12\n")
+        record += "".join(f"pQueueFamilyIndices[{i}]: const uint32_t = {2*i}\n" for i in range(12))
+        self.assertEqual(self.check(record * 6), (3, 6))
+
+    def test_each_sparse_buffer_must_supply_its_own_complete_array(self):
+        for invalid in (CONCURRENT_TRACE.replace("Indices[1]", "Indices[0]", 1),
+                        CONCURRENT_TRACE.replace("Indices[1]", "Indices[2]", 1),
+                        CONCURRENT_TRACE.replace("    pQueueFamilyIndices[1]: const uint32_t = 1\n", "", 1),
+                        CONCURRENT_TRACE.replace("    pQueueFamilyIndices[1]", "vkOtherCall()\n    pQueueFamilyIndices[1]", 1)):
+            with self.subTest(trace=invalid[:300]), self.assertRaises(AssertionError):
+                self.check(invalid)
 
 
 class MainTest(unittest.TestCase):

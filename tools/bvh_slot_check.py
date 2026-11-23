@@ -5,6 +5,7 @@ and one or more primary-LOD levels model manifests with their exported OBJs.
 Use --save-evidence and --prior to combine private window scans without reopening earlier OBJs.
 Only BLAS with at least 30 paired primitives enter the topology screen.
 The candidate universe is the supplied exports. Stdout contains aggregate counts only.
+Usage: `python -I tools/bvh_slot_check.py --help` lists the options.
 """
 import argparse
 import hashlib

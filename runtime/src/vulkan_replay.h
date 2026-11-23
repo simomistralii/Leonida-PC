@@ -2922,8 +2922,11 @@ ReplayResult prepare(const CommandList& list, Resolve&& resolve, const ReplayFun
             for (const auto& d : atomic->dependencies) {
                 const ResourceBinding* dependent = resolve(d.resource);
                 if (!dependent) return ReplayResult::unresolved_resource;
-                if (!dependent->image && (d.subresource != 0 || d.begin > d.end || d.end > dependent->size))
-                    return ReplayResult::invalid_copy;
+                if (!dependent->image) {
+                    const std::uint64_t end = d.end == UINT64_MAX ? dependent->size : d.end;
+                    if (d.subresource != 0 || d.begin >= end || end > dependent->size)
+                        return ReplayResult::invalid_copy;
+                }
             }
             p.buffer_copies.push_back({p.source.buffer_offset + atomic->src_offset,
                                        p.binding.buffer_offset + atomic->dst_offset, atomic->bytes});

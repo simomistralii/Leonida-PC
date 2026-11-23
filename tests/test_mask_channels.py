@@ -7,11 +7,13 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 
 import mask_channels as mc  # noqa: E402
+import report_paths  # noqa: E402
 
 W = H = 16
 
@@ -114,12 +116,21 @@ class MaskChannelTests(unittest.TestCase):
             with open(path, "wb") as fh:
                 fh.write(original)
             aliases = {"same path": path, "other spelling": os.path.join(tmp, ".", "m.dds")}
+            case_alias = os.path.join(tmp, "M.dds")
+            if report_paths.same_report_path(path, case_alias):
+                aliases["case-only alias"] = case_alias
             link = os.path.join(tmp, "hard.json")
             try:
                 os.link(path, link)
                 aliases["hard link"] = link
             except OSError:
                 pass                                                    # file system without hard links
+            sym = os.path.join(tmp, "sym.json")
+            try:
+                os.symlink(path, sym)
+                aliases["symlink"] = sym
+            except (OSError, NotImplementedError):
+                pass                                                    # symlinks may require privileges on Windows
             for name, out in aliases.items():
                 with self.subTest(alias=name), redirect_stdout(io.StringIO()), \
                         self.assertRaises(SystemExit) as cm:
@@ -162,6 +173,24 @@ class MaskChannelTests(unittest.TestCase):
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(mc.main([path, "--json", out]), 0)
             self.assertTrue(os.path.isfile(out))
+
+    def test_uses_shared_same_report_path(self):
+        self.assertIs(mc.same_report_path, report_paths.same_report_path)
+        self.assertFalse(hasattr(mc, "same_file"))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "m.dds")
+            original = rgba8_dds(W, H, image())
+            with open(path, "wb") as fh:
+                fh.write(original)
+            out = os.path.join(tmp, "M.dds")
+            with mock.patch.object(mc, "same_report_path", return_value=True) as guard, \
+                    redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit) as cm:
+                mc.main([path, "--json", out])
+            self.assertEqual(cm.exception.code, 2)
+            guard.assert_called_once_with(path, out)
+            with open(path, "rb") as fh:
+                self.assertEqual(fh.read(), original)
 
 
 if __name__ == "__main__":
