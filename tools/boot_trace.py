@@ -33,6 +33,7 @@ import sys
 
 D3D12_LINE = re.compile(r"^(?:.+ : )?\[d3d12-trace\] #(\d+) (.+) (\S+)\s*$")
 D3D12_PROBLEMS = ("failed", "unsupported", "refused", "partial")
+D3D12_OUTCOMES = frozenset((*D3D12_PROBLEMS, "called", "ok", "ignored"))
 
 
 class TraceError(ValueError):
@@ -194,7 +195,9 @@ def parse_d3d12(path: str, limit: int = 10) -> dict:
     with _open_text(path) as fh:
         for line in fh:
             match = D3D12_LINE.match(line.rstrip("\n"))
-            if not match:
+            # A crash can truncate the final outcome. A known complete outcome is
+            # still usable when the trace ends just before the newline.
+            if not match or (not line.endswith("\n") and match.group(3) not in D3D12_OUTCOMES):
                 if line.strip():
                     trace["ignored_lines"] += 1
                 continue
@@ -221,6 +224,7 @@ def parse_d3d12(path: str, limit: int = 10) -> dict:
             f"{path} has no [d3d12-trace] line among {trace['ignored_lines']} line(s); "
             "is it the stderr log of a --trace-d3d12 run, with the Vulkan device enabled?"
         )
+    trace["last_call"] = {"seq": seq, "method": method, "outcome": outcome}
     return trace
 
 
@@ -340,6 +344,8 @@ def format_text(summary: dict, limit: int) -> str:
             " (the [rt] diagnostics are not summarized)"
             + (f": {outcomes}" if outcomes else "")
         )
+        if last_call := d3d12.get("last_call"):
+            out.append(f"  last recorded call: #{last_call['seq']} {last_call['method']} {last_call['outcome']}")
         if d3d12["sequence_break_count"]:
             out.append(f"  sequence breaks: {d3d12['sequence_break_count']}")
             for item in d3d12["sequence_breaks"][:limit]:

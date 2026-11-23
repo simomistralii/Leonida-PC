@@ -366,8 +366,8 @@ class BootTraceTests(unittest.TestCase):
         self.assertEqual(trace["first"][method], {"seq": 1, "outcome": "ok"})
         self.assertEqual(trace["outcomes"]["partial"], 2)
         text = bt.format_text(bt.summarize(None, trace), 1)
-        self.assertIn(f"  partial: #2 {method}", text)
-        self.assertNotIn(f"#3 {method}", text)
+        self.assertIn(f"  partial: #2 {method}", text.splitlines())
+        self.assertNotIn(f"  partial: #3 {method}", text.splitlines())
 
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
@@ -453,6 +453,49 @@ class BootTraceTests(unittest.TestCase):
         self.assertEqual(out.getvalue(), "")
         self.assertIn(self.startup, err.getvalue())
         self.assertIn(self.d3d12, err.getvalue())
+
+    def test_last_recorded_d3d12_call_can_repeat_an_earlier_method(self):
+        self.write_lines(self.d3d12, [
+            "[d3d12-trace] #1 CreateCommandAllocator ok",
+            "[d3d12-trace] #2 CreateCommittedResource failed",
+            "[d3d12-trace] #3 CreateCommandAllocator ok",
+            "[rt] a runtime diagnostic after the last call",
+            "[d3d12-trace] #4",
+        ])
+        trace = bt.parse_d3d12(self.d3d12, limit=1)
+        self.assertEqual(trace["ignored_lines"], 2)
+        self.assertEqual(trace["first"]["CreateCommandAllocator"], {"seq": 1, "outcome": "ok"})
+        self.assertEqual(trace["failed"], [{"seq": 2, "method": "CreateCommittedResource"}])
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(bt.main(["--d3d12", self.d3d12, "--limit", "1", "--json"]), 0)
+        parsed = json.loads(output.getvalue())["d3d12"]
+        self.assertEqual(parsed["last_seq"], 3)
+        self.assertEqual(parsed["last_call"], {"seq": 3, "method": "CreateCommandAllocator", "outcome": "ok"})
+        text = bt.format_text(bt.summarize(None, trace), 1)
+        self.assertIn("  last recorded call: #3 CreateCommandAllocator ok", text.splitlines())
+
+    def test_unterminated_d3d12_outcome_must_be_complete(self):
+        first = b"[d3d12-trace] #1 CreateCommandAllocator ok\n"
+        second = b"[d3d12-trace] #2 CreateCommittedResource "
+        for ending, seq, ignored, outcomes in (
+            (b"fai", 1, 1, {"ok": 1}),
+            (b"failed", 2, 0, {"ok": 1, "failed": 1}),
+            (b"ignored", 2, 0, {"ok": 1, "ignored": 1}),
+            (b"future-result\n", 2, 0, {"ok": 1, "future-result": 1}),
+        ):
+            with self.subTest(ending=ending):
+                with open(self.d3d12, "wb") as fh:
+                    fh.write(first + second + ending)
+                trace = bt.parse_d3d12(self.d3d12)
+                self.assertEqual(trace["last_call"]["seq"], seq)
+                self.assertEqual(trace["last_call"]["outcome"], next(reversed(outcomes)))
+                self.assertEqual(trace["last_seq"], seq)
+                self.assertEqual(trace["calls"], seq)
+                self.assertEqual(trace["outcomes"], outcomes)
+                self.assertEqual(trace["ignored_lines"], ignored)
+                self.assertEqual(trace["sequence_break_count"], 0)
 
     def test_d3d12_log_without_trace_lines_is_an_error(self):
         self.write_lines(self.d3d12, ["[rt] one", "[rt] two"])

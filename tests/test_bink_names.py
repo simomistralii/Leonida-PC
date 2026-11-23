@@ -483,6 +483,70 @@ class TestCli(unittest.TestCase):
             with open(xml_file, encoding="utf-8") as fh:
                 self.assertEqual(fh.read(), xml_text)
 
+    def _run_with_locked_folder(self, src_dir, locked, xml, out):
+        # Forcing os.scandir to raise for one folder gives the PermissionError os.walk hits for real, also on
+        # Windows where chmod cannot lock a folder.
+        real_scandir = os.scandir
+        target = os.path.normcase(os.path.abspath(locked))
+
+        def scandir(path, *args, **kwargs):
+            if os.path.normcase(os.path.abspath(os.fspath(path))) == target:
+                raise PermissionError(13, "Access is denied", os.fspath(path))
+            return real_scandir(path, *args, **kwargs)
+
+        err = io.StringIO()
+        with mock.patch.object(names_mod.os, "scandir", scandir):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                try:
+                    code = names_mod.main([src_dir, "--mount", xml, "--out", out])
+                except SystemExit as e:
+                    code = e.code
+        return code, err.getvalue()
+
+    def _locked_tree(self, tmp):
+        src_dir = os.path.join(tmp, "streams")
+        locked = os.path.join(src_dir, "locked")
+        os.makedirs(locked)
+        with open(os.path.join(src_dir, "one.bk2"), "wb") as fh:
+            fh.write(make_stream(1280, 720, 40))
+        xml = os.path.join(tmp, "list.xml")
+        with open(xml, "w", encoding="utf-8") as fh:
+            fh.write(mount_xml(["f/a.bk2"]))
+        return src_dir, locked, xml
+
+    def test_overwrite_check_refuses_an_out_inside_an_unlistable_sub_folder(self):
+        # os.walk skips a folder it cannot list unless onerror stops it, so the --out check used to pass over
+        # it and a report file inside it could be an input that gets overwritten.
+        with tempfile.TemporaryDirectory() as tmp:
+            src_dir, locked, xml = self._locked_tree(tmp)
+            out = os.path.join(locked, "names.csv")
+            with open(out, "w", encoding="utf-8") as fh:
+                fh.write("previous report\n")
+            code, err = self._run_with_locked_folder(src_dir, locked, xml, out)
+            self.assertEqual(code, 2, err)
+            self.assertIn("cannot list", err)
+            self.assertIn(locked, err)
+            self.assertNotIn("Traceback", err)
+            with open(out, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), "previous report\n")
+
+    def test_unlistable_sub_folder_gives_the_same_result_whether_or_not_the_report_exists(self):
+        # An --out outside the unlistable folder is not refused by the check, so the run does not depend on
+        # whether a report is already there: the scan stops on the folder with exit 1 both times and leaves an
+        # existing report alone. A pre-existing report used to turn this into the check's exit 2.
+        with tempfile.TemporaryDirectory() as tmp:
+            src_dir, locked, xml = self._locked_tree(tmp)
+            out = os.path.join(tmp, "names.csv")
+            code, err = self._run_with_locked_folder(src_dir, locked, xml, out)
+            self.assertEqual(code, 1, err)
+            with open(out, "w", encoding="utf-8") as fh:
+                fh.write("previous report\n")
+            code, err = self._run_with_locked_folder(src_dir, locked, xml, out)
+            self.assertEqual(code, 1, err)
+            self.assertNotIn("cannot be checked against the inputs", err)
+            with open(out, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), "previous report\n")
+
 
 class TestReportErrors(unittest.TestCase):
     """Bad bink_index.csv/.json sources fail with a one-line, path-specific error and no report."""

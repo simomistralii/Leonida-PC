@@ -427,12 +427,27 @@ def main(argv=None):
     if a.out and os.path.isdir(a.out):
         ap.error(f"--out is a folder, not a report file: {a.out}")
     if a.out:
+        def unlistable(error):
+            # os.walk skips a folder it cannot list unless onerror stops it. An --out inside that folder could then
+            # be an input this check never saw, so refuse it. Any other unlistable folder is left to the scan,
+            # which stops on it with exit 1 whether or not the report already exists.
+            locked = error.filename or folder
+            out_key = os.path.normcase(os.path.realpath(a.out))
+            locked_key = os.path.normcase(os.path.realpath(locked))
+            try:
+                inside = os.path.commonpath([out_key, locked_key]) == locked_key
+            except ValueError:  # different drives on Windows
+                inside = False
+            if inside:
+                ap.error(f"--out cannot be checked against the inputs: cannot list {locked}: "
+                         f"{error.strerror or error}")
+
         for folder in [p for p in [a.source, *a.mount] if os.path.isdir(p)]:
             manifest = os.path.join(folder, "index.json")
             if bink_index.same_output_path(a.out, manifest):
                 ap.error(f"--out is reserved for the carve manifest: {a.out}")
             if os.path.isfile(a.out):
-                for root, _dirs, names in os.walk(folder):
+                for root, _dirs, names in os.walk(folder, onerror=unlistable):
                     for name in names:
                         if name.lower().endswith((".json", ".csv")):
                             continue

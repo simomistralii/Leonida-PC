@@ -8,9 +8,6 @@
   <b>Leonida</b>
   <br>
 </h1>
-  <h3 align="center">
-    <i>Só mais 72h gigi!</i> 🚀
-  </h3>
 
 <h4 align="center">Grand Theft Auto VI (Xbox Series) running natively on Windows, built on your PC from your own copy.
 </h4>
@@ -37,7 +34,7 @@ happens **on your PC, from your own copy of the game**.
 > Everything the build creates (the generated shaders, extracted assets, the runtime folder and your saves) comes
 > from your game and stays on your PC. Never share those files.
 
-Discord: https://discord.gg/rexed
+Discord: https://discord.gg/mjgjRFcUWW
 
 Custom Git Mirror: https://git.notrexed.dev/notrexed/Leonida
 <br>

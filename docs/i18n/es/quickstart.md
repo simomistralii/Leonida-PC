@@ -3,7 +3,7 @@
 > [!NOTE]
 > La documentación en inglés ([`README.md`](../../../README.md), [`CONTRIBUTING.md`](../../../CONTRIBUTING.md) y
 > [`docs/README.md`](../../README.md)) es **la referencia oficial**. Esta guía solo recoge las instrucciones
-> estables de instalación y compilación (sincronizada con el commit `aa2988cc`). Para el estado del proyecto, que
+> estables de instalación y compilación (sincronizada con el commit `561b65a8`). Para el estado del proyecto, que
 > cambia a diario, consulte el [`README.md`](../../../README.md).
 
 ## Qué es Leonida
@@ -83,9 +83,8 @@ unidad.
 El runtime accede al paquete en su ubicación original. Si la unidad del paquete es de solo lectura, use
 `gta6rt --overlay <carpeta con permisos de escritura>`: `--overlay` es una opción de `gta6rt`.
 
-Conserve los archivos `.s` de `work/shaders/dxbc/disasm`: borrarlos junto con
-`work/shaders/spirv/index.json` puede hacer que la etapa de shaders parezca terminada con cero shaders. Si la
-etapa necesita vaciar `disasm`, rechazará esa carpeta cuando sea un enlace simbólico.
+Conserve los archivos `.s` de `work/shaders/dxbc/disasm`: la siguiente ejecución los compara con la lista de `disasm.done` y vuelve a desensamblar los que faltan (todos los de una carpeta cuyo `disasm.done` sea anterior a esa lista) y después traduce todos los shaders de nuevo. Borrarlos junto con `work/shaders/spirv/index.json` puede hacer que la etapa de shaders parezca terminada con cero shaders.
+Si la etapa necesita vaciar `disasm`, rechazará esa carpeta cuando sea un enlace simbólico.
 
 ### Desde un terminal (`make_game.py`)
 

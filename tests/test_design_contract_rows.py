@@ -59,6 +59,21 @@ class DesignTable(unittest.TestCase):
         self.assertEqual(repeated, {}, "docs/design.md has these rows more than once (first cell: lines); "
                                        "keep the newer text of each and delete the other")
 
+    def test_deduplicating_the_image_query_row_keeps_its_measurements(self):
+        """Removing the older resinfo/get-lod wording must not cut out the newer row's measured facts."""
+        with open(DESIGN, encoding="utf-8") as f:
+            row = next(line for line in f.read().splitlines()
+                       if line.startswith("| Image atomics, size and LOD queries |"))
+        for fact in ("GPU-checked (TEST-184)", "Measured natively on RDNA2", "raw LOD includes",
+                     "Unverified:", "on other dimensions is", "A host quirk", "OpImageQuerySizeLod",
+                     "OpImageQueryLevels", "Gen.resinfo_words"):
+            with self.subTest(fact=fact):
+                self.assertIn(fact, row)
+        self.assertEqual(row.count("(ISA: {num_mip_levels"), 1)  # one ISA parenthetical, not a splice
+        self.assertNotIn("depth (1) and the level count", row)  # the superseded wording
+        self.assertNotIn("still differs in the first three", row)  # contradicts Gen.resinfo_words
+        self.assertNotIn("`; the clamped LOD", row)             # join artifact from a mid-sentence cut
+
 
 if __name__ == "__main__":
     unittest.main()
