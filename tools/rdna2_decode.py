@@ -1326,7 +1326,10 @@ def _decode_one(code: bytes, pc: int, wave32: bool, mcpu: str) -> tuple[dict | N
             tname = f"param{tgt - 32}"
         else:
             tname = f"tgt{tgt}"
-        args = [{"k": "target", "t": tname}]
+        # llvm-mc text, and so shader_ir.parse_line, calls the null export target a special operand like every other 
+        # export target is a target; rdna2spirv reads both kinds at an export.
+        args = [{"k": "special", "t": tname, "neg": False, "abs": False} if tname == "null"
+                else {"k": "target", "t": tname}]
         if compr:
             # Compressed export: en bit 0/1 enables vsrc0 (printed twice), bit 2/3 enables vsrc1 (printed twice).
             for pair in (0, 1):
