@@ -315,7 +315,9 @@ class Emitter:
         elif kind == "sif":
             _, (cc, sr, k), on_one, then, other = n
             els, end = self.label(), self.label()
-            self.ins(f"s_cmp_{cc}_u32 s{sr}, {k}")
+            # CCS spells not-equal as the VALU does (v_cmp_ne_*); the SOPC opcode is s_cmp_lg_u32, and llvm-mc rejects
+            # s_cmp_ne_u32, so that one program was counted as "translator unsupported" instead of being run.
+            self.ins(f"s_cmp_{'lg' if cc == 'ne' else cc}_u32 s{sr}, {k}")
             self.br("s_cbranch_scc0" if on_one else "s_cbranch_scc1", els if other else end)
             self.nodes(then)
             if other:

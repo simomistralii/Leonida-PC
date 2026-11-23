@@ -1588,6 +1588,15 @@ class Gen:
         self.emit(f"OpStore %active {self.tmp_bool_nz(mask_u)}")
         self.uses_active = True
 
+    def exec_half_bit(self, val):
+        """This lane's bit of a 32-bit EXEC-half value, as a uint 0 or 1: (val >> (lane & 31)) & 1. Shift and mask,
+        not OpBitFieldUExtract (see exec_half_write for the Intel driver that takes that offset mod 16)."""
+        sh, shr, bit = self.tmp(), self.tmp(), self.tmp()
+        self.emit(f"{sh} = OpBitwiseAnd %uint {self.wave_lane()} {self.cu(31)}")
+        self.emit(f"{shr} = OpShiftRightLogical %uint {val} {sh}")
+        self.emit(f"{bit} = OpBitwiseAnd %uint {shr} {self.cu(1)}")
+        return bit
+
     def vcc_half_keeps_mask(self):
         """Whether the current wave64 vcc_lo / vcc_hi write keeps VCC as a lane mask (put_mask on that half) rather
         than replacing it with plain scalar data (s_buffer_load_dword vcc_lo, scalar ALU, non-mask constant, ...)."""
@@ -1609,10 +1618,18 @@ class Gen:
             val = self.sdwa_dst(a, val)
         if a["k"] == "special" and a["t"] == "null":
             return                                    # result discarded
-        if self.wave64 and a["k"] == "special" and a["t"] in ("exec_lo", "exec_hi"):
-            self.exec_half_write(1 if a["t"] == "exec_hi" else 0, val)
+        if a["k"] == "special" and a["t"] in ("exec_lo", "exec_hi") and (self.wave64 or a["t"] == "exec_lo"):
+            # SHADER-1264: a 32-bit result written to an EXEC half turns on the lanes whose bit is set. `val` is
+            # either a scalar number (the same in every invocation: s_lshl_b32 exec_lo, 1, s5) or a lane mask
+            # (0 or ~0 per invocation), and lane L taking bit L mod 32 is exact for both. Testing the value for
+            # non-zero turned on the whole half for any number but 0. GPU-checked: cs_w32/w64_exec_computed.asm.
+            bit = self.exec_half_bit(val)
+            if self.wave64:
+                self.exec_half_write(1 if a["t"] == "exec_hi" else 0, bit)
+            else:
+                self.set_exec(bit)
             return
-        if a["k"] == "special" and a["t"] in ("exec_lo", "exec"):
+        if a["k"] == "special" and a["t"] == "exec":
             self.set_exec(val)
             return
         if a["k"] == "vgpr" and a.get("n", 1) == 1:

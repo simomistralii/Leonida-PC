@@ -229,6 +229,13 @@ Current limits, by design:
   `scripts/build_runtime.ps1` cl.exe fallback never builds it. See [docs/gameinput.md](../docs/gameinput.md) for the mapping, the `LEONIDA_DS_*` settings and what is
   unverified.
 
+### Random numbers from `bcrypt.dll`
+
+The `bcrypt` shim (`shims/bcrypt_rng.cpp`) answers `BCryptGenRandom` from the host's `bcrypt.dll`, with
+`SystemFunction036` as a fallback. Set `LEONIDA_RNG_SEED` to a 64-bit number (decimal, or hex with `0x`) to make it
+answer from a seeded deterministic generator instead, so a run can be repeated; the shim logs the seed once on
+stderr. Text that is not a whole number leaves the host generator in use.
+
 ### What `xgameruntime.dll` reports: environment overrides
 
 The `xgameruntime` shim (`shims/xgameruntime.cpp`) answers the title's questions about the console and its package

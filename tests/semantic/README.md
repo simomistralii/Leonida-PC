@@ -2,9 +2,11 @@
 
 Standard library only; no GPU, no LLVM, no SPIRV-Tools, no game files.
 
-    python -I scripts/run_semantic_tests.py tests/semantic        # one file per core: 26 s instead of 253 s on 16 cores
-    python -m unittest discover -s tests/semantic -v             # the same tests, one file after another
-    python -I scripts/run_semantic_tests.py tests/semantic -j 4 -p 'test_image_*.py'  # a matching subset
+```sh
+python -I scripts/run_semantic_tests.py tests/semantic        # one file per core: 26 s instead of 253 s on 16 cores
+python -m unittest discover -s tests/semantic -v             # the same tests, one file after another
+python -I scripts/run_semantic_tests.py tests/semantic -j 4 -p 'test_image_*.py'  # a matching subset
+```
 
 `-p PATTERN` / `--pattern PATTERN` selects Python test filenames, including those inside packages. It uses the
 same filename glob syntax as `unittest discover -p`; the default is `test*.py`. Quote the pattern to keep the shell

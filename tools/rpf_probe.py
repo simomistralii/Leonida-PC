@@ -32,7 +32,9 @@ def entropy(b: bytes) -> float:
 
 def _write_json_report(path: str, rows: list) -> None:
     """Publish complete JSON, or leave the previous report intact on replace failure."""
-    destination = os.path.abspath(path)
+    # realpath: a symlinked --out is updated at its target and stays a link (44d3595); staging and replacing the
+    # link itself would turn it into a plain file.
+    destination = os.path.realpath(path)
     out_dir = os.path.dirname(destination) or "."
     os.makedirs(out_dir, exist_ok=True)
     try:

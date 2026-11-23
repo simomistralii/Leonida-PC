@@ -35,6 +35,7 @@ PS1_COMMAND = re.compile(
     re.IGNORECASE
 )
 PS1_FLAG = re.compile(r"(?<![\w-])(-[a-zA-Z][\w-]*)")
+SUBSTITUTION = re.compile(r"\$\([^()]*\)")
 
 
 def tracked_files():
@@ -182,7 +183,14 @@ def tool_flag_mismatches(pages, sources):
             source = sources.get(tool, "")
             if '"--" +' in source or "'--' +" in source:
                 continue
-            for flag in sorted(set(FLAG.findall(cmd))):
+            # A $(...) substitution runs another program (`$(brew --prefix llvm)`): its flags are not this tool's.
+            own = cmd
+            while True:
+                stripped = SUBSTITUTION.sub("", own)
+                if stripped == own:
+                    break
+                own = stripped
+            for flag in sorted(set(FLAG.findall(own))):
                 if flag not in FOREIGN and flag not in source:
                     out.append((f"{page}:{n}", tool, flag))
     return out

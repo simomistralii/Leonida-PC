@@ -35,6 +35,24 @@ NAMES = [
 # test of nothing.
 EXPECTED = ("anim_index", "audio_config", "awc_names", "hashdict", "mission_tables", "world_names")
 
+# Copies that mirror the C++ runtime rather than the asset pipeline: they must hash a name as the runtime file
+# named here does, because that is what reads their output. runtime/src/mods.h folds only ASCII A-Z over the
+# name's bytes (UTF-8 from mod.json), so for a non-ASCII name it differs from hashdict's latin-1 lower().
+RUNTIME_MIRRORS = {"leonida_mods": "runtime/src/mods.h"}
+MODS_H_FOLD = "c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c"
+
+
+def mods_h_joaat(name):
+    """runtime/src/mods.h's joaat, transcribed: Jenkins one-at-a-time over the UTF-8 bytes, ASCII-only fold."""
+    h = 0
+    for byte in name.encode("utf-8"):
+        h = (h + (byte + 0x20 if 0x41 <= byte <= 0x5A else byte)) & 0xFFFFFFFF
+        h = (h + (h << 10)) & 0xFFFFFFFF
+        h ^= h >> 6
+    h = (h + (h << 3)) & 0xFFFFFFFF
+    h ^= h >> 11
+    return (h + (h << 15)) & 0xFFFFFFFF
+
 
 def string_hash_copies():
     """{module name: function} for every ``def joaat(``/``def joaat32(`` that takes a string.
@@ -62,10 +80,28 @@ class JoaatAgreementTest(unittest.TestCase):
         for module in EXPECTED:
             self.assertIn(module, copies)
         for module, function in sorted(copies.items()):
+            if module in RUNTIME_MIRRORS:
+                continue  # test_runtime_mirrors_hash_as_the_runtime_does
             for name in NAMES:
                 with self.subTest(copy=module, name=name):
                     self.assertEqual(function(name), hashdict.joaat(name),
                                      f"{module} hashes {name!r} differently from hashdict.joaat")
+
+    def test_runtime_mirrors_hash_as_the_runtime_does(self):
+        copies = string_hash_copies()
+        for module, header in sorted(RUNTIME_MIRRORS.items()):
+            self.assertIn(module, copies)
+            with open(os.path.join(ROOT, header), encoding="utf-8") as handle:
+                self.assertIn(MODS_H_FOLD, handle.read(), f"{header} changed its case fold; update mods_h_joaat")
+            # The two model ids mods.h documents.
+            self.assertEqual(copies[module]("player_story000_00"), 0xE472B687)
+            self.assertEqual(copies[module]("cs_mandy"), 0xD7C0CDFF)
+            for name in NAMES:
+                with self.subTest(copy=module, name=name):
+                    self.assertEqual(copies[module](name), mods_h_joaat(name),
+                                     f"{module} hashes {name!r} differently from {header}")
+                    if name.isascii():
+                        self.assertEqual(copies[module](name), hashdict.joaat(name))
 
     def test_a_stream_id_is_the_name_hash_of_the_same_name(self):
         # The consequence of the bug: audio_config's id and the id awc_names recovers from a bank were

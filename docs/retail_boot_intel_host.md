@@ -1,7 +1,7 @@
 # The retail boot on an Intel host: which stops hold, and what stops it there
 
 **Status: measured on one machine, 2026-11-23. A measurement for RT-5, not a claim on any code item; claimed as a docs item on the coordination issue.** It continues
-[retail_boot_chain.md](retail_boot_chain.md) (stops 1-13) and `docs/retail_boot_frame_loop.md` of #8554
+[retail_boot_chain.md](retail_boot_chain.md) (stops 1-13) and the frame-loop page of #8554
 (stops 13-28, not merged yet) on a host those pages do not cover: an Intel CPU, which needs #7111 for the four Zen 2 instructions
 the executable uses, and 16 GB of RAM. Nothing here quotes the executable: no addresses, offsets or bytes; only slot
 numbers, call shapes, counts and the runtime's own log classes.

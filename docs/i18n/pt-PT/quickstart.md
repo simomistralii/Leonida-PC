@@ -41,10 +41,7 @@ Ainda não é possível jogar o jogo em nenhuma plataforma; consulte a secção 
 - [ffmpeg](https://ffmpeg.org/download.html) no `PATH` *(opcional: descodifica streams XMA2; obrigatório com
   `--wav`)*.
 
-**Este PC chega?** `python -I tools/pc_checker.py --cli` deteta CPU, GPU e RAM e compara-os com os perfis de
-referência antes de uma compilação longa. `--profile 1` (predefinição) equivale a um PC Xbox Series X e
-`--profile 2` é uma estimativa da comunidade para 1080p Low. `python -I tools/pc_checker.py --check --json`
-imprime o mesmo resultado em JSON e devolve-o como código de saída (0 bom, 1 fraco, 2 desconhecido).
+**Este PC chega?** O [Can I Run Leonida](https://assttro.github.io/can-i-run-leonida/) é um verificador leve no navegador que compara o seu PC com perfis de referência. É uma estimativa aproximada, não um benchmark.
 
 **Pouco espaço em disco:** os ~400 GB são para a compilação completa. Para *executar* o port,
 `--stages check,shaders,runtime` precisa de cerca de 30 GB; a etapa `assets` (~370 GB) serve apenas para as
