@@ -30,7 +30,7 @@ IMAGE_SCN_MEM_EXECUTE = 0x20000000
 def joaat(name):
     """RAGE's joaat: Jenkins one-at-a-time over the lower-cased name (joaat('cs_mandy') == 0xD7C0CDFF)."""
     h = 0
-    for c in name.lower().encode("utf-8"):
+    for c in name.lower().encode("latin-1", "replace"):
         h = (h + c) & 0xFFFFFFFF
         h = (h + (h << 10)) & 0xFFFFFFFF
         h ^= h >> 6
