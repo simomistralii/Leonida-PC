@@ -69,12 +69,10 @@ class F64OutputModifiersTest(unittest.TestCase):
         else:
             self.assertNotIn("FClamp", spv)
         pair = result(rf"OpBitcast %v2uint_d {value}")
-        for index, register in ((0, "%c4"), (1, "%c5")):
+        for index in (0, 1):
             word = result(rf"OpCompositeExtract %uint {pair} {index}")
-            dest = result(rf"OpAccessChain %_ptr_Function_uint %vgpr {register}")
-            old_word = result(rf"OpLoad %uint {dest}")
-            masked_word = result(rf"OpSelect %uint %\w+ {word} {old_word}")
-            self.assertRegex(spv, rf"(?m)^ *OpStore {dest} {masked_word}$")
+            # VGPRs are function variables and a never-written EXEC is statically true: a plain store.
+            self.assertRegex(spv, rf"(?m)^ *OpStore %reg_v{4 + index} {word}$")
         # Every f64 add and scale keeps its own rounding (no_contraction decorates all float arithmetic).
         for op in re.findall(r"(?m)^ *(%\w+) = Op(?:FAdd|FMul) %double ", spv):
             self.assertRegex(spv, rf"(?m)^ *OpDecorate {op} NoContraction$")
