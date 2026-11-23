@@ -410,7 +410,7 @@ test('Shift speeds the camera up and Ctrl slows it down, on either side of the k
         },
         document: { body: { prepend() {} }, getElementById: () => ({}), addEventListener() {} },
         addEventListener: (type, handler) => handlers.set(type, handler),
-        devicePixelRatio: 1, innerWidth: 800, innerHeight: 600, URLSearchParams, location: { search: '' },
+        devicePixelRatio: 1, innerWidth: 800, innerHeight: 600, URLSearchParams, AbortController, setTimeout, clearTimeout, location: { search: '' },
         performance: { now: () => 0 },
         fetch: manifestResponse({ spawn: [0, 0, 0], chunks: [] }), GLTFLoader: class {},
     });
