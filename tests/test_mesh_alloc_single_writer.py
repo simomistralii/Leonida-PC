@@ -8,7 +8,12 @@ import spirv_asm
 
 class MeshAllocSingleWriterTests(unittest.TestCase):
     def test_ms_alloc_req_single_writer_guard(self):
-        """SHADER-766: s_sendmsg(MSG_GS_ALLOC_REQ) restricts OpStore %ms_counts to local_index == 0."""
+        """s_sendmsg(MSG_GS_ALLOC_REQ) writes %ms_counts race-free from whichever wave sends it.
+
+        SHADER-766 made the write race-free by letting only local_index 0 store it, but a shader may send ALLOC_REQ
+        from another wave only (runtime/test/shaders/ms_wave_info_s3.asm), and then the counts stayed 0 and nothing
+        was drawn (#6172). Every invocation that sends the message now stores the uniform m0 with a relaxed
+        Workgroup-scope OpAtomicStore: atomics do not race, and nothing ties the write to invocation 0."""
         for mesh_compute in (False, True):
             orig_mc = rdna2spirv.MESH_COMPUTE
             try:
@@ -24,21 +29,15 @@ class MeshAllocSingleWriterTests(unittest.TestCase):
                 gen._insn(ins)
 
                 body_text = "\n".join(gen.body)
-                # 1. OpStore %ms_counts must be present
-                self.assertIn("OpStore %ms_counts", body_text)
-
-                # 2. Must load %local_index and compare to 0
-                self.assertIn("= OpLoad %uint %local_index", body_text)
-                self.assertRegex(body_text, r"%(\w+) = OpIEqual %bool %(\w+) %c0")
-
-                # 3. Must have structured selection merge and conditional branch
-                self.assertRegex(body_text, r"OpSelectionMerge %(\w+) None\s+OpBranchConditional %(\w+) %(\w+) %(\w+)")
-
-                # 4. OpStore %ms_counts must only appear inside the conditional block
-                lines = [l.strip() for l in gen.body if l.strip()]
-                store_idx = next(i for i, l in enumerate(lines) if "OpStore %ms_counts" in l)
-                branch_cond_idx = next(i for i, l in enumerate(lines) if "OpBranchConditional" in l)
-                self.assertGreater(store_idx, branch_cond_idx)
+                # 1. The counts are written with an atomic store of m0, Workgroup scope (2), Relaxed (0).
+                self.assertIn("= OpLoad %uint %m0", body_text)
+                self.assertRegex(body_text, r"OpAtomicStore %ms_counts %c2 %c0 %\w+")
+                # 2. No plain store: two waves storing at once would be SharedMemoryDataRace-RaceOnStore.
+                self.assertNotIn("OpStore %ms_counts", body_text)
+                # 3. Not tied to one invocation or one wave.
+                self.assertNotIn("%local_index", body_text)
+                self.assertNotIn("OpBranchConditional", body_text)
+                self.assertTrue(gen.ms_alloc)
 
                 # 5. Verify assembly into a complete module passes spirv_asm
                 # Build mock header
@@ -53,6 +52,7 @@ class MeshAllocSingleWriterTests(unittest.TestCase):
                     "%bool = OpTypeBool",
                     "%uint = OpTypeInt 32 0",
                     "%c0 = OpConstant %uint 0",
+                    "%c2 = OpConstant %uint 2",
                     "%_ptr_Input_uint = OpTypePointer Input %uint",
                     "%_ptr_Workgroup_uint = OpTypePointer Workgroup %uint",
                     "%_ptr_Function_uint = OpTypePointer Function %uint",

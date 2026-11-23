@@ -7402,20 +7402,15 @@ class Gen:
                 raise Unsupported("gs sendmsg " + t)
             return
         if op == "s_sendmsg" and a and "MSG_GS_ALLOC_REQ" in a[0].get("t", "") and self.stage == "ms":
-            # SHADER-766: only invocation 0 stores the workgroup counts to avoid SharedMemoryDataRace-RaceOnStore.
-            # The counts are uniform (from SGPR m0), and all invocations synchronize at the post-alloc barrier.
+            # Every invocation that sends the message stores the workgroup counts, with a relaxed atomic store:
+            # the counts are uniform (SGPR m0), atomics do not race (SHADER-766's SharedMemoryDataRace-RaceOnStore),
+            # and the post-alloc barrier makes the value visible to the epilogue's load. SHADER-766 let only
+            # invocation 0 store them, but a shader may send ALLOC_REQ from another wave only
+            # (ms_wave_info_s3.asm: wave 1 sends it, wave 0 skips it), and then the counts stayed 0 and
+            # SetMeshOutputsEXT drew nothing (llvmpipe every time; RADV and AMD's driver now and then, #6172).
             m = self.tmp()
             self.emit(f"{m} = OpLoad %uint %m0")
-            li = self.local_index()
-            is_lead = self.tmp()
-            self.emit(f"{is_lead} = OpIEqual %bool {li} {self.cu(0)}")
-            do_lbl, end_lbl = self.tmp() + "_alloc_do", self.tmp() + "_alloc_end"
-            self.emit(f"OpSelectionMerge {end_lbl} None")
-            self.emit(f"OpBranchConditional {is_lead} {do_lbl} {end_lbl}")
-            self.emit(f"{do_lbl} = OpLabel")
-            self.emit(f"OpStore %ms_counts {m}")
-            self.emit(f"OpBranch {end_lbl}")
-            self.emit(f"{end_lbl} = OpLabel")
+            self.emit(f"OpAtomicStore %ms_counts {self.cu(2)} {self.cu(0)} {m}")   # Workgroup scope, Relaxed
             self.ms_alloc = True
             return
         if op == "s_sendmsg" and a and "MSG_ORDERED_PS_DONE" in a[0].get("t", ""):
