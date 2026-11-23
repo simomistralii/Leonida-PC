@@ -259,18 +259,21 @@ class RuntimePackagingTest(unittest.TestCase):
         self.assertIn(image, missing.stderr)
         with open(os.path.join(self.game, image), "wb"):
             pass
+        # The launcher resolves its own folder (readlink -f) and the child reports its working directory, so both
+        # are physical paths: on macOS a temp folder under /var shows up as /private/var.
+        real_root, real_game, real_out = (os.path.realpath(p) for p in (self.root, self.game, self.out))
         for mode in ("--dry-run", "--init"):
             with self.subTest(mode=mode):
                 result = subprocess.check_output([launcher, mode], cwd=self.root, env=env)
                 self.assertEqual(json.loads(result), [
-                    self.game, [mode, "./" + image, "--overlay", "Z:" + self.out + "/overlay"],
+                    real_game, [mode, "./" + image, "--overlay", "Z:" + real_out + "/overlay"],
                     None, "vulkan",
                 ])
         env.update(LEONIDA_SHADERS="D:/custom", LEONIDA_D3D12="trace")
         result = subprocess.check_output([launcher, "--run"], cwd=self.root, env=env)
         self.assertEqual(json.loads(result)[2:], ["D:/custom", "trace"])
         result = subprocess.check_output([launcher, "--run", "other.exe", "--", "two words"], cwd=self.root, env=env)
-        self.assertEqual(json.loads(result)[:2], [self.root, ["--run", "other.exe", "--", "two words"]])
+        self.assertEqual(json.loads(result)[:2], [real_root, ["--run", "other.exe", "--", "two words"]])
 
         work = os.path.join(self.out, "Shader cache '$HOME'")
         make_game.runtime(self.game, self.out, {"expected_exe": image}, self.build, work=work)
@@ -278,7 +281,7 @@ class RuntimePackagingTest(unittest.TestCase):
         os.rename(self.out, moved)
         env.pop("LEONIDA_SHADERS")
         result = subprocess.check_output([os.path.join(moved, "gta6rt.sh"), "--dry-run"], cwd=self.root, env=env)
-        self.assertEqual(json.loads(result)[2], "Z:" + moved + "/Shader cache '$HOME'/shaders/spirv")
+        self.assertEqual(json.loads(result)[2], "Z:" + os.path.realpath(moved) + "/Shader cache '$HOME'/shaders/spirv")
 
     def test_runtime_records_shader_work_directory(self):
         self.write_artifact("gta6rt_tls_host.dll", b"TLS host")

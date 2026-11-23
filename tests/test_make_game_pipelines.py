@@ -17,6 +17,10 @@ import make_game  # noqa: E402
 
 class PipelinesJobsTest(unittest.TestCase):
     def setUp(self):
+        # --jobs is clamped to the machine's CPU count; pin the bounds so these forwarding checks do not depend on it.
+        bounds = mock.patch.object(make_game.leonida_tui, "cpu_jobs_bounds", return_value=(1, 8, 64))
+        bounds.start()
+        self.addCleanup(bounds.stop)
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = tmp.name

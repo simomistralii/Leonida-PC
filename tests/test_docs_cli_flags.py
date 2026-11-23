@@ -251,6 +251,12 @@ class DocsCliFlags(unittest.TestCase):
     def test_fenced_commands_use_the_flags_of_their_tool(self):
         files = tracked_files()
         sources = {p: read(p) for p in files if p.endswith(".py") and (p.startswith(("tools/", "scripts/")) or p == "make_game.py")}
+        # A launcher such as scripts/dev.py hands its arguments to the tools it names by path (BOOT_TRACE = "tools/..."),
+        # so the flags it accepts are those of the scripts it delegates to.
+        launcher = "scripts/dev.py"
+        for target in set(re.findall(r'"((?:tools|scripts)/[\w./-]+\.py)"', sources.get(launcher, ""))):
+            if target != launcher and target in sources:
+                sources[launcher] += "\n" + sources[target]
         pages = {p: read(p) for p in files if p.endswith(".md") and p not in OTHER_PROJECTS}
         bad = tool_flag_mismatches(pages, sources)
         self.assertEqual(bad, [], "fenced commands using a flag their script lacks: " +

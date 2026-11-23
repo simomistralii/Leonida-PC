@@ -47,6 +47,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 import bink_index  # noqa: E402
+from report_paths import os_error_text  # noqa: E402
 import gamedata_index  # noqa: E402
 import gamedata_xml  # noqa: E402
 
@@ -391,12 +392,12 @@ def main(argv=None):
     try:
         names = read_mount_lists(a.mount)
     except (OSError, ValueError) as error:
-        print(f"bink_names: error: {error}", file=sys.stderr)
+        print(f"bink_names: error: {os_error_text(error)}", file=sys.stderr)
         return 1
     try:
         streams = load_streams(a.source, skip_report=a.out if a.out and os.path.isfile(a.out) else None)
     except (OSError, csv.Error, ValueError) as error:
-        print(f"bink_names: error: {a.source}: {error}", file=sys.stderr)
+        print(f"bink_names: error: {a.source}: {os_error_text(error)}", file=sys.stderr)
         return 1
     try:
         pins = load_pins(a.pins)

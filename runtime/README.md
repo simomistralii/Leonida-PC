@@ -462,6 +462,8 @@ dimension outside the enum must be refused alike. It also copies a pattern throu
 ```powershell
 $env:LEONIDA_VK_VALIDATION = '1'
 .\runtime\build\RelWithDebInfo\d3d12_placed_dimensions_test.exe
+```
+
 ### 1D render targets and depth buffers
 
 `d3d12_texture1d_target_test` creates `TEXTURE1D` textures with `ALLOW_RENDER_TARGET` (10 color formats) or

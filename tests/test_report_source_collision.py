@@ -20,7 +20,14 @@ SENTINEL = b"SYNTHETIC-SOURCE-DO-NOT-OVERWRITE\n" * 4
 
 
 def make_bink():
-    return SENTINEL
+    # bink_index refuses a named file that is not a Bink 2 stream, so the stand-in is a minimal valid one (revision "b",
+    # one frame, 320x240, no audio) whose frame payload is the sentinel.
+    body = SENTINEL
+    total = 0x2C + 4 + len(body)
+    header = bytearray(0x2C)
+    header[0:4] = b"KB2b"
+    struct.pack_into("<10I", header, 4, total - 8, 1, len(body), 1, 320, 240, 30, 1, 0, 0)
+    return bytes(header) + bytes(4) + body
 
 
 def make_rpf(payload, head_size=0x40):

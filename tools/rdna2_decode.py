@@ -985,6 +985,9 @@ def _decode_one(code: bytes, pc: int, wave32: bool, mcpu: str) -> tuple[dict | N
             bits = [(op_sel >> i) & 1 for i in range(nsrc)]
             if nbits > nsrc:
                 bits.append((op_sel >> 3) & 1)
+            if name in ("v_permlane16_b32", "v_permlanex16_b32") and not op_sel & 0xC:
+                # These two print only op_sel:[FI, BOUND_CTRL], as llvm-mc does (SHADER-74).
+                bits = bits[:2]
             mods.append(f"op_sel:[{','.join(str(b) for b in bits)}]")
         if clamp:
             mods.append("clamp")
@@ -1323,7 +1326,10 @@ def _decode_one(code: bytes, pc: int, wave32: bool, mcpu: str) -> tuple[dict | N
             tname = f"param{tgt - 32}"
         else:
             tname = f"tgt{tgt}"
-        args = [{"k": "target", "t": tname}]
+        # llvm-mc text, and so shader_ir.parse_line, calls the null export target a special operand like every other 
+        # export target is a target; rdna2spirv reads both kinds at an export.
+        args = [{"k": "special", "t": tname, "neg": False, "abs": False} if tname == "null"
+                else {"k": "target", "t": tname}]
         if compr:
             # Compressed export: en bit 0/1 enables vsrc0 (printed twice), bit 2/3 enables vsrc1 (printed twice).
             for pair in (0, 1):

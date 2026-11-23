@@ -296,6 +296,12 @@ class StageValidationAndSequencingTest(unittest.TestCase):
 class JobsHandlingTest(unittest.TestCase):
     """Test --jobs default computation, command-line overrides, and forwarding."""
 
+    def setUp(self):
+        # --jobs is clamped to the machine's CPU count; pin the bounds so these forwarding checks do not depend on it.
+        bounds = patch.object(make_game.leonida_tui, "cpu_jobs_bounds", return_value=(1, 8, 64))
+        bounds.start()
+        self.addCleanup(bounds.stop)
+
     def test_jobs_default_calculation_scenarios(self):
         scenarios = [
             (None, 1),

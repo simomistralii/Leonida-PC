@@ -40,6 +40,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from awc_opus import ogg_crc, ogg_page, write_file  # noqa: E402
+from report_paths import os_error_text  # noqa: E402
 
 VENDOR = b"leonida "
 MARKUP = re.compile(r"~[^~]*~")
@@ -259,7 +260,7 @@ def main(argv=None) -> int:
     try:
         stats = tag_folder(a.opus, names, dialogue, langs, a.dry_run, ambiguous)
     except OSError as e:
-        print(f"opus_tags: error: {e}", file=sys.stderr)
+        print(f"opus_tags: error: {os_error_text(e)}", file=sys.stderr)
         return 2
     for k, v in stats.items():
         print(f"{k:32} {v:,}")

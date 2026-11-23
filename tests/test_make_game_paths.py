@@ -39,13 +39,15 @@ class BuildDestinationTest(unittest.TestCase):
             os.symlink(target, path, target_is_directory=True)
             self.addCleanup(os.unlink, path)
 
-    def run_build(self, game, out, work, rejected):
+    def run_build(self, game, out, work, rejected, entries=("Content",)):
         argv = ["make_game.py", "--game", game, "--out", out, "--work", work,
                 "--stages", "runtime", "--no-tui"]
         with ExitStack() as stack:
             stack.enter_context(patch.object(sys, "argv", argv))
             stack.enter_context(patch("make_game.below_normal"))
-            stack.enter_context(patch("make_game.check", return_value={}))
+            # At a drive root the top-level names come from the version manifest, not from os.listdir.
+            manifest = {"expected_exe": "Content/game.exe", "files": [f"{name}/data.bin" for name in entries]}
+            stack.enter_context(patch("make_game.check", return_value=manifest))
             stack.enter_context(patch("make_game.log"))
             preflight = stack.enter_context(patch("make_game.preflight"))
             build_runtime = stack.enter_context(patch("make_game.runtime"))
@@ -125,9 +127,9 @@ class BuildDestinationTest(unittest.TestCase):
                     with self.subTest(protected=protected, option=option):
                         destinations = {name: os.path.join(self.root, name) for name in ("out", "work")}
                         destinations[option] = os.path.join(protected, "build")
-                        self.run_build(root, **destinations, rejected=True)
+                        self.run_build(root, **destinations, rejected=True, entries=entries)
                 self.run_build(root, os.path.join(other_root, "Build"),
-                               os.path.join(other_root, "Scratch"), rejected=False)
+                               os.path.join(other_root, "Scratch"), rejected=False, entries=entries)
 
 
 if __name__ == "__main__":

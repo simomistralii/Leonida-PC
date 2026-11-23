@@ -150,7 +150,7 @@ def match_exports(queries, manifests, stats):
         stats["manifest_items"] += len(items)
         for item in items:
             models = defaultdict(list)
-            for mesh, model, _, _, _ in M.model_geometries(item):
+            for mesh, model, *_ in M.model_geometries(item):
                 models[model].append(mesh)
             groups = None
             buffers = {}
@@ -338,4 +338,8 @@ def main():
 
 
 if __name__ == "__main__":
+    try:  # a redirected stdout is strict ANSI code page under -I; write '?' for what it cannot encode
+        sys.stdout.reconfigure(errors="replace")
+    except (AttributeError, ValueError, OSError):
+        pass
     main()

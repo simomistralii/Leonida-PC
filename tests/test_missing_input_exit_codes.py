@@ -33,6 +33,11 @@ MISSING_INPUT_TOOLS = (
     "root_spill_census",
 )
 
+# Tools that import numpy at the top (tile_probe.py: "needs numpy", as tests/test_tile_probe.py skips without it).
+# The Windows check job has no numpy; stdlib-tests-linux has it, so the exit-2 check runs there. A tool is only
+# skipped when its own run died on the missing module; with numpy present, or any other failure, it is checked.
+NUMPY_TOOLS = ("tile_probe",)
+
 # One process per tool; a hung import is a failure, not an infinite test.
 TIMEOUT = 120
 
@@ -49,6 +54,8 @@ class MissingInputExitCodeTests(unittest.TestCase):
         for tool in MISSING_INPUT_TOOLS:
             with self.subTest(tool=tool):
                 p = run_tool(tool, missing)
+                if tool in NUMPY_TOOLS and "No module named 'numpy'" in p.stderr:
+                    self.skipTest("numpy is not installed")
                 self.assertEqual(p.returncode, 2, p.stderr)
                 self.assertNotIn("Traceback", p.stderr)
                 lines = p.stderr.strip().splitlines()
