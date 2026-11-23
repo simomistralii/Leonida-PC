@@ -269,6 +269,7 @@ class ArchiveTest(unittest.TestCase):
                 self.assertNotIn("Traceback", cp.stderr)
                 self.assertEqual(cp.stdout, "")
 
+    @unittest.skipIf(getattr(os, "geteuid", lambda: 1)() == 0, "root writes a read-only file, so nothing is refused")
     def test_cli_refuses_an_unwritable_out_before_the_archives_are_read(self):
         # Both archives are read before the summary is written, so a --out that cannot be written used to cost
         # the whole run and then end in a traceback.

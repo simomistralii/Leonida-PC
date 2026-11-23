@@ -6,7 +6,7 @@ post counts and pass/fail lines there, never game shaders, logs or private paths
 
 | GPU | Driver, OS | Commit | build.py | check.py | run_gpu_tests.py | Failed | Entry |
 |---|---|---|---|---|---|---|---|
-| AMD Radeon RX 9070 GRE (RDNA4, GFX1201), subgroup 32..64 | RADV, Mesa 26.3.1-arch3.5, Vulkan 1.4.363, CachyOS | `05961f0` | 264/264 translated and valid | 203/206 pass, 3 skipped | 218/235 passed, 16 skipped (native and emulated) | `ms_wave_info_s3`, flaky (see below) | [local note](gpu-test-results/RX9070GRE.txt) |
+| AMD Radeon RX 9070 GRE (RDNA4, GFX1201), subgroup 32..64 | RADV, Mesa 26.3.1-arch3.5, Vulkan 1.4.363, CachyOS | `05961f0` | 264/264 translated and valid | 203/206 pass, 3 skipped | 218/235 passed, 16 skipped (native and emulated) | `ms_wave_info_s3`, flaky (see below) | local note (not in the repository) |
 
 ## AMD Radeon RX 9070 GRE — 2026-11-23
 
