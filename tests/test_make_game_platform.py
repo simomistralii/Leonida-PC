@@ -281,7 +281,7 @@ class RuntimePackagingTest(unittest.TestCase):
         os.rename(self.out, moved)
         env.pop("LEONIDA_SHADERS")
         result = subprocess.check_output([os.path.join(moved, "gta6rt.sh"), "--dry-run"], cwd=self.root, env=env)
-        self.assertEqual(json.loads(result)[2], "Z:" + moved + "/Shader cache '$HOME'/shaders/spirv")
+        self.assertEqual(json.loads(result)[2], "Z:" + os.path.realpath(moved) + "/Shader cache '$HOME'/shaders/spirv")
 
     def test_runtime_records_shader_work_directory(self):
         self.write_artifact("gta6rt_tls_host.dll", b"TLS host")
