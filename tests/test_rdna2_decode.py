@@ -398,6 +398,21 @@ class Rdna2DecodeUnitTests(unittest.TestCase):
         self.assertEqual(ins["op"], "v_mad_u32_u24")
         self.assertEqual(ins["mods"], ["op_sel:[1,0,0,0]"])
 
+    def test_export_null_target_is_a_special_operand_like_the_text_parser(self):
+        # `exp null off, off, off, off done vm` (ps_w64_a_discard.asm) and `exp mrt0 ...`: llvm-mc text parses the
+        # null target as a special operand and the others as targets, and the decoder must give the same kinds.
+        for tgt, want in ((9, {"k": "special", "t": "null", "neg": False, "abs": False}),
+                          (0, {"k": "target", "t": "mrt0"})):
+            with self.subTest(target=tgt):
+                w0 = 0xF8000000 | (tgt << 4) | (1 << 11) | (1 << 12)   # en = 0, done, vm
+                dec = rdna2_decode.decode_bytes(struct.pack("<II", w0, 0), wave32=False)
+                self.assertEqual(dec["invalid"], 0)
+                ins = dec["insns"][0]
+                self.assertEqual(ins["op"], "exp")
+                self.assertEqual(ins["args"][0], want)
+                self.assertEqual([a["t"] for a in ins["args"][1:]], ["off"] * 4)
+                self.assertEqual(sorted(ins["mods"]), ["done", "vm"])
+
     def test_sdwa_inline_constants_and_sgpr(self):
         # Exact encodings from runtime/test/shaders/ps_sdwa_f16_const.asm:
         # 1) v_add_f16_sdwa v2, 1.0, v1 dst_sel:WORD_0 dst_unused:UNUSED_PRESERVE src0_sel:WORD_1 src1_sel:WORD_0
