@@ -10,6 +10,7 @@ method, scope and caveats. No game data is included.
 |---|---|
 | [design.md](design.md) | Overall project design, asset status, translator contract and open blockers. |
 | [related_projects.md](related_projects.md) | Prior art we may read and the licence boundaries on it. |
+| [related_projects_gaps.md](related_projects_gaps.md) | What VIctory records the title asks of the console APIs, against this runtime: the five likeliest next stops of the retail boot, then the other differences. |
 | [rpf.md](rpf.md) | RPF9 archive layout, the carve tools and the unreadable encrypted TOC. |
 | [testing.md](testing.md) | Running the GPU tests on your own GPU: setup per OS, wave64 emulation, running without a GPU on Mesa llvmpipe, and known problems. |
 | [modding.md](modding.md) | The mod format: `mods/<folder>/mod.json`, checked and loaded in name order by `gta6rt`; a swap takes effect once the game's archetype lookup is hooked (needs the executable, RT-5). A mod names game models and holds no game data. |

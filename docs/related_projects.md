@@ -6,6 +6,43 @@ cannot be mixed with this repository. This page records what we may learn from e
 The rule is the same for every entry: **facts are fine; code is not.** A format layout, an ABI observation or a
 measured behaviour can be reimplemented independently. The source that expressed it cannot be copied.
 
+## Where this fork came from: ItsNotRexed/Leonida and its continuation
+
+This repository is a fork of <https://github.com/ItsNotRexed/Leonida>. That repository stopped answering on
+2026-11-23 (about 23:40 UTC: "not found" for clones and the API). The last upstream commit merged here is
+`de4c373`, so nothing before it is lost.
+
+- The original author's own mirror is named in the continuation's README: <https://git.notrexed.dev/notrexed/Leonida>.
+- <https://github.com/ubiquitarianism/leonida> describes itself as the continuation of the project after its author
+  left. Its history contains `de4c373` and everything before it, checked by commit hash, not by name; on 2026-11-24
+  the only commit after it changes the README.
+
+**Licence:** the same history, so the same licence as this repository.
+
+**What we use it for:** it is the upstream to follow if the maintainer of this fork decides to. It is a different
+party from the original author, so its commits are reviewed before they are merged here.
+
+## Marvisak/VIctory
+
+<https://github.com/Marvisak/VIctory>
+
+Another port of the same Xbox Series build, in Rust. The title's x86-64 code runs in its process, as here, but it
+draws through the host's D3D12 and recompiles shaders to DXIL. Its README (2026-11-23) reports the title booting,
+running its menus at 30 fps, playing its intro video with sound and loading into the world, where frames are still
+black. Its console API layer is `crates/victory-hle/src/modules`.
+
+**Licence:** **GPL-3.0-or-later** (`Cargo.toml`), compatible with this repository. Adapted code would have to keep
+its copyright notices and be marked as adapted. The languages and GPU paths differ, so in practice what transfers is
+its measured behaviour, reimplemented here.
+
+**One file must not come over:** `crates/victory-formats/src/bcpack-tables.bin`, about 78 KB of BCPack decoder tables.
+VIctory's own asset policy lists it as its one exception to "nothing from the game". This repository has no such
+exception ([README.md](../README.md), BCPack row).
+
+**What we use it for:** facts about what the title asks of the console APIs, each cited to its file and line and
+checked here before it is relied on. [related_projects_gaps.md](related_projects_gaps.md) lists them against this
+runtime.
+
 ## ivall/xcl
 
 <https://github.com/ivall/xcl>
