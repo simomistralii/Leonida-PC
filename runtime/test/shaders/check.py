@@ -17,6 +17,7 @@ ps_tex is skipped when the device lacks a feature the bindless set or the shader
 vk_sampler_test needs.
 ps_texoff (texel offsets, on vk_texture_test's texture) is skipped on a device without VK_KHR_maintenance8.
 """
+import atexit
 import collections
 import json
 import math
@@ -349,13 +350,24 @@ HEAP_INIT_FILE = bytes(0x100) + struct.pack("<4I", *HEAP_INIT_WORDS)
 HEAP_INIT_EXPECTED = HEAP_INIT_WORDS + [0] * 4
 
 
+_HEAP_INIT_PATH = None
+
+
 def heap_init_env():
     """vk_compute_test's environment for cs_heap_init: the init file (written to the temp folder) and a buffer big
-    enough to hold it (68 words for its 0x110 bytes; one group's default is 64)."""
-    path = os.path.join(tempfile.gettempdir(), "leonida_cs_heap_init.bin")
-    with open(path, "wb") as f:
-        f.write(HEAP_INIT_FILE)
-    return {"VKC_HEAP_INIT": path, "VKC_OUT_WORDS": str(len(HEAP_INIT_FILE) // 4)}
+    enough to hold it (68 words for its 0x110 bytes; one group's default is 64).
+
+    The file is this process's own (mkstemp), removed at exit. A fixed name in the shared temp folder belonged to
+    whoever wrote it first: another user's run then failed with PermissionError, and two runs at once could each
+    read the other's write."""
+    global _HEAP_INIT_PATH
+    if _HEAP_INIT_PATH is None or not os.path.isfile(_HEAP_INIT_PATH):
+        fd, path = tempfile.mkstemp(prefix="leonida_cs_heap_init-", suffix=".bin")
+        with os.fdopen(fd, "wb") as f:
+            f.write(HEAP_INIT_FILE)
+        atexit.register(lambda: os.path.exists(path) and os.unlink(path))
+        _HEAP_INIT_PATH = path
+    return {"VKC_HEAP_INIT": _HEAP_INIT_PATH, "VKC_OUT_WORDS": str(len(HEAP_INIT_FILE) // 4)}
 
 
 # cs_user_sgprs.asm: vk_compute_test puts these words in s4..s7 and the shader stores them back.

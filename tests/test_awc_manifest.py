@@ -360,8 +360,10 @@ class ManifestTest(unittest.TestCase):
         previous = '{"previous": true}\n'
         with open(out, "w", encoding="utf-8") as f:
             f.write(previous)
-        os.chmod(out, 0o444)
-        self.addCleanup(lambda: os.path.exists(out) and os.chmod(out, 0o600))
+        # The staged file takes the destination's mode (published_mode), so a read-only manifest gives a read-only
+        # temp, and a failed replace has to make it writable before it can be removed. The destination itself stays
+        # writable here: a 0o444 file fails write_manifest's up-front os.open(O_WRONLY) check for every user but root
+        # (macOS and Windows CI), and the write never reaches the replace this test is about.
         made_writable = []
         real_chmod = os.chmod
 
@@ -371,6 +373,7 @@ class ManifestTest(unittest.TestCase):
             return real_chmod(path, mode, *args, **kwargs)
 
         with mock.patch.object(awc_manifest, "replace_retry", side_effect=OSError("replace denied")), \
+                mock.patch.object(awc_manifest, "published_mode", return_value=0o444), \
                 mock.patch.object(awc_manifest.os, "chmod", chmod):
             with self.assertRaises(OSError):
                 awc_manifest.write_manifest([], 0, 0, "json", out)
