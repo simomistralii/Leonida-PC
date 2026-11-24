@@ -10,7 +10,9 @@ measured behaviour can be reimplemented independently. The source that expressed
 
 This repository is a fork of <https://github.com/ItsNotRexed/Leonida>. That repository stopped answering on
 2026-11-23 (about 23:40 UTC: "not found" for clones and the API). The last upstream commit merged here is
-`de4c373`, so nothing before it is lost.
+`de4c373`, so nothing before it is lost. The PortWatch VI tracker (<https://portwatch-vi.xyz/>, its `tracker.json`
+of 2026-11-23 23:57 UTC) reports the repository deleted and its Discord gone on that day, with its author saying he
+quit; it records the project's last result as the executable running with black frames.
 
 - The original author's own mirror is named in the continuation's README: <https://git.notrexed.dev/notrexed/Leonida>.
 - <https://github.com/ubiquitarianism/leonida> describes itself as the continuation of the project after its author
