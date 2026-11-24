@@ -758,6 +758,17 @@ Queues and fences are wrapped the same way.
 - **What is wrapped.** Device slots 8 (`CreateCommandQueue`), 75 (`CreateCommandQueue1`), 36
   (`CreateFence`) and 32 (`OpenSharedHandle`, when it opens a fence) return queue and fence proxies. Each
   proxy forwards the public chain in PC order: 19 queue slots, and 11 or 12 fence slots, in SDK 10.0.26100.
+- **The console queue layout.** The queues of the device `D3D12XboxCreateDevice` hands the title take the
+  console slot map (`QueueLayout::console`, `runtime/shims/d3d12_xs_device.h`): slots 0-13 as on the PC, then
+  `Signal` 16, `Wait` 17, `GetTimestampFrequency` 18, `GetClockCalibration` 19, `GetDesc` 20 (the return buffer
+  first or second), `SuspendX`/`ResumeX` 23/24 (nothing to do; `S_OK`), `SignalX` 25 (a flush word of 0 or
+  0x08000000), `ExecuteCommandListsX` 35 (the lists, unwrapped, go to `ExecuteCommandLists`; flag bits past 0-1
+  submit nothing). Signal, Wait and SignalX take only fence proxies. 14 and 15 are console slots that are not
+  modelled, except that a fence proxy there is still taken as a PC-style caller's `Signal` or `Wait`; 31 (page
+  mappings), 32 (`PresentX`, no presenter route yet) and every other slot from 21 on are refused. The slot map is
+  read from other projects and fits this repository's Intel-host run, which routed slot 35
+  ([related_projects_gaps.md](related_projects_gaps.md), past stop 13, row 1). `LEONIDA_QUEUE_LAYOUT=pc` gives the
+  title's queues the PC map instead; `create_device_proxy` (PC callers and the tests) keeps the PC map unless asked.
 - **Logging.** Each slot logs its first call. `--trace-d3d12` records every call except `AddRef`/`Release`,
   as `XboxID3D12CommandQueue::Signal called` or `XboxID3D12Fence::Slot40 unsupported` (the README's trace
   grammar); on the Vulkan device the layer's own record of the same call follows it. An interface the real

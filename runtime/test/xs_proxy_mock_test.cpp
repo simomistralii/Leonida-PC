@@ -1239,6 +1239,104 @@ int check_console_command_list() {
     return 0;
 }
 
+// ---- The console queue layout (QueueLayout::console): Signal 16 ... ExecuteCommandListsX 35 ----
+
+int check_console_queue_layout() {
+    g_label = "xs_proxy_mock console queue layout";
+    Mock* mock = new_mock(Kind::device);
+    mock->device_level = 9;
+    mock->fence1 = true;
+    mock->allocator_tag = true;
+    mock->refs = 1;
+    void* device = nullptr;
+    EXPECT(SUCCEEDED(xs::create_device_proxy(reinterpret_cast<ID3D12Device*>(mock), __uuidof(ID3D12Device), &device,
+                                             xs::QueueLayout::console)));
+    void* queue = make_queue(device);
+    void* fence = make_fence(device);
+    EXPECT(queue && fence && xs::queue_proxy_layout(queue) == xs::QueueLayout::console);
+    EXPECT(xs::queue_proxy_layout(fence) == xs::QueueLayout::pc &&
+           xs::queue_proxy_layout(nullptr) == xs::QueueLayout::pc);
+    Mock* const q = reinterpret_cast<Mock*>(xs::queue_proxy_real_queue(queue));
+    const std::uint64_t real_fence = word(xs::fence_proxy_real_fence(fence));
+
+    // 16 Signal, 17 Wait and 25 SignalX reach the PC Signal (14) and Wait (15) with the real fence; SignalX takes a
+    // flush word of 0 or 0x08000000 only.
+    EXPECT(hr_of(raw(queue, 16, word(fence), 5)) == S_OK && q->calls[14] == 1 && q->args[14][0] == real_fence &&
+           q->args[14][1] == 5);
+    EXPECT(hr_of(raw(queue, 17, word(fence), 6)) == S_OK && q->calls[15] == 1 && q->args[15][0] == real_fence &&
+           q->args[15][1] == 6);
+    EXPECT(hr_of(raw(queue, 25, word(fence), 7, 0)) == S_OK && q->calls[14] == 2 && q->args[14][1] == 7);
+    EXPECT(hr_of(raw(queue, 25, word(fence), 8, 0x08000000)) == S_OK && q->calls[14] == 3 && q->args[14][1] == 8);
+    EXPECT(hr_of(raw(queue, 25, word(fence), 9, 1)) == E_NOTIMPL && q->calls[14] == 3);
+    // Without a fence proxy first they are refused before the real queue sees them.
+    std::uint64_t frequency = 0;
+    EXPECT(hr_of(raw(queue, 16, word(&frequency))) == E_INVALIDARG && q->calls[14] == 3 && q->calls[16] == 0);
+    EXPECT(hr_of(raw(queue, 17, 0, 1)) == E_INVALIDARG && q->calls[15] == 1);
+    EXPECT(hr_of(raw(queue, 25, 0, 1, 0)) == E_INVALIDARG && q->calls[14] == 3);
+
+    // 18 and 19 are GetTimestampFrequency (16) and GetClockCalibration (17), with the caller's pointers.
+    std::uint64_t gpu = 0, cpu = 0;
+    EXPECT(hr_of(raw(queue, 18, word(&frequency))) == S_OK && q->calls[16] == 1 && q->args[16][0] == word(&frequency));
+    EXPECT(hr_of(raw(queue, 19, word(&gpu), word(&cpu))) == S_OK && q->calls[17] == 1 &&
+           q->args[17][0] == word(&gpu) && q->args[17][1] == word(&cpu));
+
+    // 20 is GetDesc (18): the buffer goes to the PC method as its hidden pointer and comes back in RAX, whichever
+    // order the title passes the buffer and `this` in, a buffer holding a stale copy of the vtable pointer included.
+    void* const* const vtable = *reinterpret_cast<void* const* const*>(queue);
+    const auto slot20 = reinterpret_cast<SlotFn>(vtable[20]);
+    D3D12_COMMAND_QUEUE_DESC desc{};
+    EXPECT(raw(queue, 20, word(&desc)) == word(&desc) && q->calls[18] == 1 && q->args[18][0] == word(&desc));
+    EXPECT(slot20(&desc, word(queue), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) == word(&desc) && q->calls[18] == 2 &&
+           q->args[18][0] == word(&desc));
+    D3D12_COMMAND_QUEUE_DESC stale{};
+    std::memcpy(&stale, &vtable, sizeof(vtable));   // the first 8 bytes hold the queue proxy's vtable pointer
+    EXPECT(slot20(&stale, word(queue), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) == word(&stale) &&
+           q->calls[18] == 3 && q->args[18][0] == word(&stale));
+    EXPECT(raw(queue, 20, word(&stale)) == word(&stale) && q->calls[18] == 4 && q->args[18][0] == word(&stale));
+
+    // 23 SuspendX and 24 ResumeX: there is nothing to suspend; S_OK, and the real queue is not called.
+    EXPECT(hr_of(raw(queue, 23)) == S_OK && hr_of(raw(queue, 24)) == S_OK);
+
+    // 35 ExecuteCommandListsX(count, lists, frame token, flags): ExecuteCommandLists (10) with every proxy in the
+    // array replaced by its real object; flags past bits 0-1 submit nothing.
+    const std::uint64_t lists[2] = {word(fence), 0x1234};   // any proxy is unwrapped; a plain pointer goes as it is
+    EXPECT(raw(queue, 35, 2, word(lists), 0x1111, 0) == 0 && q->calls[10] == 1 &&
+           static_cast<std::uint32_t>(q->args[10][0]) == 2 && q->array[10][0] == real_fence &&
+           q->array[10][1] == 0x1234);
+    EXPECT(raw(queue, 35, 2, word(lists), 0x1112, 3) == 0 && q->calls[10] == 2);
+    EXPECT(raw(queue, 35, 2, word(lists), 0x1113, 4) == 0 && q->calls[10] == 2);
+    // 10 itself is the PC's ExecuteCommandLists, as in the PC layout.
+    EXPECT(raw(queue, 10, 1, word(lists)) == 0 && q->calls[10] == 3 && q->array[10][0] == real_fence);
+
+    // 14 and 15 with a fence proxy are a PC-style caller's Signal and Wait; anything else there is a console slot
+    // that is not modelled.
+    EXPECT(hr_of(raw(queue, 14, word(fence), 11)) == S_OK && q->calls[14] == 4 && q->args[14][1] == 11);
+    EXPECT(hr_of(raw(queue, 15, word(fence), 12)) == S_OK && q->calls[15] == 2 && q->args[15][1] == 12);
+    EXPECT(hr_of(raw(queue, 14, 0x1000)) == E_NOTIMPL && hr_of(raw(queue, 15)) == E_NOTIMPL &&
+           q->calls[14] == 4 && q->calls[15] == 2);
+
+    // 31 (page mappings), 32 (PresentX, no presenter yet) and the slots around them: refused, nothing forwarded.
+    for (const unsigned slot : {21u, 22u, 26u, 30u, 31u, 32u, 33u, 34u, 36u, 127u})
+        EXPECT(hr_of(raw(queue, slot)) == E_NOTIMPL);
+    for (unsigned slot = 19; slot < kMockSlots; ++slot) EXPECT(q->calls[slot] == 0);
+    EXPECT(xs::queue_table_overruns() == 0);
+
+    // A PC-layout device next to it is unchanged: 16 is GetTimestampFrequency there.
+    Mock* pc_mock = nullptr;
+    void* pc_device = make_device(pc_mock, 9, true);
+    void* pc_queue = make_queue(pc_device);
+    EXPECT(pc_queue && xs::queue_proxy_layout(pc_queue) == xs::QueueLayout::pc);
+    Mock* const pq = reinterpret_cast<Mock*>(xs::queue_proxy_real_queue(pc_queue));
+    EXPECT(hr_of(raw(pc_queue, 16, word(&frequency))) == S_OK && pq->calls[16] == 1 && pq->calls[14] == 0);
+    EXPECT(hr_of(raw(pc_queue, 20, word(&desc))) == E_NOTIMPL && pq->calls[18] == 0);
+
+    EXPECT(release(pc_queue) == 0 && release(pc_device) == 0 && pc_mock->refs == 0);
+    EXPECT(release(queue) == 0 && release(fence) == 0 && release(device) == 0 && mock->refs == 0);
+    std::printf("%s: passed\n", g_label);
+    g_label = "xs_proxy_mock";
+    return 0;
+}
+
 int main(int argc, char** argv) {
     no_dialogs();
     std::setvbuf(stdout, nullptr, _IONBF, 0);
@@ -1249,7 +1347,8 @@ int main(int argc, char** argv) {
     }
     if (argc != 1) return 2;
     if (check_tail(true) || check_levels() || check_fence1() || check_create_failures() || check_open_shared() ||
-        check_alloc_failures() || check_allocators() || check_xbox_slots() || check_console_command_list())
+        check_alloc_failures() || check_allocators() || check_xbox_slots() || check_console_command_list() ||
+        check_console_queue_layout())
         return 1;
     std::printf("xs_proxy_mock_test: PASS (%d allocations refused on purpose)\n", g_failed_news);
     return 0;

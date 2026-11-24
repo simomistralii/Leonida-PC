@@ -60,6 +60,7 @@ struct DeviceProxy {
     void** real_vtable;
     unsigned slot_count;    // number of valid entries in real_vtable
     std::atomic<unsigned long> refs;
+    QueueLayout queue_layout = QueueLayout::pc;   // what the queues it creates answer with (create_device_proxy)
     // The device's IDXGIDevice1 (see "IDXGIDevice1 on the device" below): a title's IDXGIDevice1* points here.
     void** dxgi_vtable;
     DxgiAdapterProvider adapter_provider;
@@ -687,6 +688,7 @@ struct ChildProxy {
     void** real_vtable;
     unsigned slot_count;    // public slots the real object implements; the rest of the table is refused
     std::atomic<unsigned long> refs;
+    QueueLayout layout = QueueLayout::pc;   // a queue: its device's layout (wrap_child); pc for the other kinds
 };
 
 template <ChildKind K>
@@ -1187,6 +1189,155 @@ LONG CALLBACK table_overrun_handler(EXCEPTION_POINTERS* info) {
     return EXCEPTION_CONTINUE_SEARCH;  // diagnostics only: the fault goes on to the title's handlers or the crash
 }
 
+// ---- The console queue layout (QueueLayout::console in d3d12_xs_device.h) ----
+//
+// A console-layout queue answers slots 0-13 as a PC queue does; from 14 on, console_queue_slot maps each console slot
+// to the PC method it stands for, called with the words in the positions the thunk received them. Facts from
+// docs/related_projects_gaps.md (past stop 13, row 1); the code is this repository's own.
+
+using QueueForwardFn = std::uint64_t(WINAPI*)(void*, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t,
+                                              std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t,
+                                              std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t,
+                                              std::uint64_t, std::uint64_t);
+
+constexpr unsigned kPcExecuteCommandLists = 10, kPcSignal = 14, kPcWait = 15, kPcTimestampFrequency = 16,
+                   kPcClockCalibration = 17, kPcGetDesc = 18;
+constexpr std::uint32_t kConsoleSignalFlush = 0x08000000;   // SignalX's one flush word besides 0
+constexpr std::uint32_t kConsoleExecuteFlags = 0x3;         // ExecuteCommandListsX's flag bits (packet assembly)
+
+std::uint64_t forward_queue(ChildProxy* self, unsigned pc_slot, std::uint64_t a1, std::uint64_t a2,
+                            std::uint64_t a3 = 0, std::uint64_t a4 = 0) {
+    return reinterpret_cast<QueueForwardFn>(self->real_vtable[pc_slot])(self->real, a1, a2, a3, a4, 0, 0, 0, 0, 0, 0,
+                                                                      0, 0, 0, 0);
+}
+
+// The trace name of a console slot (fixed strings, as d3d12_trace::record takes): the method the slot stands for,
+// or SlotNN for one that is not modelled.
+const char* console_queue_trace_name(unsigned slot) {
+    switch (slot) {
+        case 14: return "XboxID3D12CommandQueue::Slot14";
+        case 15: return "XboxID3D12CommandQueue::Slot15";
+        case 16: return "XboxID3D12CommandQueue::Signal";
+        case 17: return "XboxID3D12CommandQueue::Wait";
+        case 18: return "XboxID3D12CommandQueue::GetTimestampFrequency";
+        case 19: return "XboxID3D12CommandQueue::GetClockCalibration";
+        case 20: return "XboxID3D12CommandQueue::GetDesc";
+        case 23: return "XboxID3D12CommandQueue::SuspendX";
+        case 24: return "XboxID3D12CommandQueue::ResumeX";
+        case 25: return "XboxID3D12CommandQueue::SignalX";
+        case 32: return "XboxID3D12CommandQueue::PresentX";
+        case 35: return "XboxID3D12CommandQueue::ExecuteCommandListsX";
+        default: return child_trace_name<ChildKind::queue>(slot);   // past the public chain: SlotNN
+    }
+}
+
+struct ConsoleQueueLog {
+    static inline std::atomic<bool> logged[kQueueSlots];
+};
+
+// One line the first time a console slot takes a path worth naming.
+void log_console_queue(unsigned slot, const char* what, std::uint64_t a1, std::uint64_t a2, std::uint64_t a3,
+                       std::uint64_t a4) {
+    if (slot >= kQueueSlots) return;
+    bool expected = false;
+    if (ConsoleQueueLog::logged[slot].compare_exchange_strong(expected, true, std::memory_order_relaxed))
+        std::fprintf(stderr, "[rt] d3d12_xs: console queue slot %u (%s): %s (args 0x%llx 0x%llx 0x%llx 0x%llx)\n",
+                     slot, console_queue_trace_name(slot), what, static_cast<unsigned long long>(a1),
+                     static_cast<unsigned long long>(a2), static_cast<unsigned long long>(a3),
+                     static_cast<unsigned long long>(a4));
+}
+
+// GetDesc (console slot 20) into `buffer`: the PC method fills the struct through its hidden pointer, and the buffer
+// comes back in RAX, as from any struct return.
+std::uint64_t console_queue_get_desc(ChildProxy* queue, std::uint64_t buffer) {
+    d3d12_trace::record(console_queue_trace_name(20));
+    forward_queue(queue, kPcGetDesc, buffer, 0);
+    return buffer;
+}
+
+bool on_current_stack(const void* p);
+
+// Whether a struct-returning queue call came as (return buffer, this): the first register is not a queue proxy and
+// the second is, or both look like one (a stack buffer can hold a stale copy of the vtable pointer) and the first is
+// on the calling thread's stack (docs/retail_boot_chain.md section 3.1, as for device slots 25 and 26).
+bool queue_struct_return_swapped(const void* first, std::uint64_t second) {
+    const void* other = reinterpret_cast<const void*>(second);
+    if (!is_queue_proxy(other)) return false;
+    if (!is_queue_proxy(first)) return true;
+    return on_current_stack(first) && !on_current_stack(other);
+}
+
+template <unsigned Slot>
+std::uint64_t console_queue_slot(ChildProxy* self, std::uint64_t a1, std::uint64_t a2, std::uint64_t a3,
+                                 std::uint64_t a4) {
+    note_child_slot<ChildKind::queue>(Slot);
+    const char* const name = console_queue_trace_name(Slot);
+    const bool fence_first = is_fence_proxy(reinterpret_cast<const void*>(a1));
+    if constexpr (Slot == 14 || Slot == 15) {
+        // Two console slots of their own, not modelled. A fence proxy here is a PC-style caller's Signal or Wait,
+        // which a title's device still serves (the stand-in frame of runtime/test/fixtures/tiny_frame.cpp is one).
+        if (fence_first) {
+            d3d12_trace::record(Slot == 14 ? "XboxID3D12CommandQueue::Signal" : "XboxID3D12CommandQueue::Wait");
+            return forward_queue(self, Slot == 14 ? kPcSignal : kPcWait, unwrap_object(a1), a2);
+        }
+        log_console_queue(Slot, "not modelled; E_NOTIMPL", a1, a2, a3, a4);
+        d3d12_trace::record(name, "unsupported");
+        return hr_to_u64(E_NOTIMPL);
+    } else if constexpr (Slot == 16 || Slot == 17 || Slot == 25) {
+        // Signal(fence, value), Wait(fence, value) and SignalX(fence, value, flush): the fence is always one of this
+        // device's proxies, so anything else is refused before the real queue sees it.
+        if constexpr (Slot == 25) {
+            const auto flush = static_cast<std::uint32_t>(a3);
+            if (flush != 0 && flush != kConsoleSignalFlush) {
+                log_console_queue(Slot, "a flush word that is neither 0 nor 0x08000000; E_NOTIMPL", a1, a2, a3, a4);
+                d3d12_trace::record(name, "unsupported");
+                return hr_to_u64(E_NOTIMPL);
+            }
+        }
+        if (!fence_first) {
+            log_console_queue(Slot, "the first argument is not a fence proxy; E_INVALIDARG", a1, a2, a3, a4);
+            d3d12_trace::record(name, "unsupported");
+            return hr_to_u64(E_INVALIDARG);
+        }
+        d3d12_trace::record(name);
+        return forward_queue(self, Slot == 17 ? kPcWait : kPcSignal, unwrap_object(a1), a2);
+    } else if constexpr (Slot == 18) {
+        d3d12_trace::record(name);
+        return forward_queue(self, kPcTimestampFrequency, a1, a2);
+    } else if constexpr (Slot == 19) {
+        d3d12_trace::record(name);
+        return forward_queue(self, kPcClockCalibration, a1, a2);
+    } else if constexpr (Slot == 20) {
+        return console_queue_get_desc(self, a1);   // PC order; the buffer-first order is caught in child_slot
+    } else if constexpr (Slot == 23 || Slot == 24) {
+        // Suspending and resuming the queue: this runtime never suspends the title, so there is nothing to do.
+        log_console_queue(Slot, "nothing to suspend or resume; S_OK", a1, a2, a3, a4);
+        d3d12_trace::record(name);
+        return hr_to_u64(S_OK);
+    } else if constexpr (Slot == 35) {
+        // ExecuteCommandListsX(count, lists, frame token, flags): the lists go to the real queue as ExecuteCommandLists
+        // does them; the two flag bits choose how the console assembles its packets, which a PC queue does itself,
+        // and the frame token labels the submission. It returns nothing.
+        const auto flags = static_cast<std::uint32_t>(a4);
+        if (flags & ~kConsoleExecuteFlags) {
+            log_console_queue(Slot, "flags past bits 0-1; the lists are not submitted", a1, a2, a3, a4);
+            d3d12_trace::record(name, "unsupported");
+            return 0;
+        }
+        log_console_queue(Slot, "submitted as ExecuteCommandLists", a1, a2, a3, a4);
+        UnwrappedArray lists;
+        if (!lists.fill(a2, a1)) return 0;   // nothing submitted: there is no result to report the allocation in
+        d3d12_trace::record(name);
+        forward_queue(self, kPcExecuteCommandLists, a1, lists.data() ? lists.data() : a2);
+        return 0;
+    } else {
+        // 21, 22, 26-31 (31 updates page mappings), 32 (PresentX, not routed to a presenter yet), 33, 34 and from 36.
+        log_console_queue(Slot, "not modelled; E_NOTIMPL", a1, a2, a3, a4);
+        d3d12_trace::record(name, "unsupported");
+        return hr_to_u64(E_NOTIMPL);
+    }
+}
+
 template <ChildKind K, unsigned Slot>
 std::uint64_t WINAPI child_slot(ChildProxy* self, std::uint64_t a1, std::uint64_t a2, std::uint64_t a3,
                                 std::uint64_t a4, std::uint64_t a5, std::uint64_t a6, std::uint64_t a7,
@@ -1205,6 +1356,20 @@ std::uint64_t WINAPI child_slot(ChildProxy* self, std::uint64_t a1, std::uint64_
         return hr_to_u64(child_get_device<K>(self, reinterpret_cast<const IID*>(a1),
                                              reinterpret_cast<void**>(a2)));
     } else {
+        if constexpr (K == ChildKind::queue && Slot >= 14) {
+            if constexpr (Slot == 20) {
+                // A struct return: before `self` is read, see whether the title put the return buffer first.
+                if (queue_struct_return_swapped(self, a1)) {
+                    auto* queue = reinterpret_cast<ChildProxy*>(a1);
+                    if (queue->layout != QueueLayout::console) return hr_to_u64(E_NOTIMPL);
+                    note_child_slot<K>(Slot);
+                    log_console_queue(Slot, "called with its return buffer first; swapped", a1,
+                                      reinterpret_cast<std::uint64_t>(self), a2, a3);
+                    return console_queue_get_desc(queue, reinterpret_cast<std::uint64_t>(self));
+                }
+            }
+            if (self->layout == QueueLayout::console) return console_queue_slot<Slot>(self, a1, a2, a3, a4);
+        }
         note_child_slot<K>(Slot);
         if (Slot >= self->slot_count) {
             bool expected = false;
@@ -1306,6 +1471,7 @@ HRESULT wrap_child(IUnknown* created, DeviceProxy* device, const IID* riid, void
     proxy->real_vtable = *reinterpret_cast<void***>(created);
     if constexpr (K == ChildKind::queue) {
         proxy->slot_count = kQueuePublicSlots;
+        proxy->layout = device->queue_layout;
     } else if constexpr (K == ChildKind::fence) {
         proxy->slot_count = supports_iid(created, __uuidof(ID3D12Fence1)) ? kFence1PublicSlots : kFencePublicSlots;
     } else {
@@ -2043,13 +2209,14 @@ unsigned detect_slot_count(ID3D12Device* real) {
 
 }  // namespace
 
-HRESULT create_device_proxy(ID3D12Device* real, REFIID riid, void** out) {
+HRESULT create_device_proxy(ID3D12Device* real, REFIID riid, void** out, QueueLayout queue_layout) {
     if (!real) return E_POINTER;
     if (!out) return E_POINTER;
     *out = nullptr;
 
     DeviceProxy* proxy = new (std::nothrow) DeviceProxy;
     if (!proxy) return E_OUTOFMEMORY;
+    proxy->queue_layout = queue_layout;
     proxy->vtable = get_vtable();
     proxy->real = real;
     proxy->real_vtable = *reinterpret_cast<void***>(real);
@@ -2142,6 +2309,26 @@ bool device_slot_overridden(unsigned slot) {
 }
 
 bool is_queue_proxy(const void* queue) { return is_child_proxy<ChildKind::queue>(queue); }
+
+QueueLayout queue_proxy_layout(const void* queue) {
+    return is_queue_proxy(queue) ? static_cast<const ChildProxy*>(queue)->layout : QueueLayout::pc;
+}
+
+QueueLayout xbox_device_queue_layout() {
+    static const QueueLayout layout = [] {
+        char value[16] = {};
+        const DWORD n = GetEnvironmentVariableA("LEONIDA_QUEUE_LAYOUT", value, sizeof(value));
+        if (n == 0) return QueueLayout::console;
+        if (n < sizeof(value) && _stricmp(value, "pc") == 0) {
+            std::fprintf(stderr, "[rt] d3d12_xs: LEONIDA_QUEUE_LAYOUT=pc: the title's queues take the PC slot map\n");
+            return QueueLayout::pc;
+        }
+        if (n < sizeof(value) && _stricmp(value, "console") == 0) return QueueLayout::console;
+        std::fprintf(stderr, "[rt] d3d12_xs: LEONIDA_QUEUE_LAYOUT is neither pc nor console; console\n");
+        return QueueLayout::console;
+    }();
+    return layout;
+}
 bool is_fence_proxy(const void* fence) { return is_child_proxy<ChildKind::fence>(fence); }
 bool is_allocator_proxy(const void* allocator) { return is_child_proxy<ChildKind::allocator>(allocator); }
 

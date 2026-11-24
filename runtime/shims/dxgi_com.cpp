@@ -1,5 +1,6 @@
 #include "dxgi_com.h"
 #include "d3d12_stubs.h"
+#include "d3d12_xs_device.h"
 
 #include <winternl.h>  // NTSTATUS, which d3dkmthk.h needs and WIN32_LEAN_AND_MEAN leaves out
 #include <d3dkmthk.h>
@@ -119,6 +120,9 @@ bool valid_flip_buffer_count(UINT count) {
 }
 
 bool is_direct_present_queue(IUnknown* candidate) {
+    // A title's queue is the Xbox-ABI proxy, whose slots may follow the console layout (GetDesc at 20, not 18): ask
+    // the queue behind it, as d3d12_com.cpp does.
+    if (ID3D12CommandQueue* real = rt::d3d12_xs::queue_proxy_real_queue(candidate)) candidate = real;
     ID3D12CommandQueue* queue = nullptr;
     if (!candidate || FAILED(candidate->QueryInterface(IID_PPV_ARGS(&queue))) || !queue) return false;
     const bool direct = queue->GetDesc().Type == D3D12_COMMAND_LIST_TYPE_DIRECT;

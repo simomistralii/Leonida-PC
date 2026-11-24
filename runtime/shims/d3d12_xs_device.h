@@ -54,10 +54,29 @@
 
 namespace rt::d3d12_xs {
 
+// Which slot map the queues of a device answer with.
+//   pc       ID3D12CommandQueue's 19 public slots, Signal and Wait at 14 and 15; slots past 18 are refused.
+//   console  the Xbox Series layout the retail title uses (xcl; TuxBox's run of the title; this repository's own
+//            Intel-host run routing queue slot 35, docs/retail_boot_intel_host.md): slots 0-13 as on the PC, two
+//            console slots at 14 and 15, then Signal 16, Wait 17, GetTimestampFrequency 18, GetClockCalibration 19,
+//            GetDesc 20, SuspendX 23, ResumeX 24, SignalX 25 (fence, value, flush word), a page-mapping update 31,
+//            PresentX 32 and ExecuteCommandListsX 35 (count, lists, frame token, flags)
+//            (docs/related_projects_gaps.md, past stop 13, row 1).
+// A console-layout queue still takes a fence proxy at 14 or 15 as the PC's Signal or Wait, so PC-style callers of a
+// title's device keep working.
+enum class QueueLayout : std::uint8_t { pc, console };
+
 // Wraps `real` and returns the requested device interface through `out`. Takes ownership of one reference to
 // `real` on success; on failure the caller keeps its reference. Returns E_NOINTERFACE if `riid` is not a D3D12
-// device interface the PC device implements.
-HRESULT create_device_proxy(ID3D12Device* real, REFIID riid, void** out);
+// device interface the PC device implements. The queues the device creates use `queue_layout`.
+HRESULT create_device_proxy(ID3D12Device* real, REFIID riid, void** out, QueueLayout queue_layout = QueueLayout::pc);
+
+// The layout D3D12XboxCreateDevice gives the title's device: console, or pc with LEONIDA_QUEUE_LAYOUT=pc (read once;
+// any other value than pc or console is logged and taken as console).
+QueueLayout xbox_device_queue_layout();
+
+// The layout of a queue proxy (pc for anything that is not one). Used by the tests.
+QueueLayout queue_proxy_layout(const void* queue);
 
 // True when `device` points at a proxy created by create_device_proxy. Used by the tests.
 bool is_device_proxy(const void* device);
