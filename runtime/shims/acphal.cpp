@@ -141,7 +141,12 @@ struct SHAPE_XMA_CONTEXT {
     uint32_t reserved1 : 6;
     uint32_t loopStartOffset : 26;
     uint32_t loopEndOffset : 6;
-    uint32_t reserved[10];
+    // The fields above fill five words: currentByteOffset (26 bits) does not fit in the 8 bits left of the third, so
+    // it starts the fourth (MSVC, GCC and Clang alike), and with reserved[10] the context was 60 bytes, not the 64
+    // of the assert below (the Windows build failed on it). The context array the title shares is a stride of 64:
+    // 16 words per XMA context, as VIctory records them (crates/victory-hle/src/modules/audio.rs). Which of words
+    // 1-4 the bit fields above belong to is not confirmed here; only the size is used (alloc_array).
+    uint32_t reserved[11];
 };
 static_assert(sizeof(SHAPE_XMA_CONTEXT) == 64, "SHAPE_XMA_CONTEXT is 64 bytes per GDK");
 
@@ -162,7 +167,9 @@ struct SHAPE_PCM_CONTEXT {
     uint32_t reserved6 : 15;
     uint32_t format : 2;
     uint32_t reserved7 : 14;
-    uint32_t reserved[1];
+    // Six words of fields: with reserved[1] the context was 28 bytes, not the 32 of the assert below (the Windows
+    // build failed on it). Only the size is used (alloc_array); the trailing words are reserved.
+    uint32_t reserved[2];
 };
 static_assert(sizeof(SHAPE_PCM_CONTEXT) == 32, "SHAPE_PCM_CONTEXT is 32 bytes per GDK");
 
