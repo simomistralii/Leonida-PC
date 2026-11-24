@@ -1708,6 +1708,8 @@ int main() {
     check(create != nullptr, "gameinput.dll!GameInputCreate is registered");
     check(rt::shims::find("xgameruntime.dll", "GameInputCreate") == reinterpret_cast<void*>(create),
           "xgameruntime.dll!GameInputCreate is the same function");
+    check(rt::shims::find("gameinput.dll", "#1") == reinterpret_cast<void*>(create),
+          "gameinput.dll ordinal 1 is GameInputCreate (the title imports it by ordinal only)");
     if (!create) return 1;
 
     IGameInput* input = nullptr;

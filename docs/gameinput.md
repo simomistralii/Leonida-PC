@@ -502,6 +502,13 @@ These need the game executable or a test on hardware:
 - **Which API version and module.** The shim is GameInput v0 and registers `GameInputCreate` under `gameinput.dll`
   and `xgameruntime.dll`. GameInput v1 and later (NuGet 1.x and up) changed the interfaces; if the executable was
   built against one of those, the vtables need a second set.
+- **Import by ordinal.** VIctory, which runs the retail executable to its menus with pad and keyboard input, records
+  that the title imports `GameInputCreate` from `gameinput.dll` by ordinal 1 only (`gameinput.rs` in its HLE modules,
+  see [related_projects_gaps.md](related_projects_gaps.md)). An ordinal import is looked up as `gameinput.dll!#1`, so
+  the shim registers that name too; before, the title would have bound to the host's `GameInput.dll` or an
+  unimplemented thunk and never reached this shim. Not yet confirmed against the executable here. VIctory also
+  records the keyboard as a device of its own that the title walks for scan codes and virtual keys, which this shim
+  does not offer yet.
 - **IIDs.** `QueryInterface` answers the v0 IIDs from the public header.
 - **Reading history.** Microsoft's [next reading](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/input/gameinput/interfaces/igameinput/methods/igameinput_getnextreading)
   and [previous reading](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/input/gameinput/interfaces/igameinput/methods/igameinput_getpreviousreading) pages describe half a second of readings per device and failure when old readings leave the stream. The table above records the shim's HRESULT choices. Changes faster than the poll are not seen.
