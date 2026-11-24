@@ -64,8 +64,12 @@ bool check_console_addressed_heap(ID3D12Device* device) {
 }
 
 bool check_xs_proxy_slot14(ID3D12Device* real_device) {
+    // create_device_proxy takes over one reference to the device on success (d3d12_xs_device.h); the caller's own
+    // reference is released at the end of main, so the proxy gets one of its own.
+    real_device->AddRef();
     void* proxy_raw = nullptr;
     if (FAILED(rt::d3d12_xs::create_device_proxy(real_device, IID_PPV_ARGS(&proxy_raw))) || !proxy_raw) {
+        real_device->Release();   // on failure the reference stays the caller's
         std::fprintf(stderr, "create_device_proxy failed\n");
         return false;
     }
@@ -90,7 +94,15 @@ bool check_xs_proxy_slot14(ID3D12Device* real_device) {
                      static_cast<unsigned long>(hr));
         return false;
     }
-    const auto cpu = heap->GetCPUDescriptorHandleForHeapStart();
+    // The heap proxy answers slot 9 the console way (the handle in RAX), and this test calls it as a PC caller, which
+    // expects the handle written through a hidden pointer: read the wrapped PC heap instead. Its start is the console
+    // address only if slot 14 passed that address through.
+    ID3D12DescriptorHeap* real_heap = rt::d3d12_xs::heap_proxy_real_heap(heap.get());
+    if (!real_heap) {
+        std::fprintf(stderr, "slot 14 did not return a heap proxy\n");
+        return false;
+    }
+    const auto cpu = real_heap->GetCPUDescriptorHandleForHeapStart();
     if (cpu.ptr != static_cast<SIZE_T>(console.address)) {
         std::fprintf(stderr, "proxy CPU heap start mismatch: got 0x%llx want 0x%llx\n",
                      static_cast<unsigned long long>(cpu.ptr),
