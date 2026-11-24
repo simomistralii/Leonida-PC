@@ -1817,12 +1817,60 @@ HRESULT proxy_create_placed_resource_x(DeviceProxy* self, void* va, const D3D12_
     return handler(self->real, va, pc_desc, state, *riid, out);
 }
 
+// Whether `p` is in the calling thread's stack.
+bool on_current_stack(const void* p) {
+    ULONG_PTR low = 0, high = 0;
+    GetCurrentThreadStackLimits(&low, &high);
+    const auto v = reinterpret_cast<ULONG_PTR>(p);
+    return v >= low && v < high;
+}
+
+// Boot-chain stop 7 (docs/retail_boot_chain.md, section 3.1): the title calls a struct-returning device method as
+// (return buffer, this, ...), where the PC method takes (this, return buffer, ...). True when this call has that
+// shape: the first register is not the proxy and the second is. When both look like it - a stack buffer can hold a
+// stale copy of the proxy's vtable pointer, which xcl records (docs/related_projects_gaps.md) - the one on the
+// calling thread's stack is the buffer.
+bool struct_return_swapped(const void* first, const void* second) {
+    if (!is_device_proxy(second)) return false;
+    if (!is_device_proxy(first)) return true;
+    return on_current_stack(first) && !on_current_stack(second);
+}
+
 template <unsigned Slot>
 std::uint64_t WINAPI proxy_slot(DeviceProxy* self, std::uint64_t a1, std::uint64_t a2, std::uint64_t a3,
                                 std::uint64_t a4, std::uint64_t a5, std::uint64_t a6, std::uint64_t a7,
                                 std::uint64_t a8, std::uint64_t a9, std::uint64_t a10, std::uint64_t a11,
                                 std::uint64_t a12, std::uint64_t a13, std::uint64_t a14) {
-    if constexpr (Slot == 0) {
+    if constexpr (Slot == 25 || Slot == 26) {
+        // GetResourceAllocationInfo (25, a 16-byte result) and GetCustomHeapProperties (26, 20 bytes) return a struct.
+        // Leonida measured the title calling slot 26 with the buffer first; xcl records 25 the same way. Called PC
+        // style, the generic forward below is right; called with the buffer first, RCX and RDX trade places and every
+        // other word keeps its position. The buffer comes back in RAX, as a struct return does.
+        note_slot(Slot);
+        if (struct_return_swapped(self, reinterpret_cast<const void*>(a1))) {
+            auto* proxy = reinterpret_cast<DeviceProxy*>(a1);
+            void* buffer = self;
+            static std::atomic<bool> s_logged{false};
+            if (!s_logged.exchange(true))
+                std::fprintf(stderr, "[rt] d3d12_xs: device slot %u called with its return buffer first; swapped\n",
+                             Slot);
+            if (Slot >= proxy->slot_count) return hr_to_u64(refuse_beyond_device(Slot, proxy->slot_count));
+            using SwappedFn = std::uint64_t(WINAPI*)(void*, void*, std::uint64_t, std::uint64_t, std::uint64_t,
+                                                     std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t,
+                                                     std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t,
+                                                     std::uint64_t, std::uint64_t);
+            reinterpret_cast<SwappedFn>(proxy->real_vtable[Slot])(proxy->real, buffer, a2, a3, a4, a5, a6, a7, a8, a9,
+                                                                  a10, a11, a12, a13, a14);
+            return reinterpret_cast<std::uint64_t>(buffer);
+        }
+        if (Slot >= self->slot_count) return hr_to_u64(refuse_beyond_device(Slot, self->slot_count));
+        using ForwardFn = std::uint64_t(WINAPI*)(void*, std::uint64_t, std::uint64_t, std::uint64_t,
+                                                 std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t,
+                                                 std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t,
+                                                 std::uint64_t, std::uint64_t, std::uint64_t);
+        return reinterpret_cast<ForwardFn>(self->real_vtable[Slot])(self->real, a1, a2, a3, a4, a5, a6, a7, a8, a9,
+                                                                    a10, a11, a12, a13, a14);
+    } else if constexpr (Slot == 0) {
         return hr_to_u64(proxy_query_interface(self, reinterpret_cast<const IID*>(a1),
                                                reinterpret_cast<void**>(a2)));
     } else if constexpr (Slot == 1) {
