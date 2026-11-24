@@ -109,6 +109,33 @@ bool check_xs_proxy_slot14(ID3D12Device* real_device) {
                      static_cast<unsigned long long>(console.address));
         return false;
     }
+
+    // A PC description through the proxy, followed by words that are not the console layout: a non-zero "address"
+    // with a size that is not NumDescriptors * 32. Whatever follows a PC caller's 16 bytes, the heap is an ordinary
+    // one, and its start is not that word.
+    const std::uint64_t not_sizes[] = {0x1234, 5ull * 32ull, 4ull * 32ull + 1, 0};
+    for (const std::uint64_t not_size : not_sizes) {
+        ConsoleDescriptorHeapDesc pc{};
+        pc.desc = console.desc;
+        pc.address = 0x0000123400005000ull;
+        pc.size = not_size;
+        Ref<ID3D12DescriptorHeap> plain;
+        const HRESULT plain_hr = proxy->CreateDescriptorHeap(&pc.desc, IID_PPV_ARGS(plain.put()));
+        ID3D12DescriptorHeap* plain_real = plain.get() ? rt::d3d12_xs::heap_proxy_real_heap(plain.get()) : nullptr;
+        if (FAILED(plain_hr) || !plain_real) {
+            std::fprintf(stderr, "proxy CreateDescriptorHeap(PC desc, size 0x%llx after it) failed: 0x%08lx\n",
+                         static_cast<unsigned long long>(not_size), static_cast<unsigned long>(plain_hr));
+            return false;
+        }
+        const auto start = plain_real->GetCPUDescriptorHandleForHeapStart();
+        if (start.ptr == 0 || start.ptr == static_cast<SIZE_T>(pc.address)) {
+            std::fprintf(stderr, "a PC description followed by address 0x%llx and size 0x%llx was taken for the "
+                                 "console layout: heap start 0x%llx\n",
+                         static_cast<unsigned long long>(pc.address), static_cast<unsigned long long>(not_size),
+                         static_cast<unsigned long long>(start.ptr));
+            return false;
+        }
+    }
     return true;
 }
 

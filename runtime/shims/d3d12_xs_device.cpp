@@ -1581,6 +1581,20 @@ static bool readable_range(const void* ptr, std::size_t bytes) {
 
 std::atomic<ConsoleDescriptorHeapHandler> g_console_descriptor_heap{nullptr};   // set_console_descriptor_heap_handler
 
+// Whether the two words after a description are the console layout's address and size. The size is the heap's bytes
+// as the title works them out from the increment it was given: the device's GetDescriptorHandleIncrementSize for the
+// type (slot 15, which this proxy forwards unchanged) times NumDescriptors. VIctory, which runs the title to its menus,
+// recognises a placement the same way, size against increment times count. An address alone is no evidence: a PC
+// caller's 16 bytes are followed by whatever it holds next, almost always readable and often non-zero, and an
+// ordinary heap taken for a console one got that word as its CPU start, which the first Create*View wrote through
+// (ubiquitarianism/leonida 37246f1 found it: a Windows ctest run went from 22 failures to 4 with a size check).
+bool console_heap_tail(ID3D12Device* real, const D3D12_DESCRIPTOR_HEAP_DESC& desc, std::uint64_t address,
+                       std::uint64_t size) {
+    if (address == 0 || size == 0 || desc.NumDescriptors == 0) return false;
+    const UINT increment = real->GetDescriptorHandleIncrementSize(desc.Type);
+    return increment != 0 && size == static_cast<std::uint64_t>(increment) * desc.NumDescriptors;
+}
+
 HRESULT proxy_create_descriptor_heap(DeviceProxy* self, const D3D12_DESCRIPTOR_HEAP_DESC* desc, const IID* riid,
                                      void** out) {
     note_slot(14);
@@ -1618,11 +1632,11 @@ HRESULT proxy_create_descriptor_heap(DeviceProxy* self, const D3D12_DESCRIPTOR_H
             std::uint64_t size = 0;
             std::memcpy(&address, tail, sizeof(address));
             std::memcpy(&size, bytes + sizeof(D3D12_DESCRIPTOR_HEAP_DESC) + sizeof(address), sizeof(size));
-            // Console-extended slot 14 (issue #313): address/size follow the PC desc. Only take this path when a
-            // non-zero console VA is present and a device registered the handler; normal PC 16-byte descs never
-            // enter it.
+            // Console-extended slot 14 (issue #313): address/size follow the PC desc. Only taken when the size agrees
+            // with the descriptor count (console_heap_tail) and a device registered the handler; a PC description,
+            // whatever follows it, goes to CreateDescriptorHeap.
             const ConsoleDescriptorHeapHandler handler = g_console_descriptor_heap.load(std::memory_order_acquire);
-            if (address != 0 && handler) {
+            if (handler && console_heap_tail(self->real, *pc_desc, address, size)) {
                 console_extended = true;
                 hr = handler(self->real, pc_desc, address, size, __uuidof(ID3D12DescriptorHeap), &created);
             }
