@@ -29,6 +29,7 @@
 #include <windows.h>
 #include <dxgi1_4.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <cstddef>
@@ -39,7 +40,9 @@
 #include <iterator>
 #include <new>
 #include <memory>
+#include <mutex>
 #include <utility>
+#include <vector>
 
 namespace rt::d3d12_xs {
 namespace {
@@ -681,6 +684,8 @@ static_assert(kQueueSlots * sizeof(void*) <= 4096 && kFenceSlots * sizeof(void*)
 
 constexpr unsigned kQueueSignal = 14, kQueueWait = 15;  // (ID3D12Fence*, UINT64)
 
+struct FenceWord;   // fence slot 12's completed-value word (below, before child_slot)
+
 struct ChildProxy {
     void** vtable;          // offset 0: the caller's ID3D12CommandQueue* / ID3D12Fence* points here
     IUnknown* real;         // offset 8: the PC or Vulkan-layer object every thunk forwards to
@@ -689,6 +694,7 @@ struct ChildProxy {
     unsigned slot_count;    // public slots the real object implements; the rest of the table is refused
     std::atomic<unsigned long> refs;
     QueueLayout layout = QueueLayout::pc;   // a queue: its device's layout (wrap_child); pc for the other kinds
+    std::atomic<FenceWord*> fence_word{nullptr};   // a fence: the word slot 12 handed out, once it has
 };
 
 template <ChildKind K>
@@ -780,10 +786,13 @@ void reset_child_stats() {
     S::overruns.store(0, std::memory_order_relaxed);
 }
 
+void forget_fence_word(FenceWord* word);   // the watcher stops reading the fence (fence slot 12, below)
+
 // Frees a proxy whose last reference is gone, with the real object and the device reference it held.
 void destroy_child(ChildProxy* self) {
     IUnknown* real = self->real;
     DeviceProxy* device = self->device;
+    if (FenceWord* word = self->fence_word.load(std::memory_order_acquire)) forget_fence_word(word);
     delete self;
     if (real) real->Release();
     if (device) proxy_release(device);
@@ -1189,6 +1198,136 @@ LONG CALLBACK table_overrun_handler(EXCEPTION_POINTERS* info) {
     return EXCEPTION_CONTINUE_SEARCH;  // diagnostics only: the fault goes on to the title's handlers or the crash
 }
 
+// ---- Fence slot 12: the completed value at a stable address ----
+//
+// Past ID3D12Fence1's public slots, a console fence's slot 12 takes no arguments and returns a CPU address that always
+// holds the fence's completed value; the title waits on that word (MONITORX/MWAITX on the console's cores) instead of
+// an event. TuxBox serves it for the title, and this repository's Intel-host run stopped where the E_NOTIMPL from it
+// was read as a pointer (docs/retail_boot_intel_host.md, stop 27; docs/related_projects_gaps.md, past stop 13, row 2).
+//
+// The word is made on the first call, from GetCompletedValue, and every later call returns the same address. One
+// watcher thread keeps all words current: each word's event is armed with SetEventOnCompletion for the value after
+// the one the word holds, and a slower poll covers an arming that failed or more words than one wait takes. A CPU
+// Signal or a GetCompletedValue through the proxy stores the new value at once. A word and its event are never
+// freed: the title may read the address after it releases the fence, and the runtime may still set an event it was
+// given (64 bytes and one handle for each fence that ever handed out its address).
+struct FenceWord {
+    alignas(64) std::atomic<std::uint64_t> value{0};   // a cache line of its own, as a monitored word wants
+    ID3D12Fence* fence = nullptr;                       // the real fence while the word is watched; not owned
+    HANDLE event = nullptr;                             // auto-reset, armed for armed_for
+    std::uint64_t armed_for = 0;                        // 0: not armed
+};
+
+class FenceWatcher {
+public:
+    static FenceWatcher& get() {
+        static FenceWatcher* const watcher = new FenceWatcher;   // lives as long as the process, as its thread does
+        return *watcher;
+    }
+
+    // Starts watching `word`; false when the thread cannot start (the word then changes only through the proxy).
+    bool watch(FenceWord* word) {
+        std::lock_guard lock(mutex_);
+        words_.push_back(word);
+        if (!started_) {
+            if (!wake_) wake_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            HANDLE thread = wake_ ? CreateThread(nullptr, 0, &FenceWatcher::run, this, 0, nullptr) : nullptr;
+            if (!thread) return false;
+            CloseHandle(thread);
+            started_ = true;
+        }
+        SetEvent(wake_);
+        return true;
+    }
+
+    // The fence goes away: once this returns, the watcher does not read it again.
+    void forget(FenceWord* word) {
+        std::lock_guard lock(mutex_);
+        words_.erase(std::remove(words_.begin(), words_.end(), word), words_.end());
+        word->fence = nullptr;
+    }
+
+    // Stores the fence's completed value in its word now (a thread that holds a reference to the fence calls this).
+    void refresh(FenceWord* word) {
+        std::lock_guard lock(mutex_);
+        if (word->fence) word->value.store(word->fence->GetCompletedValue(), std::memory_order_release);
+    }
+
+private:
+    static DWORD WINAPI run(void* self) {
+        static_cast<FenceWatcher*>(self)->loop();
+        return 0;
+    }
+
+    void loop() {
+        for (;;) {
+            HANDLE handles[MAXIMUM_WAIT_OBJECTS];
+            DWORD count = 0;
+            DWORD timeout = INFINITE;
+            handles[count++] = wake_;
+            {
+                std::lock_guard lock(mutex_);
+                for (FenceWord* word : words_) {
+                    const std::uint64_t completed = word->fence->GetCompletedValue();
+                    if (completed != word->value.load(std::memory_order_relaxed))
+                        word->value.store(completed, std::memory_order_release);
+                    // UINT64_MAX is a removed device's answer: nothing comes after it.
+                    if (completed != UINT64_MAX && word->armed_for != completed + 1 && word->event &&
+                        SUCCEEDED(word->fence->SetEventOnCompletion(completed + 1, word->event)))
+                        word->armed_for = completed + 1;
+                    if (word->event && word->armed_for == completed + 1 && count < MAXIMUM_WAIT_OBJECTS)
+                        handles[count++] = word->event;
+                    else
+                        timeout = 1;   // not armed, or past what one wait takes: poll
+                }
+                if (timeout == INFINITE && !words_.empty()) timeout = 16;   // a safety poll behind the events
+            }
+            WaitForMultipleObjects(count, handles, FALSE, timeout);
+        }
+    }
+
+    std::mutex mutex_;
+    std::vector<FenceWord*> words_;
+    HANDLE wake_ = nullptr;
+    bool started_ = false;
+};
+
+void forget_fence_word(FenceWord* word) { FenceWatcher::get().forget(word); }
+
+// Slot 12: the address of the fence's completed-value word, made on the first call. Null only when the word cannot
+// be allocated (logged).
+std::uint64_t fence_completion_address(ChildProxy* self) {
+    FenceWord* word = self->fence_word.load(std::memory_order_acquire);
+    if (!word) {
+        auto* made = new (std::nothrow) FenceWord;
+        if (!made) {
+            std::fprintf(stderr, "[rt] d3d12_xs: fence slot 12: no memory for the completed-value word\n");
+            return 0;
+        }
+        made->fence = static_cast<ID3D12Fence*>(self->real);
+        made->event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        made->value.store(made->fence->GetCompletedValue(), std::memory_order_relaxed);
+        FenceWord* expected = nullptr;
+        if (self->fence_word.compare_exchange_strong(expected, made, std::memory_order_acq_rel)) {
+            word = made;
+            static std::atomic<bool> s_logged{false};
+            const bool watched = FenceWatcher::get().watch(made);
+            if (!s_logged.exchange(true))
+                std::fprintf(stderr, "[rt] d3d12_xs: fence slot 12: the completed value at %p%s\n",
+                             static_cast<void*>(&made->value),
+                             watched ? "" : " (no watcher thread: it changes only through this fence's own calls)");
+        } else {
+            // Another thread made it first; this one was never handed out.
+            if (made->event) CloseHandle(made->event);
+            delete made;
+            word = expected;
+        }
+    } else {
+        FenceWatcher::get().refresh(word);
+    }
+    return reinterpret_cast<std::uint64_t>(&word->value);
+}
+
 // ---- The console queue layout (QueueLayout::console in d3d12_xs_device.h) ----
 //
 // A console-layout queue answers slots 0-13 as a PC queue does; from 14 on, console_queue_slot maps each console slot
@@ -1371,6 +1510,10 @@ std::uint64_t WINAPI child_slot(ChildProxy* self, std::uint64_t a1, std::uint64_
             if (self->layout == QueueLayout::console) return console_queue_slot<Slot>(self, a1, a2, a3, a4);
         }
         note_child_slot<K>(Slot);
+        if constexpr (K == ChildKind::fence && Slot == 12) {
+            d3d12_trace::record("XboxID3D12Fence::GetCompletionValueAddress");
+            return fence_completion_address(self);
+        }
         if (Slot >= self->slot_count) {
             bool expected = false;
             if (ChildStats<K>::beyond_warned[Slot].compare_exchange_strong(expected, true,
@@ -1400,6 +1543,12 @@ std::uint64_t WINAPI child_slot(ChildProxy* self, std::uint64_t a1, std::uint64_
                                                  std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t,
                                                  std::uint64_t, std::uint64_t, std::uint64_t);
         auto fn = reinterpret_cast<ForwardFn>(self->real_vtable[Slot]);
+        if constexpr (K == ChildKind::fence && (Slot == 8 || Slot == 10)) {
+            // GetCompletedValue and a CPU Signal: a slot-12 word shows the value at once.
+            const std::uint64_t result = fn(self->real, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14);
+            if (FenceWord* word = self->fence_word.load(std::memory_order_acquire)) FenceWatcher::get().refresh(word);
+            return result;
+        }
         return fn(self->real, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14);
     }
 }

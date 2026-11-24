@@ -89,6 +89,7 @@ struct Mock {
     bool create_null;        // device: creation returns create_result with no object
     HRESULT create_result;   // device: what creation returns (S_OK makes the object)
     Mock* last_child;        // device: the object its last creation or open made
+    std::atomic<std::uint64_t> completed;   // fence: what slot 8 returns (kCompletedValue when made)
     unsigned calls[kMockSlots];
     std::uint64_t args[kMockSlots][5];
     std::uint64_t array[kMockSlots][4];  // device: the first entries of the array argument, as received
@@ -185,6 +186,7 @@ HRESULT mock_create(Mock* device, Kind kind, std::uint64_t riid, std::uint64_t o
     Mock* child = new_mock(kind);
     child->fence1 = device->fence1;
     child->allocator_tag = device->allocator_tag;
+    child->completed.store(kCompletedValue);
     device->last_child = child;
     return mock_query(child, reinterpret_cast<const IID*>(riid), out);
 }
@@ -215,7 +217,7 @@ std::uint64_t mock_call(Mock* m, unsigned slot, const std::uint64_t* words) {
         }
         return S_OK;
     }
-    if (m->kind == Kind::fence && slot == 8) return kCompletedValue;  // GetCompletedValue
+    if (m->kind == Kind::fence && slot == 8) return m->completed.load();  // GetCompletedValue
     if (m->kind == Kind::queue && slot == 10) copy_array(m, slot, a2, a1);  // ExecuteCommandLists(count, lists)
     if (m->kind == Kind::command_list && slot == 28) copy_array(m, slot, a2, a1);  // SetDescriptorHeaps(count, heaps)
     return S_OK;
@@ -961,7 +963,8 @@ int check_tail(bool want_guarded) {
            queue_mock->args[14][0] == word(xs::fence_proxy_real_fence(fence)) && queue_mock->args[14][1] == 5);
     for (unsigned slot = 19; slot < xs::queue_proxy_table_size(); ++slot)
         EXPECT(hr_of(raw(queue, slot)) == E_NOTIMPL && queue_mock->calls[slot] == 0);
-    for (unsigned slot = 12; slot < xs::fence_proxy_table_size(); ++slot) EXPECT(hr_of(raw(fence, slot)) == E_NOTIMPL);
+    // 12 is served (check_fence_completion_address); the refused tail starts after it.
+    for (unsigned slot = 13; slot < xs::fence_proxy_table_size(); ++slot) EXPECT(hr_of(raw(fence, slot)) == E_NOTIMPL);
     EXPECT(xs::queue_table_overruns() == 0 && xs::fence_table_overruns() == 0);
     EXPECT(release(queue) == 0 && release(fence) == 0 && release(device) == 0 && mock->refs == 0);
     return 0;
@@ -1239,6 +1242,54 @@ int check_console_command_list() {
     return 0;
 }
 
+// ---- Fence slot 12: the completed value at a stable address, kept current ----
+
+// True when *word reads `want` within two seconds (the watcher thread's safety poll is 16 ms).
+bool word_reaches(const volatile std::uint64_t* word, std::uint64_t want) {
+    for (int i = 0; i < 2000; ++i) {
+        if (*word == want) return true;
+        Sleep(1);
+    }
+    return *word == want;
+}
+
+int check_fence_completion_address() {
+    g_label = "xs_proxy_mock fence slot 12";
+    for (const bool fence1 : {false, true}) {
+        Mock* mock = nullptr;
+        void* device = make_device(mock, 9, fence1);
+        void* fence = make_fence(device);
+        EXPECT(device && fence);
+        Mock* const real = reinterpret_cast<Mock*>(xs::fence_proxy_real_fence(fence));
+
+        // The word holds GetCompletedValue's answer, on a cache line of its own, and every call returns it.
+        const auto* word = reinterpret_cast<const volatile std::uint64_t*>(raw(fence, 12));
+        EXPECT(word && reinterpret_cast<std::uintptr_t>(word) % 64 == 0 && *word == kCompletedValue);
+        EXPECT(reinterpret_cast<const volatile std::uint64_t*>(raw(fence, 12)) == word);
+
+        // The GPU completes more work: the watcher thread stores the new value without a call from the title.
+        real->completed.store(42);
+        EXPECT(word_reaches(word, 42));
+        // A CPU Signal through the proxy shows at once, as does what GetCompletedValue reads.
+        real->completed.store(55);
+        EXPECT(hr_of(raw(fence, 10, 55)) == S_OK && *word == 55);
+        real->completed.store(56);
+        EXPECT(raw(fence, 8) == 56 && *word == 56);
+
+        // Past it the table is still refused.
+        EXPECT(hr_of(raw(fence, 13)) == E_NOTIMPL);
+
+        // Released, the fence is no longer read; the word stays readable and keeps its last value.
+        EXPECT(release(fence) == 0 && release(device) == 0 && mock->refs == 0 && real->refs == 0);
+        real->completed.store(99);
+        Sleep(50);
+        EXPECT(*word == 56);
+    }
+    std::printf("%s: passed\n", g_label);
+    g_label = "xs_proxy_mock";
+    return 0;
+}
+
 // ---- The console queue layout (QueueLayout::console): Signal 16 ... ExecuteCommandListsX 35 ----
 
 int check_console_queue_layout() {
@@ -1348,7 +1399,7 @@ int main(int argc, char** argv) {
     if (argc != 1) return 2;
     if (check_tail(true) || check_levels() || check_fence1() || check_create_failures() || check_open_shared() ||
         check_alloc_failures() || check_allocators() || check_xbox_slots() || check_console_command_list() ||
-        check_console_queue_layout())
+        check_console_queue_layout() || check_fence_completion_address())
         return 1;
     std::printf("xs_proxy_mock_test: PASS (%d allocations refused on purpose)\n", g_failed_news);
     return 0;

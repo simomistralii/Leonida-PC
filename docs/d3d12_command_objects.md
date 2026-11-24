@@ -758,6 +758,14 @@ Queues and fences are wrapped the same way.
 - **What is wrapped.** Device slots 8 (`CreateCommandQueue`), 75 (`CreateCommandQueue1`), 36
   (`CreateFence`) and 32 (`OpenSharedHandle`, when it opens a fence) return queue and fence proxies. Each
   proxy forwards the public chain in PC order: 19 queue slots, and 11 or 12 fence slots, in SDK 10.0.26100.
+- **Fence slot 12.** Past `ID3D12Fence1`'s public slots, slot 12 takes no arguments and returns the address of a
+  word that holds the fence's completed value: the same address on every call, 64-byte aligned, made from
+  `GetCompletedValue` on the first one. A watcher thread keeps every such word current (each word's event armed
+  with `SetEventOnCompletion` for the next value, a 16 ms poll behind it), and a CPU `Signal` or a
+  `GetCompletedValue` through the proxy stores the new value at once. The title waits on that word; this
+  repository's Intel-host run stopped where the old `E_NOTIMPL` came back from it and was read as a pointer
+  ([retail_boot_intel_host.md](retail_boot_intel_host.md), stop 27). A word is never freed, so an address the title
+  keeps after releasing its fence stays readable.
 - **The console queue layout.** The queues of the device `D3D12XboxCreateDevice` hands the title take the
   console slot map (`QueueLayout::console`, `runtime/shims/d3d12_xs_device.h`): slots 0-13 as on the PC, then
   `Signal` 16, `Wait` 17, `GetTimestampFrequency` 18, `GetClockCalibration` 19, `GetDesc` 20 (the return buffer
