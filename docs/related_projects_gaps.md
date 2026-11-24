@@ -32,7 +32,7 @@ hypothesis.
 | Relaunch | `XLaunchNewGame` does not return; the title relaunches itself with its path from `GetModuleFileNameA` (`xgame.rs`) | `XLaunchNewGame` logs and returns (`runtime/shims/xgameruntime.cpp`) |
 | Main module identity | `GetModuleHandle(NULL)` and `GetModuleFileName*` answer with the title's image and path (`kernel.rs`) | They answer with `gta6rt.exe` ([xcl_compare.md](xcl_compare.md) lists the same difference) |
 | Virtual memory range | `D3D12ConfigureVirtualMemoryX` writes the user-space range to its two outputs (`crates/victory-gpu/src/device.rs`) | It returns `S_OK` and writes nothing (`runtime/shims/d3d12_xs.cpp`) |
-| Text entry | The title takes `E_ABORT` for "cancelled" and carries on; any other failure is an error (`xgameui.rs`) | Text entry fails with `E_FAIL` (`runtime/shims/xgameruntime_offline.cpp`) |
+| Text entry | The title takes `E_ABORT` for "cancelled" and carries on; any other failure is an error (`xgameui.rs`) | **Done in this fork:** slots 17-19 start the async and complete it with `E_ABORT` and no text, and the size and result slots answer `E_ABORT` (`runtime/shims/xgameruntime_offline.cpp`); before, the call failed with `E_FAIL` before starting |
 | CRT file opens | `fopen`, `_wfopen`, `_open`, `_wstat64`, `std::_Fiopen` and the others take virtual-drive paths too, as do `GetDiskFreeSpace(Ex)W` and `SetCurrentDirectoryA` (`files.rs`) | Only the kernel32 family maps `G:\` and `T:\` (`runtime/shims/file_system.cpp`) |
 
 ## Small fixes found on the way

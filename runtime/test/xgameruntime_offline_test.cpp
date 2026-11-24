@@ -53,6 +53,10 @@ using Dialog = HRESULT(STDMETHODCALLTYPE*)(void*, XAsyncBlock*, const char*, con
 using DialogResult = HRESULT(STDMETHODCALLTYPE*)(void*, XAsyncBlock*, uint32_t*);
 using ErrorDialog = HRESULT(STDMETHODCALLTYPE*)(void*, XAsyncBlock*, HRESULT, const char*);
 using AsyncOnly = HRESULT(STDMETHODCALLTYPE*)(void*, XAsyncBlock*);
+using TextEntry = HRESULT(STDMETHODCALLTYPE*)(void*, XAsyncBlock*, const char*, const char*, const char*, uint32_t,
+                                              uint32_t);
+using TextEntrySize = HRESULT(STDMETHODCALLTYPE*)(void*, XAsyncBlock*, uint32_t*);
+using TextEntryResult = HRESULT(STDMETHODCALLTYPE*)(void*, XAsyncBlock*, uint32_t, char*, uint32_t*);
 using NoArgs = HRESULT(STDMETHODCALLTYPE*)(void*);
 using Bool = bool(STDMETHODCALLTYPE*)(void*);
 using Count = uint32_t(STDMETHODCALLTYPE*)(void*);
@@ -217,6 +221,20 @@ int main() {
     check(at<ErrorDialog>(ui, 14)(ui, &async, static_cast<HRESULT>(0x80830003), "save") == S_OK && finished(&async) &&
               at<AsyncOnly>(ui, 15)(ui, &async) == S_OK,
           "an error dialog is logged and dismissed");
+    async = XAsyncBlock{};
+    uint32_t text_size = 99, text_used = 99;
+    char text[16] = "untouched";
+    check(at<TextEntry>(ui, 17)(ui, &async, "Name", "Name your save", "Lucia", 0, 15) == S_OK && finished(&async) &&
+              XAsyncGetStatus(&async, false) == E_ABORT,
+          "a text entry starts and completes as cancelled (E_ABORT)");
+    check(at<TextEntrySize>(ui, 18)(ui, &async, &text_size) == E_ABORT && text_size == 0,
+          "its result size is E_ABORT with no bytes");
+    check(at<TextEntryResult>(ui, 19)(ui, &async, sizeof(text), text, &text_used) == E_ABORT && text_used == 0 &&
+              std::strcmp(text, "untouched") == 0,
+          "its result is E_ABORT and writes no text");
+    check(at<TextEntry>(ui, 17)(ui, nullptr, "Name", nullptr, nullptr, 0, 15) == E_POINTER &&
+              at<TextEntrySize>(ui, 18)(ui, &async, nullptr) == E_POINTER,
+          "a text entry without an async block or size pointer is refused");
     check(at<NoArgs>(ui, 7)(ui) == E_FAIL, "a profile card is not available offline");
     check(at<NoArgs>(ui, 20)(ui) == E_NOTIMPL, "an unknown slot answers E_NOTIMPL");
 

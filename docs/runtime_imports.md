@@ -435,9 +435,12 @@ on the executable, the rest is not:
   `LEONIDA_LOG_GAME_EVENTS=1` logs each with its dimensions and measurements.
 - **Dialogs:** a message dialog's title, text and buttons go to the log (`[rt] game dialog:`), and it completes at
   once with its default button; an error dialog's HRESULT and context are logged and it is dismissed. So an error
-  the game would show on screen at boot is readable in the log. Every other UI (profile cards, pickers, text entry,
-  web authentication, invites, state share) fails before starting (`E_FAIL`); the docs' unnamed slots and the
-  PC-hosted UI callbacks of `IXGameUiImpl4` answer `E_NOTIMPL`.
+  the game would show on screen at boot is readable in the log. A text entry is logged (`[rt] game text entry:`)
+  and completes as cancelled: `XGameUiShowTextEntryAsync` starts, the async ends with `E_ABORT`, and the size and
+  result slots answer `E_ABORT` with no text. VIctory records that the title takes `E_ABORT` from a text entry as
+  the player backing out and goes on, and any other failure as an error ([related_projects_gaps.md](related_projects_gaps.md)).
+  Every other UI (profile cards, pickers, web authentication, invites, state share) fails before starting
+  (`E_FAIL`); the docs' unnamed slots and the PC-hosted UI callbacks of `IXGameUiImpl4` answer `E_NOTIMPL`.
 - **Streaming:** never streamed. `XGameStreamingInitialize` succeeds, `XGameStreamingIsStreaming` is false, there
   are no clients, and the connection-state registration hands out a token that never fires. Every per-client slot
   answers `E_GAMESTREAMING_NOT_INITIALIZED` (0x89245400), which a caller reading a bool sees as false (low byte
@@ -446,7 +449,7 @@ on the executable, the rest is not:
   `XGameStreamingRegisterConnectionStateChanged` are the GDK reference's, and the executable has no caller to check
   them against. `tools/gdk_runtime_calls.py` finds no thunk for the message dialog and none for any
   `XGameStreamingImpl` or `XUserDeviceImpl` slot. Of `XGameUiImpl` it links slots 7-8 and 17-19 only: the profile
-  card and text entry, which fail before starting.
+  card, which fails before starting, and text entry, which ends as cancelled.
 
 - **Accessibility and speech** (`IXAccessibilityImpl2`, slots 3-21): `XHighContrastGetMode` (5) answers Off and
   `XClosedCaptionSetEnabled` (4) is accepted. No voice is installed: `XSpeechSynthesizerEnumerateInstalledVoices`

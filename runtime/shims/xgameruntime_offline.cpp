@@ -10,8 +10,9 @@
 //   XGameEventImpl      XGameEventWrite (telemetry) succeeds and is dropped; the first event's name is logged, and
 //                       LEONIDA_LOG_GAME_EVENTS=1 logs every one.
 //   XGameUiImpl         a message dialog or error dialog has no screen: its title and text go to the log and it
-//                       completes at once with the dialog's default button (error dialogs: dismissed). Every other UI
-//                       (profile cards, pickers, text entry, web authentication, invites) fails before starting.
+//                       completes at once with the dialog's default button (error dialogs: dismissed). A text entry
+//                       completes as cancelled (E_ABORT), which the title takes as the player backing out. Every
+//                       other UI (profile cards, pickers, web authentication, invites) fails before starting.
 //   XGameStreamingImpl  the game is never streamed: initialising succeeds, IsStreaming is false, there are no
 //                       clients, the connection-state registration hands out a token that never fires.
 //   XDisplayImpl        XDisplayTryEnableHdrMode: Disabled (the host output is SDR), Enabled with LEONIDA_HDR=1.
@@ -153,7 +154,7 @@ const GUID kUiInterfaces[] = {
 
 enum class XGameUiMessageDialogButton : uint32_t { First = 0, Second = 1, Third = 2 };
 
-const char kDialogIdentity = 0, kErrorDialogIdentity = 0;
+const char kDialogIdentity = 0, kErrorDialogIdentity = 0, kTextEntryIdentity = 0;
 
 // The answer of a message dialog rides in the async context: the button, which never needs more.
 HRESULT CALLBACK dialog_provider(XAsyncOp op, const XAsyncProviderData* data) {
@@ -221,6 +222,49 @@ HRESULT STDMETHODCALLTYPE ui_error_dialog_result(void*, XAsyncBlock* async) {
 // 16: XGameUiSetNotificationPositionHint(position): there are no notifications to place.
 HRESULT STDMETHODCALLTYPE ui_set_notification_hint(void*) { return S_OK; }
 
+// A text entry has no keyboard to show, so it ends the way a player backing out of it ends: the async starts, its
+// callback runs, and it completes with E_ABORT and no text. Grand Theft Auto VI takes E_ABORT from a text entry as
+// cancelled and goes on, and any other failure as an error (VIctory's xgameui.rs; docs/related_projects_gaps.md), so
+// failing the call before it starts, as the other UIs do, would be the wrong answer here.
+HRESULT CALLBACK text_entry_provider(XAsyncOp op, const XAsyncProviderData* data) {
+    if (op == XAsyncOp::Begin) return XAsyncSchedule(data->async, 0);
+    if (op == XAsyncOp::DoWork) XAsyncComplete(data->async, E_ABORT, 0);
+    return S_OK;
+}
+
+// 17: HRESULT XGameUiShowTextEntryAsync(XAsyncBlock* async, const char* titleText, const char* descriptionText,
+//        const char* defaultText, XGameUiTextEntryInputScope inputScope, uint32_t maxTextLength)
+HRESULT STDMETHODCALLTYPE ui_text_entry_async(void*, XAsyncBlock* async, const char* title, const char* description,
+                                              const char* default_text, uint32_t scope, uint32_t max_length) {
+    if (!async) return E_POINTER;
+    std::fprintf(stderr, "[rt] game text entry: \"%s\": %s [default \"%s\", input scope %u, up to %u characters; "
+                 "cancelled, there is no keyboard]\n", title ? title : "", description ? description : "",
+                 default_text ? default_text : "", scope, max_length);
+    return XAsyncBegin(async, nullptr, &kTextEntryIdentity, "XGameUiShowTextEntryAsync", text_entry_provider);
+}
+
+// 18: HRESULT XGameUiShowTextEntryResultSize(XAsyncBlock* async, uint32_t* resultTextBufferSize)
+// The async's status comes back: E_PENDING while it runs, then E_ABORT, with a size of 0.
+HRESULT STDMETHODCALLTYPE ui_text_entry_result_size(void*, XAsyncBlock* async, uint32_t* size) {
+    if (!async || !size) return E_POINTER;
+    size_t bytes = 0;
+    const HRESULT hr = XAsyncGetResultSize(async, &bytes);
+    *size = static_cast<uint32_t>(bytes);
+    return hr;
+}
+
+// 19: HRESULT XGameUiShowTextEntryResult(XAsyncBlock* async, uint32_t resultTextBufferSize, char* resultTextBuffer,
+//        uint32_t* resultTextBufferUsed)
+// E_ABORT as well; nothing is written to the buffer, and 0 bytes are used.
+HRESULT STDMETHODCALLTYPE ui_text_entry_result(void*, XAsyncBlock* async, uint32_t buffer_size, char* buffer,
+                                               uint32_t* used) {
+    if (!async) return E_POINTER;
+    size_t written = 0;
+    const HRESULT hr = XAsyncGetResult(async, &kTextEntryIdentity, buffer_size, buffer, &written);
+    if (used) *used = static_cast<uint32_t>(written);
+    return hr;
+}
+
 template <int Slot> HRESULT STDMETHODCALLTYPE ui_offline(void* self) { return offline_failure<kUiName, Slot>(self); }
 template <int Slot> HRESULT STDMETHODCALLTYPE ui_unknown(void* self) { return unknown_slot<kUiName, Slot>(self); }
 
@@ -241,9 +285,9 @@ const void* const kUiVtable[] = {
     FN(ui_error_dialog_async),         // 14 XGameUiShowErrorDialogAsync
     FN(ui_error_dialog_result),        // 15 XGameUiShowErrorDialogResult
     FN(ui_set_notification_hint),      // 16 XGameUiSetNotificationPositionHint
-    FN(ui_offline<17>),                // 17 XGameUiShowTextEntryAsync
-    FN(ui_offline<18>),                // 18 XGameUiShowTextEntryResultSize
-    FN(ui_offline<19>),                // 19 XGameUiShowTextEntryResult
+    FN(ui_text_entry_async),           // 17 XGameUiShowTextEntryAsync
+    FN(ui_text_entry_result_size),     // 18 XGameUiShowTextEntryResultSize
+    FN(ui_text_entry_result),          // 19 XGameUiShowTextEntryResult
     FN(ui_unknown<20>),                // 20 (unknown in the docs)
     FN(ui_unknown<21>),                // 21 (unknown in the docs)
     FN(ui_unknown<22>),                // 22 (unknown in the docs)
