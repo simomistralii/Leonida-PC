@@ -845,6 +845,18 @@ void check_run_time_load() {
             if (same) release(same);
         }
         check(all, "IXPackageImpl3 answers for IXPackageImpl and IXPackageImpl2 too");
+        // IXPackageImpl4 (tools/gdk_runtime_classes.json): IXPackageImpl3 plus slot 41, XPackageGetPackageKind. VIctory
+        // records the retail title asking for XPackageImpl with this id (docs/related_projects_gaps.md).
+        const GUID package4 = {0x0b9d556e, 0xab70, 0x43f4, {0xba, 0xa0, 0x99, 0x99, 0xac, 0x4c, 0xb0, 0x40}};
+        void* pk4 = nullptr;
+        check(query(&package_cls, package4, &pk4) == S_OK && pk4 == pk,
+              "QueryApiImpl hands out the same XPackageImpl for IXPackageImpl4");
+        if (pk4) {
+            using NoArgs = HRESULT(STDMETHODCALLTYPE*)(void*);
+            check(reinterpret_cast<NoArgs>(slot(pk4, 41))(pk4) == E_NOTIMPL,
+                  "IXPackageImpl4's slot 41 (GetPackageKind) is there and answers E_NOTIMPL");
+            release(pk4);
+        }
         release(pk);
     }
     {
