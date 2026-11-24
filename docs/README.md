@@ -8,6 +8,7 @@ method, scope and caveats. No game data is included.
 
 | Document | What it covers |
 |---|---|
+| [HANDOFF.md](HANDOFF.md) | This fork's state on 2026-11-24: progress, remaining work, the DirectStorage plan and Windows commands. |
 | [design.md](design.md) | Overall project design, asset status, translator contract and open blockers. |
 | [related_projects.md](related_projects.md) | Prior art we may read and the licence boundaries on it. |
 | [related_projects_gaps.md](related_projects_gaps.md) | What VIctory records the title asks of the console APIs, against this runtime: the five likeliest next stops of the retail boot, then the other differences. |
