@@ -15,12 +15,14 @@
 #include <windows.h>
 
 #include <atomic>
+#include <chrono>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <set>
@@ -291,42 +293,115 @@ ApuRegion g_noncached_heap;
 std::vector<void*> g_active_shape_arrays;
 
 // ---- IAcpHal Interface Implementation ----
+//
+// The audio coprocessor's message protocol, as VIctory records the retail title using it (docs/related_projects_gaps.md,
+// row 4; its crates/victory-hle/src/modules/audio.rs): reimplemented here from those facts, nothing copied.
+// - connect(commands, messages): the second count is the size of the message queue; zero commands is refused.
+// - submit(command, id, frame, data, notification) completes at once. Commands 2 and 3 register and unregister the
+//   message kinds of data's first word (a mask); command 1 loads a flowgraph and posts FLOWGRAPH_COMPLETED with
+//   data's second word. A command with a non-zero id is acknowledged with COMMAND_COMPLETED {command, id, frame}, and
+//   a non-zero notification is the APU address of a 32-bit word that is then set to 1.
+// - Only registered kinds are queued. A full queue drops a message and counts it in the next one that fits.
+// - pop_message copies the oldest message (28 bytes: kind, dropped count, microseconds, 16 bytes of data) and says
+//   whether there was one; get_num_messages counts them.
+// Nothing is processed: no SHAPE unit runs, so commands for the XMA contexts are acknowledged and not carried out.
+
+void* __stdcall ApuMapApuAddress(uint32_t apu);   // below, with the heap
+
+constexpr uint32_t kAcpLoadFlowgraph = 1;
+constexpr uint32_t kAcpRegisterMessages = 2;
+constexpr uint32_t kAcpUnregisterMessages = 3;
+constexpr uint32_t kAcpMessageFlowgraphCompleted = 0x02;
+constexpr uint32_t kAcpMessageCommandCompleted = 0x10;
+constexpr uint32_t kAcpMessageDisconnected = 0x80;
+constexpr uint64_t kAcpFramesPerSecond = 375;   // audio frames of 128 samples at 48 kHz
+
+#pragma pack(push, 1)
+struct AcpMessage {
+    uint32_t kind;
+    uint32_t dropped;   // messages a full queue lost since the one before this
+    uint32_t usec;      // microseconds since the object was created
+    uint8_t data[16];
+};
+#pragma pack(pop)
+static_assert(sizeof(AcpMessage) == 28, "an ACP message is 28 bytes");
 
 struct AcpHalImpl {
     // Slot 0: Connect (called at boot with (0x1000, 0x1000), result checked)
-    virtual HRESULT __stdcall connect(uint32_t, uint32_t) {
+    virtual HRESULT __stdcall connect(uint32_t commands, uint32_t messages) {
         trace_call("AcpHal::Connect", "");
+        if (commands == 0) return E_INVALIDARG;
+        std::lock_guard lock(mutex_);
+        connected_ = true;
+        capacity_ = messages;
         return S_OK;
     }
 
     // Slot 1: Disconnect (called at shutdown)
     virtual HRESULT __stdcall disconnect() {
         trace_call("AcpHal::Disconnect", "");
+        std::lock_guard lock(mutex_);
+        if (connected_) post(kAcpMessageDisconnected, nullptr, 0);
+        connected_ = false;
         return S_OK;
     }
 
-    // Slot 2: SubmitCommand
-    // Critical: The title calls slot 2 as (2, 0xf0f0f0f0, -1, config, 0) and
-    // a negative result triggers a fatal int3 kernel panic (+0x43ad94e).
-    virtual HRESULT __stdcall submit_command(uint32_t cmd, uint32_t d1, uint32_t d2,
-                                            const void* config, uint32_t d3) {
-        (void)cmd;
-        (void)d1;
-        (void)d2;
-        (void)config;
-        (void)d3;
-        static std::atomic<bool> warned{false};
-        if (!warned.exchange(true, std::memory_order_relaxed)) {
-            std::fprintf(stderr,
-                         "[rt] acphal: command accepted and dropped: no audio DSP hardware on PC\n");
-        }
+    // Slot 2: SubmitCommand. The title calls it as (2, 0xf0f0f0f0, -1, config, 0) at boot, and a negative result
+    // triggers a fatal int3 (+0x43ad94e), so it never fails.
+    virtual HRESULT __stdcall submit_command(uint32_t command, uint64_t id, uint32_t /*frame*/, const void* data,
+                                            uint32_t notification) {
         trace_call("AcpHal::SubmitCommand", "");
+        const auto word = [data](size_t i) {
+            uint32_t w = 0;
+            if (data) std::memcpy(&w, static_cast<const uint8_t*>(data) + 4 * i, sizeof(w));
+            return w;
+        };
+        {
+            std::lock_guard lock(mutex_);
+            if (command == kAcpRegisterMessages) {
+                mask_ |= word(0);
+            } else if (command == kAcpUnregisterMessages) {
+                mask_ &= ~word(0);
+            } else if (command == kAcpLoadFlowgraph) {
+                const uint32_t flowgraph = word(1);
+                post(kAcpMessageFlowgraphCompleted, &flowgraph, sizeof(flowgraph));
+            } else {
+                static std::atomic<bool> warned{false};
+                if (!warned.exchange(true, std::memory_order_relaxed))
+                    std::fprintf(stderr, "[rt] acphal: commands are acknowledged, not carried out: no audio DSP\n");
+            }
+            if (id != 0) {
+                uint8_t done[16] = {};
+                const uint32_t frame = this->frame();
+                std::memcpy(done, &command, 4);
+                std::memcpy(done + 4, &id, 8);
+                std::memcpy(done + 12, &frame, 4);
+                post(kAcpMessageCommandCompleted, done, sizeof(done));
+            }
+        }
+        if (notification != 0) {
+            // Outside this object's lock: the heap has its own (g_apu_mutex).
+            if (void* p = ApuMapApuAddress(notification))
+                InterlockedExchange(static_cast<volatile LONG*>(p), 1);   // the title reads it as volatile
+        }
         return S_OK;
     }
 
-    // Slots 3 and 4: PopMessage and GetNumMessages (message polling, not called by title)
-    virtual uint32_t __stdcall pop_message() { return 0; }
-    virtual uint32_t __stdcall get_num_messages() { return 0; }
+    // Slot 3: PopMessage. 1 with the oldest message copied to `out` (when not null), 0 when there is none; a full
+    // 32-bit value, so a caller that reads more than AL sees 0 or 1.
+    virtual uint32_t __stdcall pop_message(AcpMessage* out) {
+        std::lock_guard lock(mutex_);
+        if (queue_.empty()) return 0;
+        if (out) std::memcpy(out, &queue_.front(), sizeof(AcpMessage));
+        queue_.pop_front();
+        return 1;
+    }
+
+    // Slot 4: GetNumMessages
+    virtual uint32_t __stdcall get_num_messages() {
+        std::lock_guard lock(mutex_);
+        return static_cast<uint32_t>(queue_.size());
+    }
 
     // Slot 5: Release
     virtual HRESULT __stdcall release() {
@@ -334,6 +409,41 @@ struct AcpHalImpl {
         delete this;
         return S_OK;
     }
+
+    virtual ~AcpHalImpl() = default;
+
+private:
+    uint32_t usec() const {
+        return static_cast<uint32_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start_).count());
+    }
+    uint32_t frame() const {
+        const auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start_);
+        return static_cast<uint32_t>(static_cast<uint64_t>(us.count()) * kAcpFramesPerSecond / 1000000);
+    }
+    // Queues a message of a registered kind (mutex_ held).
+    void post(uint32_t kind, const void* bytes, size_t len) {
+        if ((mask_ & kind) == 0) return;
+        if (queue_.size() >= capacity_) {
+            ++dropped_;
+            return;
+        }
+        AcpMessage m{};
+        m.kind = kind;
+        m.dropped = dropped_;
+        m.usec = usec();
+        if (bytes) std::memcpy(m.data, bytes, len < sizeof(m.data) ? len : sizeof(m.data));
+        dropped_ = 0;
+        queue_.push_back(m);
+    }
+
+    std::mutex mutex_;
+    bool connected_ = false;
+    uint32_t mask_ = 0;
+    size_t capacity_ = 0;
+    uint32_t dropped_ = 0;
+    std::deque<AcpMessage> queue_;
+    std::chrono::steady_clock::time_point start_ = std::chrono::steady_clock::now();
 };
 
 // ---- AcpHalCreate ----

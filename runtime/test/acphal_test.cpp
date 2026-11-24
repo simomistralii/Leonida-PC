@@ -196,6 +196,75 @@ int main() {
     check(map_apu(0) == nullptr, "ApuMapApuAddress(0) returns nullptr");
     check(map_virtual(nullptr) == 0, "ApuMapVirtualAddress(nullptr) returns 0");
 
+    // 4b. The IAcpHal message protocol (acphal.cpp: registered kinds are queued, a command with an id is acknowledged
+    // with COMMAND_COMPLETED, a notification APU address gets its word set to 1, a full queue counts what it drops).
+    {
+#pragma pack(push, 1)
+        struct Message {
+            uint32_t kind;
+            uint32_t dropped;
+            uint32_t usec;
+            uint8_t data[16];
+        };
+#pragma pack(pop)
+        static_assert(sizeof(Message) == 28, "ACP message mirror");
+        using ConnectFn = HRESULT(__stdcall*)(void*, uint32_t, uint32_t);
+        using SubmitFn = HRESULT(__stdcall*)(void*, uint32_t, uint64_t, uint32_t, const void*, uint32_t);
+        using PopFn = uint32_t(__stdcall*)(void*, Message*);
+        using CountFn = uint32_t(__stdcall*)(void*);
+        using ReleaseFn = HRESULT(__stdcall*)(void*);
+        void* acp2 = nullptr;
+        check(create(&acp2) == S_OK && acp2 != nullptr, "AcpHalCreate makes a second object for the protocol checks");
+        if (acp2) {
+            auto vt = *static_cast<void* const* const*>(acp2);
+            const auto connect = reinterpret_cast<ConnectFn>(vt[0]);
+            const auto submit = reinterpret_cast<SubmitFn>(vt[2]);
+            const auto pop = reinterpret_cast<PopFn>(vt[3]);
+            const auto count = reinterpret_cast<CountFn>(vt[4]);
+            check(connect(acp2, 0, 4) == E_INVALIDARG, "connect with zero commands is refused");
+            check(connect(acp2, 16, 2) == S_OK, "connect(16 commands, a queue of 2 messages)");
+
+            const uint32_t both = 0x02 | 0x10;   // FLOWGRAPH_COMPLETED | COMMAND_COMPLETED
+            check(submit(acp2, 2, 0, 0, &both, 0) == S_OK && count(acp2) == 0,
+                  "registering message kinds (command 2, no id) queues nothing");
+
+            volatile uint32_t* word = static_cast<volatile uint32_t*>(va_c);
+            *word = 0;
+            check(submit(acp2, 7, 0x1122334455ull, 0, nullptr, apu_c) == S_OK,
+                  "a command with an id and a notification address is accepted");
+            check(*word == 1, "the notification word at the APU address is set to 1");
+            Message m{};
+            check(count(acp2) == 1 && pop(acp2, &m) == 1 && m.kind == 0x10,
+                  "the command is acknowledged with one COMMAND_COMPLETED message");
+            uint32_t acked_command = 0;
+            uint64_t acked_id = 0;
+            std::memcpy(&acked_command, m.data, 4);
+            std::memcpy(&acked_id, m.data + 4, 8);
+            check(acked_command == 7 && acked_id == 0x1122334455ull && m.dropped == 0,
+                  "COMMAND_COMPLETED carries the command and its 64-bit id");
+
+            const uint32_t flowgraph[2] = {0, 9};
+            check(submit(acp2, 1, 0, 0, flowgraph, 0) == S_OK && pop(acp2, &m) == 1 && m.kind == 0x02,
+                  "loading a flowgraph (command 1) posts FLOWGRAPH_COMPLETED");
+            uint32_t done_flowgraph = 0;
+            std::memcpy(&done_flowgraph, m.data, 4);
+            check(done_flowgraph == 9, "FLOWGRAPH_COMPLETED carries the flowgraph from the data's second word");
+
+            for (uint64_t id = 1; id <= 3; ++id) submit(acp2, 7, id, 0, nullptr, 0);
+            check(count(acp2) == 2, "a queue of 2 holds 2 messages; the third is dropped");
+            pop(acp2, &m);
+            pop(acp2, &m);
+            submit(acp2, 7, 4, 0, nullptr, 0);
+            check(pop(acp2, &m) == 1 && m.dropped == 1, "the next message counts the one the full queue dropped");
+
+            const uint32_t acks = 0x10;
+            submit(acp2, 3, 0, 0, &acks, 0);   // unregister COMMAND_COMPLETED
+            submit(acp2, 7, 5, 0, nullptr, 0);
+            check(count(acp2) == 0 && pop(acp2, &m) == 0, "an unregistered kind is not queued, and an empty pop is 0");
+            check(reinterpret_cast<ReleaseFn>(vt[5])(acp2) == S_OK, "the protocol object is released");
+        }
+    }
+
     // 5. Genuine State Tracking: Free & Memory Reuse
     void* reusable_block1 = nullptr;
     check(alloc(&reusable_block1, nullptr, 0x1000, 0x800, 1) == S_OK && reusable_block1 != nullptr,
