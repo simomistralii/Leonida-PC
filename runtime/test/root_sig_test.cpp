@@ -565,6 +565,56 @@ void test_deserializer() {
               "shim deserializer accepts an all-zero-checksum Xbox blob with the high byte cleared");
         if (shim_zero) shim_zero->Release();
     }
+
+    // A malformed chunk-table entry, before or after a valid RTS0 chunk, fails closed (5c3487a; this check and
+    // the walk it tests were lost when the helper's pull requests were merged).
+    {
+        uint32_t orig_rts_off = 0, orig_rts_sz = 0;
+        std::memcpy(&orig_rts_off, tampered.data() + 32, 4);
+        std::memcpy(&orig_rts_sz, tampered.data() + orig_rts_off + 4, 4);
+        const uint32_t rts_bytes = 8 + orig_rts_sz;
+        for (int bad_first = 0; bad_first < 2; ++bad_first) {
+            // Header (32) + 2 chunk offsets (8) + valid RTS0 chunk.
+            std::vector<uint8_t> bad_table(40 + rts_bytes, 0);
+            std::memcpy(bad_table.data(), "DXBC", 4);
+            const uint32_t version = 1, total = static_cast<uint32_t>(bad_table.size()), nchunks = 2;
+            const uint32_t good_off = 40, bad_off = 16;  // bad_off < min_chunk_off (40)
+            std::memcpy(bad_table.data() + 20, &version, 4);
+            std::memcpy(bad_table.data() + 24, &total, 4);
+            std::memcpy(bad_table.data() + 28, &nchunks, 4);
+            std::memcpy(bad_table.data() + 32, bad_first ? &bad_off : &good_off, 4);
+            std::memcpy(bad_table.data() + 36, bad_first ? &good_off : &bad_off, 4);
+            std::memcpy(bad_table.data() + good_off, tampered.data() + orig_rts_off, rts_bytes);
+            uint32_t h[4];
+            rt::d3d12_xs::dxbc_checksum(bad_table.data(), bad_table.size(), h);
+            std::memcpy(bad_table.data() + 4, h, sizeof(h));
+            std::vector<uint8_t> out;
+            check(!rt::d3d12_xs::copy_rts0_blob_clear_xbox_flags(bad_table.data(), bad_table.size(), out) &&
+                      out.empty(),
+                  bad_first ? "blob helper fails closed on a malformed chunk entry before RTS0"
+                            : "blob helper fails closed on a malformed chunk entry after RTS0");
+        }
+    }
+
+    // An RTS0 chunk of a version the serializer never writes (only 1-3 exist) is not rewritten.
+    {
+        uint32_t rts_off = 0;
+        std::memcpy(&rts_off, tampered.data() + 32, 4);
+        bool all = true;
+        for (const uint32_t bad_version : {0u, 4u, 0xFFFFFFFFu}) {
+            std::vector<uint8_t> odd = tampered;
+            std::memcpy(odd.data() + rts_off + 8, &bad_version, 4);
+            uint32_t h[4];
+            rt::d3d12_xs::dxbc_checksum(odd.data(), odd.size(), h);
+            std::memcpy(odd.data() + 4, h, sizeof(h));
+            std::vector<uint8_t> out(1, 0xCC);
+            if (rt::d3d12_xs::copy_rts0_blob_clear_xbox_flags(odd.data(), odd.size(), out) || !out.empty()) {
+                std::printf("  RTS0 version %u was rewritten\n", bad_version);
+                all = false;
+            }
+        }
+        check(all, "blob helper leaves an RTS0 chunk of version 0, 4 or 0xFFFFFFFF alone");
+    }
 }
 
 }  // namespace

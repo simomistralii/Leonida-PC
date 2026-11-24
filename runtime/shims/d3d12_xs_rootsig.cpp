@@ -147,51 +147,58 @@ bool copy_rts0_blob_clear_xbox_flags(const void* data, size_t size, std::vector<
     if (chunk_count == 0 || chunk_count > 16 || static_cast<size_t>(chunk_count) * 4 > size - 32) return false;
 
     // Verify the incoming container hash before rewriting: a corrupted blob must reach the host deserializer
-    // unchanged so it is rejected, rather than getting a freshly forged valid hash.
-    uint32_t expected_hash[4];
-    dxbc_checksum(bytes, size, expected_hash);
-    if (std::memcmp(expected_hash, bytes + 4, sizeof(expected_hash)) != 0) return false;
+    // unchanged so it is rejected, rather than getting a freshly forged valid hash. Host d3d12.dll accepts a
+    // matching DXBC checksum or an all-zero one and rejects any other with E_INVALIDARG, so an all-zero checksum
+    // is rewritten and stays all zero (a strict check here, merged next to this rule, refused it: root_sig_test).
+    constexpr uint8_t kZeroHash[16] = {};
+    const bool zero_hash = std::memcmp(bytes + 4, kZeroHash, sizeof(kZeroHash)) == 0;
+    if (!zero_hash) {
+        uint32_t expected_hash[4];
+        dxbc_checksum(bytes, size, expected_hash);
+        if (std::memcmp(expected_hash, bytes + 4, sizeof(expected_hash)) != 0) return false;
+    }
 
+    // Every chunk-table entry must point past the table and hold its chunk inside the container; one that does not
+    // is a malformed container, which the host rejects, so it is forwarded unchanged (5c3487a, lost in a merge).
     const size_t min_chunk_off = 32 + static_cast<size_t>(chunk_count) * 4;
+    bool found_rts0 = false;
+    uint32_t rts0_off = 0;
     for (uint32_t i = 0; i < chunk_count; ++i) {
         uint32_t off = 0;
-        std::memcpy(&off, bytes + 32 + i * 4, sizeof(off));
-        // Chunk header (FourCC + size) plus the fixed RTS0 header up to flags.
-        if (off > size || size - off < 8 + 24) continue;
-        if (std::memcmp(bytes + off, "RTS0", 4) != 0) continue;
-
-        const uint8_t* payload = bytes + off + 8;
-        uint32_t flags = 0;
-        std::memcpy(&flags, payload + 20, sizeof(flags));
-        const uint32_t cleared = static_cast<uint32_t>(clear_high_byte(
-            static_cast<D3D12_ROOT_SIGNATURE_FLAGS>(flags)));
-        if (cleared == flags) return false;  // no Xbox high byte
-
-        uint32_t total_size = 0;
-        std::memcpy(&total_size, bytes + 24, sizeof(total_size));
-        if (total_size != size) return false;
-
-        // Do not forge a valid hash for a corrupted container: host d3d12.dll accepts a matching
-        // DXBC checksum or an all-zero checksum, and rejects any other checksum with E_INVALIDARG.
-        constexpr uint8_t kZeroHash[16] = {};
-        const bool zero_hash = std::memcmp(bytes + 4, kZeroHash, sizeof(kZeroHash)) == 0;
-        if (!zero_hash) {
-            uint32_t expected[4];
-            dxbc_checksum(bytes, size, expected);
-            if (std::memcmp(bytes + 4, expected, sizeof(expected)) != 0) return false;
+        std::memcpy(&off, bytes + 32 + static_cast<size_t>(i) * 4, sizeof(off));
+        if (off < min_chunk_off || off > size || size - off < 8) return false;
+        uint32_t chunk_size = 0;
+        std::memcpy(&chunk_size, bytes + off + 4, sizeof(chunk_size));
+        if (chunk_size > size - off - 8) return false;
+        if (!found_rts0 && std::memcmp(bytes + off, "RTS0", 4) == 0) {
+            if (chunk_size < 24) return false;   // the fixed RTS0 header, up to and including the flags
+            found_rts0 = true;
+            rts0_off = off;
         }
-
-        out.assign(bytes, bytes + size);
-        std::memcpy(out.data() + off + 8 + 20, &cleared, sizeof(cleared));
-        // The host deserializer checks the container hash (bytes 4..19), so a stale one is E_INVALIDARG.
-        if (!zero_hash) {
-            uint32_t hash[4];
-            dxbc_checksum(out.data(), out.size(), hash);
-            std::memcpy(out.data() + 4, hash, sizeof(hash));
-        }
-        return true;
     }
-    return false;
+    if (!found_rts0) return false;
+
+    const uint8_t* payload = bytes + rts0_off + 8;
+    uint32_t rts_version = 0;
+    std::memcpy(&rts_version, payload, sizeof(rts_version));
+    if (rts_version < 1 || rts_version > 3) return false;
+
+    uint32_t flags = 0;
+    std::memcpy(&flags, payload + 20, sizeof(flags));
+    const uint32_t cleared = static_cast<uint32_t>(clear_high_byte(
+        static_cast<D3D12_ROOT_SIGNATURE_FLAGS>(flags)));
+    if (cleared == flags) return false;  // no Xbox high byte
+
+    out.assign(bytes, bytes + size);
+    std::memcpy(out.data() + rts0_off + 8 + 20, &cleared, sizeof(cleared));
+    // The host deserializer checks the container hash (bytes 4..19), so a stale one is E_INVALIDARG; an all-zero
+    // hash is not checked and stays all zero.
+    if (!zero_hash) {
+        uint32_t hash[4];
+        dxbc_checksum(out.data(), out.size(), hash);
+        std::memcpy(out.data() + 4, hash, sizeof(hash));
+    }
+    return true;
 }
 
 }  // namespace rt::d3d12_xs
