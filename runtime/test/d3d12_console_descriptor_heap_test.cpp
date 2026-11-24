@@ -24,6 +24,7 @@ struct Ref {
         return &p;
     }
     T* get() const { return p; }
+    T* operator->() const { return p; }   // the checks below call through it (heap->GetDesc() and the others)
 };
 
 bool check_console_addressed_heap(ID3D12Device* device) {
@@ -67,14 +68,13 @@ bool check_xs_proxy_slot14(ID3D12Device* real_device) {
     // create_device_proxy takes over one reference to the device on success (d3d12_xs_device.h); the caller's own
     // reference is released at the end of main, so the proxy gets one of its own.
     real_device->AddRef();
-    void* proxy_raw = nullptr;
-    if (FAILED(rt::d3d12_xs::create_device_proxy(real_device, IID_PPV_ARGS(&proxy_raw))) || !proxy_raw) {
+    // A typed pointer: IID_PPV_ARGS takes the interface id from it (a void* has none, and did not compile).
+    Ref<ID3D12Device> proxy;
+    if (FAILED(rt::d3d12_xs::create_device_proxy(real_device, IID_PPV_ARGS(proxy.put()))) || !proxy.get()) {
         real_device->Release();   // on failure the reference stays the caller's
         std::fprintf(stderr, "create_device_proxy failed\n");
         return false;
     }
-    Ref<ID3D12Device> proxy;
-    proxy.p = static_cast<ID3D12Device*>(proxy_raw);
 
     struct ConsoleDescriptorHeapDesc {
         D3D12_DESCRIPTOR_HEAP_DESC desc{};
