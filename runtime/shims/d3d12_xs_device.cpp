@@ -1589,11 +1589,28 @@ HRESULT proxy_create_descriptor_heap(DeviceProxy* self, const D3D12_DESCRIPTOR_H
     // No output: a capability check, answered by the device (S_FALSE, as on the PC).
     if (!out) return self->real->CreateDescriptorHeap(desc, *riid, nullptr);
 
+    // A console heap type of 4 is a CBV/SRV/UAV heap: xcl records that console titles pass it (its HANDOFF.md, the
+    // device-slot and sparse-window notes; docs/related_projects_gaps.md). The PC has no type 4 (CBV_SRV_UAV is 0,
+    // up to DSV 3), so such a description was refused; it is translated here, in a copy. VIctory records the retail
+    // title's own view heaps as type 0, which needs nothing. The console tail below is still read from the title's
+    // description, right after its 16 bytes.
+    constexpr D3D12_DESCRIPTOR_HEAP_TYPE kConsoleViewHeap = static_cast<D3D12_DESCRIPTOR_HEAP_TYPE>(4);
+    D3D12_DESCRIPTOR_HEAP_DESC translated{};
+    const D3D12_DESCRIPTOR_HEAP_DESC* pc_desc = desc;
+    if (desc && desc->Type == kConsoleViewHeap) {
+        translated = *desc;
+        translated.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        pc_desc = &translated;
+        static std::atomic<bool> s_logged{false};
+        if (!s_logged.exchange(true))
+            std::fprintf(stderr, "[rt] d3d12_xs: descriptor heap type 4 (console CBV/SRV/UAV) taken as CBV_SRV_UAV\n");
+    }
+
     void* created = nullptr;
     HRESULT hr = E_INVALIDARG;
     bool console_extended = false;
-    if (desc && desc->Type <= D3D12_DESCRIPTOR_HEAP_TYPE_DSV &&
-        (desc->Flags & ~D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) == 0) {
+    if (pc_desc && pc_desc->Type <= D3D12_DESCRIPTOR_HEAP_TYPE_DSV &&
+        (pc_desc->Flags & ~D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) == 0) {
         const auto* bytes = reinterpret_cast<const std::uint8_t*>(desc);
         const void* tail = bytes + sizeof(D3D12_DESCRIPTOR_HEAP_DESC);
         if (readable_range(tail, sizeof(std::uint64_t) * 2)) {
@@ -1607,12 +1624,12 @@ HRESULT proxy_create_descriptor_heap(DeviceProxy* self, const D3D12_DESCRIPTOR_H
             const ConsoleDescriptorHeapHandler handler = g_console_descriptor_heap.load(std::memory_order_acquire);
             if (address != 0 && handler) {
                 console_extended = true;
-                hr = handler(self->real, desc, address, size, __uuidof(ID3D12DescriptorHeap), &created);
+                hr = handler(self->real, pc_desc, address, size, __uuidof(ID3D12DescriptorHeap), &created);
             }
         }
     }
     if (!console_extended)
-        hr = self->real->CreateDescriptorHeap(desc, __uuidof(ID3D12DescriptorHeap), &created);
+        hr = self->real->CreateDescriptorHeap(pc_desc, __uuidof(ID3D12DescriptorHeap), &created);
     if (FAILED(hr) || !created) return FAILED(hr) ? hr : E_FAIL;
 
     ID3D12DescriptorHeap* heap = static_cast<ID3D12DescriptorHeap*>(created);
