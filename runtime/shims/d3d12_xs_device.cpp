@@ -2067,6 +2067,156 @@ HRESULT proxy_create_compute_pipeline_from_native_code(DeviceProxy* self, const 
     return hr;
 }
 
+// ---- Console resource formats and flags ----
+//
+// The console has a depth format of its own, 118: 16-bit depth with 8-bit stencil, which the PC has not. 119 is its
+// depth plane as a colour format and 120 its stencil plane as uint, for shader resource views. Console resource
+// descriptions also carry flag bits above the PC's (compression and metadata) that mean nothing on the PC and that
+// the PC and Vulkan devices refuse. TuxBox's run of the title stopped on device slot 25 for a 2560x1440 depth
+// description in format 118 with flags 0x80300006, answered UINT64_MAX (docs/related_projects_gaps.md, past stop 13,
+// row 4). The facts are from there; the code is this repository's own.
+//
+// What reaches the PC device: every resource description loses the flag bits above the PC's; a texture in the
+// console depth family becomes the PC's typeless D24 family, so its depth, stencil and shader views can share it; a
+// depth texture loses unordered access, which a PC depth image cannot also allow. Clear values and depth-stencil
+// views of the family take D24_UNORM_S8_UINT, shader views its R24 or X24 plane format, and a depth-stencil view with
+// no description of a typeless D24 texture gets one with the typed format.
+
+// The PC flags up to RAYTRACING_ACCELERATION_STRUCTURE (0x100) and USE_TIGHT_ALIGNMENT (0x400); 0x200 is dropped, as
+// committed_resource_refusal says the host refuses it. An integer: a D3D12_RESOURCE_FLAGS constant past the SDK's
+// last enumerator is not a constant expression for clang-cl with SDK 10.0.26100.
+constexpr std::uint32_t kPcResourceFlags = 0x5ff;
+constexpr unsigned kConsoleD16S8 = 118, kConsoleR16X8 = 119, kConsoleX16G8 = 120;
+
+bool console_depth_family(DXGI_FORMAT format) {
+    const auto value = static_cast<unsigned>(format);
+    return value >= kConsoleD16S8 && value <= kConsoleX16G8;
+}
+
+// The description the PC device gets for a console one, in place. True when anything changed.
+bool make_pc_resource_desc(D3D12_RESOURCE_DESC& desc) {
+    const auto flags = static_cast<std::uint32_t>(desc.Flags);
+    const DXGI_FORMAT console_format = desc.Format;
+    std::uint32_t pc_flags = flags & kPcResourceFlags;
+    DXGI_FORMAT format = desc.Format;
+    if (desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER) {
+        if (console_depth_family(format)) format = DXGI_FORMAT_R24G8_TYPELESS;
+        if (pc_flags & static_cast<std::uint32_t>(D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL))
+            pc_flags &= ~static_cast<std::uint32_t>(D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    }
+    const bool changed = pc_flags != flags || format != desc.Format;
+    desc.Flags = static_cast<D3D12_RESOURCE_FLAGS>(pc_flags);
+    desc.Format = format;
+    if (changed) {
+        static std::atomic<bool> s_logged{false};
+        if (!s_logged.exchange(true))
+            std::fprintf(stderr, "[rt] d3d12_xs: a console resource description: format %u flags 0x%x -> format %u "
+                         "flags 0x%x (further ones are not logged)\n", static_cast<unsigned>(console_format), flags,
+                         static_cast<unsigned>(desc.Format), pc_flags);
+    }
+    return changed;
+}
+
+// The format of a clear value or a depth-stencil view for a console depth-family format.
+DXGI_FORMAT pc_depth_format(DXGI_FORMAT format) {
+    return console_depth_family(format) ? DXGI_FORMAT_D24_UNORM_S8_UINT : format;
+}
+
+// The format of a shader resource view: the depth plane for 118 and 119, the stencil plane for 120.
+DXGI_FORMAT pc_shader_view_format(DXGI_FORMAT format) {
+    switch (static_cast<unsigned>(format)) {
+        case kConsoleD16S8:
+        case kConsoleR16X8: return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+        case kConsoleX16G8: return DXGI_FORMAT_X24_TYPELESS_G8_UINT;
+        default: return format;
+    }
+}
+
+// The view a depth-stencil view with no description gets on a typeless D24 texture, which the PC views only through
+// a typed format: D24_UNORM_S8_UINT over the whole resource. False for any other resource.
+bool default_view_of_typeless_d24(ID3D12Resource* resource, D3D12_DEPTH_STENCIL_VIEW_DESC& view) {
+    if (!resource) return false;
+    const D3D12_RESOURCE_DESC desc = resource->GetDesc();
+    if (desc.Format != DXGI_FORMAT_R24G8_TYPELESS) return false;
+    view = {};
+    view.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    const bool array = desc.DepthOrArraySize > 1;
+    if (desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D) {
+        view.ViewDimension = array ? D3D12_DSV_DIMENSION_TEXTURE1DARRAY : D3D12_DSV_DIMENSION_TEXTURE1D;
+        if (array) view.Texture1DArray.ArraySize = desc.DepthOrArraySize;
+        return true;
+    }
+    if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) return false;
+    if (desc.SampleDesc.Count > 1) {
+        view.ViewDimension = array ? D3D12_DSV_DIMENSION_TEXTURE2DMSARRAY : D3D12_DSV_DIMENSION_TEXTURE2DMS;
+        if (array) view.Texture2DMSArray.ArraySize = desc.DepthOrArraySize;
+    } else {
+        view.ViewDimension = array ? D3D12_DSV_DIMENSION_TEXTURE2DARRAY : D3D12_DSV_DIMENSION_TEXTURE2D;
+        if (array) view.Texture2DArray.ArraySize = desc.DepthOrArraySize;
+    }
+    return true;
+}
+
+// Copies of the descriptions a resource or view slot takes, made PC ones, alive for the forwarded call. Nothing here
+// throws (a thunk must not let an exception reach the title): eight descriptions are kept inline, a longer
+// GetResourceAllocationInfo array is allocated with new (std::nothrow).
+class PcResourceArgs {
+public:
+    // Slot 25's (count, descriptions): the copy, or the caller's array when there is none to copy. False on an
+    // allocation failure.
+    bool descs(std::uint64_t& descriptions, std::uint64_t count) {
+        const auto n = static_cast<std::uint32_t>(count);
+        const auto* in = reinterpret_cast<const D3D12_RESOURCE_DESC*>(descriptions);
+        if (!in || !n) return true;
+        D3D12_RESOURCE_DESC* copy = inline_descs_;
+        if (n > std::size(inline_descs_)) {
+            heap_descs_.reset(new (std::nothrow) D3D12_RESOURCE_DESC[n]);
+            if (!heap_descs_) return false;
+            copy = heap_descs_.get();
+        }
+        for (std::uint32_t i = 0; i < n; ++i) {
+            copy[i] = in[i];
+            make_pc_resource_desc(copy[i]);
+        }
+        descriptions = reinterpret_cast<std::uint64_t>(copy);
+        return true;
+    }
+    void desc(std::uint64_t& description) {
+        if (!description) return;
+        inline_descs_[0] = *reinterpret_cast<const D3D12_RESOURCE_DESC*>(description);
+        make_pc_resource_desc(inline_descs_[0]);
+        description = reinterpret_cast<std::uint64_t>(&inline_descs_[0]);
+    }
+    void clear(std::uint64_t& clear_value) {
+        if (!clear_value) return;
+        clear_ = *reinterpret_cast<const D3D12_CLEAR_VALUE*>(clear_value);
+        clear_.Format = pc_depth_format(clear_.Format);
+        clear_value = reinterpret_cast<std::uint64_t>(&clear_);
+    }
+    void shader_view(std::uint64_t& view) {
+        if (!view) return;
+        srv_ = *reinterpret_cast<const D3D12_SHADER_RESOURCE_VIEW_DESC*>(view);
+        srv_.Format = pc_shader_view_format(srv_.Format);
+        view = reinterpret_cast<std::uint64_t>(&srv_);
+    }
+    void depth_view(std::uint64_t resource, std::uint64_t& view) {
+        if (view) {
+            dsv_ = *reinterpret_cast<const D3D12_DEPTH_STENCIL_VIEW_DESC*>(view);
+            dsv_.Format = pc_depth_format(dsv_.Format);
+            view = reinterpret_cast<std::uint64_t>(&dsv_);
+        } else if (default_view_of_typeless_d24(reinterpret_cast<ID3D12Resource*>(resource), dsv_)) {
+            view = reinterpret_cast<std::uint64_t>(&dsv_);
+        }
+    }
+
+private:
+    D3D12_RESOURCE_DESC inline_descs_[8];
+    std::unique_ptr<D3D12_RESOURCE_DESC[]> heap_descs_;
+    D3D12_CLEAR_VALUE clear_{};
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv_{};
+    D3D12_DEPTH_STENCIL_VIEW_DESC dsv_{};
+};
+
 HRESULT proxy_create_resource(DeviceProxy* self, const D3D12_HEAP_PROPERTIES* heap_properties,
                               D3D12_HEAP_FLAGS heap_flags, const D3D12_RESOURCE_DESC* xbox_desc,
                               D3D12_RESOURCE_STATES initial_state, const D3D12_CLEAR_VALUE* clear_value,
@@ -2085,14 +2235,21 @@ HRESULT proxy_create_resource(DeviceProxy* self, const D3D12_HEAP_PROPERTIES* he
     pc_desc.Layout = pc_desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER ? D3D12_TEXTURE_LAYOUT_ROW_MAJOR
                                                                          : D3D12_TEXTURE_LAYOUT_UNKNOWN;
 
+    make_pc_resource_desc(pc_desc);   // console formats and flag bits (above)
+    D3D12_CLEAR_VALUE pc_clear{};
+    if (clear_value) {
+        pc_clear = *clear_value;
+        pc_clear.Format = pc_depth_format(pc_clear.Format);
+    }
+
     static std::atomic<bool> logged{false};
     if (!logged.exchange(true, std::memory_order_relaxed)) {
         std::fprintf(stderr,
                      "[rt] d3d12_xs: slot 76 resource: dimension=%d xbox layout=0x%x -> PC layout=0x%x\n",
                      static_cast<int>(pc_desc.Dimension), xbox_layout, static_cast<unsigned>(pc_desc.Layout));
     }
-    return self->real->CreateCommittedResource(heap_properties, heap_flags, &pc_desc, initial_state, clear_value,
-                                               *riid, out);
+    return self->real->CreateCommittedResource(heap_properties, heap_flags, &pc_desc, initial_state,
+                                               clear_value ? &pc_clear : nullptr, *riid, out);
 }
 
 // Device slot 133 is the console's CreatePlacedResourceX: (va, desc, state, clear, riid, out), measured on the retail
@@ -2113,14 +2270,10 @@ HRESULT proxy_create_placed_resource_x(DeviceProxy* self, void* va, const D3D12_
     const PlacedAtVaHandler handler = g_placed_at_va.load(std::memory_order_acquire);
     if (!handler) return E_NOTIMPL;
     if (!out || !xbox_desc || !riid) return E_POINTER;
-    // An integer mask: a D3D12_RESOURCE_FLAGS constant past the SDK's last enumerator is not a constant expression
-    // for clang-cl with SDK 10.0.26100 (found in review). The cast is applied to the masked value at run time.
-    // The PC flags up to RAYTRACING_ACCELERATION_STRUCTURE (0x100) and USE_TIGHT_ALIGNMENT (0x400); 0x200 is
-    // dropped, as committed_resource_refusal says the host refuses it (found in review).
-    constexpr std::uint32_t kPcResourceFlags = 0x5ff;
+    // The PC flag bits only, and the console formats, as for every resource description (make_pc_resource_desc).
     D3D12_RESOURCE_DESC pc_desc = *xbox_desc;
     const auto xbox_flags = static_cast<std::uint32_t>(pc_desc.Flags);
-    pc_desc.Flags = static_cast<D3D12_RESOURCE_FLAGS>(xbox_flags & kPcResourceFlags);
+    make_pc_resource_desc(pc_desc);
     // The Xbox layout word (0x101 tiled, 0x1 row-major buffer) is no PC layout: ROW_MAJOR for a buffer and UNKNOWN
     // for everything else, as slot 76 does.
     pc_desc.Layout = pc_desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER ? D3D12_TEXTURE_LAYOUT_ROW_MAJOR
@@ -2176,6 +2329,10 @@ std::uint64_t WINAPI proxy_slot(DeviceProxy* self, std::uint64_t a1, std::uint64
         // style, the generic forward below is right; called with the buffer first, RCX and RDX trade places and every
         // other word keeps its position. The buffer comes back in RAX, as a struct return does.
         note_slot(Slot);
+        // Slot 25's (visible mask, count, descriptions) are a2-a4 in either order: the descriptions go as PC ones
+        // (console formats and flags; unchanged if the copy cannot be allocated).
+        PcResourceArgs pc_args;
+        if constexpr (Slot == 25) pc_args.descs(a4, a3);
         if (struct_return_swapped(self, reinterpret_cast<const void*>(a1))) {
             auto* proxy = reinterpret_cast<DeviceProxy*>(a1);
             void* buffer = self;
@@ -2298,6 +2455,21 @@ std::uint64_t WINAPI proxy_slot(DeviceProxy* self, std::uint64_t a1, std::uint64
                                                  std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t,
                                                  std::uint64_t, std::uint64_t, std::uint64_t);
         auto fn = reinterpret_cast<ForwardFn>(self->real_vtable[Slot]);
+        if constexpr (Slot == 18 || Slot == 21 || Slot == 27 || Slot == 29 || Slot == 30) {
+            // The views and resources whose descriptions carry console formats and flags (PcResourceArgs, above).
+            PcResourceArgs pc_args;
+            if constexpr (Slot == 18) pc_args.shader_view(a2);    // CreateShaderResourceView(resource, desc, handle)
+            if constexpr (Slot == 21) pc_args.depth_view(a1, a2);  // CreateDepthStencilView(resource, desc, handle)
+            if constexpr (Slot == 27 || Slot == 29) {             // Committed / Placed(.., .., desc, state, clear, ..)
+                pc_args.desc(a3);
+                pc_args.clear(a5);
+            }
+            if constexpr (Slot == 30) {                           // CreateReservedResource(desc, state, clear, ..)
+                pc_args.desc(a1);
+                pc_args.clear(a3);
+            }
+            return fn(self->real, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14);
+        }
         return fn(self->real, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14);
     }
 }

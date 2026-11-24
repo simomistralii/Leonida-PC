@@ -2290,6 +2290,18 @@ The trace will enumerate them.
   layout enum. The FidelityFX upscaler creates 10 default-heap resources through this slot, so it is not optional
   for middleware. The console tiled data layout is GFX10 `SW_64KB_D` (Mesa addrlib `GFX10_SW_64K_D_RBPLUS_PATINFO`),
   and the detile and tile path is implemented in `resource_detile.h` and verified by `resource_detile_test` (D3D-316).
+- **Console formats and flag bits reach the PC device as PC ones.** The proxy rewrites every resource description
+  that device slots 25, 27, 29, 30, 76 and 133 take: the flag bits above the PC's (the console's compression and
+  metadata bits) are dropped; a texture in the console's own depth family, format 118 (16-bit depth with 8-bit
+  stencil, which the PC has not) or its plane formats 119 and 120, becomes `R24G8_TYPELESS`, so its depth, stencil
+  and shader views can share it; and a depth texture loses `ALLOW_UNORDERED_ACCESS`, which a PC depth image cannot
+  also allow. Clear values and depth-stencil views of that family take `D24_UNORM_S8_UINT`, shader views
+  `R24_UNORM_X8_TYPELESS` (118, 119) or `X24_TYPELESS_G8_UINT` (120), and a depth-stencil view with no description
+  of an `R24G8_TYPELESS` texture gets a typed one over the whole resource. TuxBox's run of the title stopped on
+  slot 25 for such a depth description (2560x1440, format 118, flags 0x80300006), answered `UINT64_MAX`
+  ([related_projects_gaps.md](related_projects_gaps.md), past stop 13, row 4); `xs_proxy_mock_test` checks what the
+  PC device receives on each of these slots. Pipeline depth formats (graphics pipeline descriptions and streams) are
+  not rewritten yet.
 - `CreateCommittedResource`: allocate an aligned range in the arena for a buffer, or a separate `VkDeviceMemory`
   for an image; record the initial state. Map `D3D12_HEAP_TYPE_DEFAULT` to device-local memory, `UPLOAD`/`READBACK`
   to separate host-visible buffers. This remains the path for buffers and for any PC-style committed resource.

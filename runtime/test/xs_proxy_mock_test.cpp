@@ -90,6 +90,16 @@ struct Mock {
     HRESULT create_result;   // device: what creation returns (S_OK makes the object)
     Mock* last_child;        // device: the object its last creation or open made
     std::atomic<std::uint64_t> completed;   // fence: what slot 8 returns (kCompletedValue when made)
+    // device: the descriptions slots 18, 21, 25, 27, 29 and 30 last received (what the PC device would get)
+    D3D12_RESOURCE_DESC desc_seen[2];
+    std::uint64_t descs_seen;               // slot 25's count
+    D3D12_CLEAR_VALUE clear_seen;
+    bool clear_given;
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv_seen;
+    bool srv_given;
+    D3D12_DEPTH_STENCIL_VIEW_DESC dsv_seen;
+    bool dsv_given;
+    D3D12_RESOURCE_DESC resource_desc;      // resource: what its GetDesc (slot 10) returns
     unsigned calls[kMockSlots];
     std::uint64_t args[kMockSlots][5];
     std::uint64_t array[kMockSlots][4];  // device: the first entries of the array argument, as received
@@ -210,6 +220,27 @@ std::uint64_t mock_call(Mock* m, unsigned slot, const std::uint64_t* words) {
                 if (a1 == kFenceHandle) return static_cast<std::uint32_t>(mock_create(m, Kind::fence, a2, a3));
                 if (a1 == kResourceHandle) return static_cast<std::uint32_t>(mock_create(m, Kind::resource, a2, a3));
                 return static_cast<std::uint32_t>(E_INVALIDARG);
+            case 25: {                                                      // (buffer, mask, count, descs)
+                const auto* d = reinterpret_cast<const D3D12_RESOURCE_DESC*>(a4);
+                m->descs_seen = a3;
+                for (std::uint64_t i = 0; d && i < a3 && i < 2; ++i) m->desc_seen[i] = d[i];
+                break;
+            }
+            case 27: case 29: case 30: {          // (props, flags | heap, offset, desc, state, clear) / (desc, state, clear)
+                const std::uint64_t desc = slot == 30 ? a1 : a3, clear = slot == 30 ? a3 : words[4];
+                if (desc) m->desc_seen[0] = *reinterpret_cast<const D3D12_RESOURCE_DESC*>(desc);
+                m->clear_given = clear != 0;
+                if (clear) m->clear_seen = *reinterpret_cast<const D3D12_CLEAR_VALUE*>(clear);
+                break;
+            }
+            case 18:                                                        // (resource, desc, handle)
+                m->srv_given = a2 != 0;
+                if (a2) m->srv_seen = *reinterpret_cast<const D3D12_SHADER_RESOURCE_VIEW_DESC*>(a2);
+                break;
+            case 21:                                                        // (resource, desc, handle)
+                m->dsv_given = a2 != 0;
+                if (a2) m->dsv_seen = *reinterpret_cast<const D3D12_DEPTH_STENCIL_VIEW_DESC*>(a2);
+                break;
             case 34: case 35: case 46: copy_array(m, slot, a2, a1); break;  // (count, objects, ...)
             case 45: copy_array(m, slot, a1, a3); break;                    // (fences, values, count, ...)
             case 50: copy_array(m, slot, a3, a2); break;                    // (flags, count, objects, fence, value)
@@ -218,6 +249,10 @@ std::uint64_t mock_call(Mock* m, unsigned slot, const std::uint64_t* words) {
         return S_OK;
     }
     if (m->kind == Kind::fence && slot == 8) return m->completed.load();  // GetCompletedValue
+    if (m->kind == Kind::resource && slot == 10 && a1) {                  // GetDesc, through the hidden pointer
+        std::memcpy(reinterpret_cast<void*>(a1), &m->resource_desc, sizeof(m->resource_desc));
+        return a1;
+    }
     if (m->kind == Kind::queue && slot == 10) copy_array(m, slot, a2, a1);  // ExecuteCommandLists(count, lists)
     if (m->kind == Kind::command_list && slot == 28) copy_array(m, slot, a2, a1);  // SetDescriptorHeaps(count, heaps)
     return S_OK;
@@ -1242,6 +1277,137 @@ int check_console_command_list() {
     return 0;
 }
 
+// ---- Console resource formats and flags (format 118 and the flag bits above the PC's) ----
+
+D3D12_RESOURCE_DESC texture2d(UINT64 width, UINT height, DXGI_FORMAT format, std::uint32_t flags) {
+    D3D12_RESOURCE_DESC d{};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    d.Width = width;
+    d.Height = height;
+    d.DepthOrArraySize = 1;
+    d.MipLevels = 1;
+    d.Format = format;
+    d.SampleDesc.Count = 1;
+    d.Flags = static_cast<D3D12_RESOURCE_FLAGS>(flags);
+    return d;
+}
+
+int check_console_formats() {
+    g_label = "xs_proxy_mock console formats";
+    Mock* mock = nullptr;
+    void* device = make_device(mock, 9, true);
+    EXPECT(device);
+    constexpr auto kD16S8 = static_cast<DXGI_FORMAT>(118), kR16X8 = static_cast<DXGI_FORMAT>(119),
+                   kX16G8 = static_cast<DXGI_FORMAT>(120);
+    // TuxBox's recorded stop: a 2560x1440 depth texture of format 118 with flags 0x80300006 (depth, UAV, console bits).
+    const D3D12_RESOURCE_DESC depth = texture2d(2560, 1440, kD16S8, 0x80300006u);
+    D3D12_RESOURCE_DESC buffer{};
+    buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer.Width = 65536;
+    buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+    buffer.SampleDesc.Count = 1;
+    buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    buffer.Flags = static_cast<D3D12_RESOURCE_FLAGS>(0x80000004u);   // UAV and a console bit
+    const auto pc_depth = [](const D3D12_RESOURCE_DESC& d) {
+        return d.Format == DXGI_FORMAT_R24G8_TYPELESS && static_cast<std::uint32_t>(d.Flags) == 0x2 &&
+               d.Width == 2560 && d.Height == 1440;
+    };
+
+    // 25 GetResourceAllocationInfo, PC order and with the return buffer first: the PC device gets PC descriptions.
+    const D3D12_RESOURCE_DESC both[2] = {depth, buffer};
+    D3D12_RESOURCE_ALLOCATION_INFO info{};
+    raw(device, 25, word(&info), 0, 2, word(both));
+    EXPECT(mock->calls[25] == 1 && mock->descs_seen == 2 && pc_depth(mock->desc_seen[0]));
+    EXPECT(mock->desc_seen[1].Format == DXGI_FORMAT_UNKNOWN && static_cast<std::uint32_t>(mock->desc_seen[1].Flags) == 0x4);
+    std::memset(mock->desc_seen, 0, sizeof(mock->desc_seen));
+    void* const* const vtable = *reinterpret_cast<void* const* const*>(device);
+    reinterpret_cast<SlotFn>(vtable[25])(&info, word(device), 0, 1, word(&depth), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    EXPECT(mock->calls[25] == 2 && mock->descs_seen == 1 && pc_depth(mock->desc_seen[0]));
+    EXPECT(depth.Format == kD16S8 && static_cast<std::uint32_t>(depth.Flags) == 0x80300006u);   // the title's own
+
+    // 27 CreateCommittedResource, 29 CreatePlacedResource, 30 CreateReservedResource: the description and the clear
+    // value (format 118 -> D24_UNORM_S8_UINT, its depth and stencil kept).
+    D3D12_CLEAR_VALUE clear{};
+    clear.Format = kD16S8;
+    clear.DepthStencil.Depth = 1.0f;
+    clear.DepthStencil.Stencil = 3;
+    const D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_DEFAULT};
+    const auto pc_clear = [&] {
+        return mock->clear_given && mock->clear_seen.Format == DXGI_FORMAT_D24_UNORM_S8_UINT &&
+               mock->clear_seen.DepthStencil.Depth == 1.0f && mock->clear_seen.DepthStencil.Stencil == 3;
+    };
+    raw(device, 27, word(&heap), 0, word(&depth), 0, word(&clear));
+    EXPECT(mock->calls[27] == 1 && pc_depth(mock->desc_seen[0]) && pc_clear());
+    raw(device, 29, 0x1234, 0, word(&depth), 0, word(&clear));
+    EXPECT(mock->calls[29] == 1 && pc_depth(mock->desc_seen[0]) && pc_clear());
+    raw(device, 30, word(&depth), 0, word(&clear));
+    EXPECT(mock->calls[30] == 1 && pc_depth(mock->desc_seen[0]) && pc_clear());
+    raw(device, 27, word(&heap), 0, word(&depth), 0, 0);
+    EXPECT(mock->calls[27] == 2 && !mock->clear_given);   // no clear value stays none
+    // 76, the title's committed resource: the same, after its layout word.
+    {
+        D3D12_RESOURCE_DESC tiled = depth;
+        tiled.Layout = static_cast<D3D12_TEXTURE_LAYOUT>(0x101);
+        void* made = nullptr;
+        const IID iid = kResourceIid;
+        reinterpret_cast<SlotFn>(vtable[76])(device, word(&heap), 0, word(&tiled), 0, word(&clear), word(&iid),
+                                             word(&made), 0, 0, 0, 0, 0, 0, 0);
+        EXPECT(mock->calls[27] == 3 && pc_depth(mock->desc_seen[0]) &&
+               mock->desc_seen[0].Layout == D3D12_TEXTURE_LAYOUT_UNKNOWN && pc_clear());
+    }
+    // An ordinary PC description goes through unchanged.
+    const D3D12_RESOURCE_DESC colour = texture2d(64, 64, DXGI_FORMAT_R8G8B8A8_UNORM, 0x5);   // render target and UAV
+    raw(device, 27, word(&heap), 0, word(&colour), 0, 0);
+    EXPECT(std::memcmp(&mock->desc_seen[0], &colour, sizeof(colour)) == 0);
+
+    // 18 CreateShaderResourceView: 118 and 119 view the depth plane, 120 the stencil plane; other formats as they are.
+    struct { DXGI_FORMAT in, out; } const views[] = {{kD16S8, DXGI_FORMAT_R24_UNORM_X8_TYPELESS},
+                                                     {kR16X8, DXGI_FORMAT_R24_UNORM_X8_TYPELESS},
+                                                     {kX16G8, DXGI_FORMAT_X24_TYPELESS_G8_UINT},
+                                                     {DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM}};
+    for (const auto& v : views) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = v.in;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MipLevels = 1;
+        raw(device, 18, 0x5000, word(&srv), 0x6000);
+        EXPECT(mock->srv_given && mock->srv_seen.Format == v.out && mock->srv_seen.Texture2D.MipLevels == 1);
+    }
+    raw(device, 18, 0x5000, 0, 0x6000);
+    EXPECT(!mock->srv_given);
+
+    // 21 CreateDepthStencilView: 118 -> D24_UNORM_S8_UINT; no description on a typeless D24 texture (what a format-118
+    // texture became) -> a typed view over the whole resource; no description on anything else stays none.
+    D3D12_DEPTH_STENCIL_VIEW_DESC dsv{};
+    dsv.Format = kD16S8;
+    dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    raw(device, 21, 0x5000, word(&dsv), 0x6000);
+    EXPECT(mock->dsv_given && mock->dsv_seen.Format == DXGI_FORMAT_D24_UNORM_S8_UINT &&
+           mock->dsv_seen.ViewDimension == D3D12_DSV_DIMENSION_TEXTURE2D);
+    Mock* resource = new_mock(Kind::resource);
+    resource->resource_desc = texture2d(256, 256, DXGI_FORMAT_R24G8_TYPELESS, 0x2);
+    raw(device, 21, word(resource), 0, 0x6000);
+    EXPECT(resource->calls[10] == 1 && mock->dsv_given && mock->dsv_seen.Format == DXGI_FORMAT_D24_UNORM_S8_UINT &&
+           mock->dsv_seen.ViewDimension == D3D12_DSV_DIMENSION_TEXTURE2D && mock->dsv_seen.Texture2D.MipSlice == 0);
+    resource->resource_desc.DepthOrArraySize = 6;
+    raw(device, 21, word(resource), 0, 0x6000);
+    EXPECT(mock->dsv_seen.ViewDimension == D3D12_DSV_DIMENSION_TEXTURE2DARRAY &&
+           mock->dsv_seen.Texture2DArray.ArraySize == 6);
+    resource->resource_desc.DepthOrArraySize = 1;
+    resource->resource_desc.SampleDesc.Count = 4;
+    raw(device, 21, word(resource), 0, 0x6000);
+    EXPECT(mock->dsv_seen.ViewDimension == D3D12_DSV_DIMENSION_TEXTURE2DMS);
+    resource->resource_desc = texture2d(256, 256, DXGI_FORMAT_D32_FLOAT, 0x2);
+    raw(device, 21, word(resource), 0, 0x6000);
+    EXPECT(!mock->dsv_given);
+
+    EXPECT(release(device) == 0 && mock->refs == 0);
+    std::printf("%s: passed\n", g_label);
+    g_label = "xs_proxy_mock";
+    return 0;
+}
+
 // ---- Fence slot 12: the completed value at a stable address, kept current ----
 
 // True when *word reads `want` within two seconds (the watcher thread's safety poll is 16 ms).
@@ -1399,7 +1565,7 @@ int main(int argc, char** argv) {
     if (argc != 1) return 2;
     if (check_tail(true) || check_levels() || check_fence1() || check_create_failures() || check_open_shared() ||
         check_alloc_failures() || check_allocators() || check_xbox_slots() || check_console_command_list() ||
-        check_console_queue_layout() || check_fence_completion_address())
+        check_console_queue_layout() || check_fence_completion_address() || check_console_formats())
         return 1;
     std::printf("xs_proxy_mock_test: PASS (%d allocations refused on purpose)\n", g_failed_news);
     return 0;
