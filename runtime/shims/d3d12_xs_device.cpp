@@ -1406,16 +1406,29 @@ bool queue_struct_return_swapped(const void* first, std::uint64_t second) {
     return on_current_stack(first) && !on_current_stack(other);
 }
 
+// Whether `word` is a fence proxy, for a word that may not be a pointer at all: console queue slots 14 and 15 take
+// arguments this runtime does not know. No object lives below 64 KiB; above it the vtable read is guarded, so an
+// unmapped address answers false instead of faulting (an unguarded read of ExecuteCommandListsX's first word, its
+// list count, faulted in xs_proxy_mock_test on the Runtime windows job).
+bool word_is_fence_proxy(std::uint64_t word) {
+    if (word < 0x10000) return false;
+    void* const fence_vtable = reinterpret_cast<void*>(get_child_vtable<ChildKind::fence>());
+    __try {
+        return *reinterpret_cast<void* const*>(word) == fence_vtable;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 template <unsigned Slot>
 std::uint64_t console_queue_slot(ChildProxy* self, std::uint64_t a1, std::uint64_t a2, std::uint64_t a3,
                                  std::uint64_t a4) {
     note_child_slot<ChildKind::queue>(Slot);
     const char* const name = console_queue_trace_name(Slot);
-    const bool fence_first = is_fence_proxy(reinterpret_cast<const void*>(a1));
     if constexpr (Slot == 14 || Slot == 15) {
         // Two console slots of their own, not modelled. A fence proxy here is a PC-style caller's Signal or Wait,
         // which a title's device still serves (the stand-in frame of runtime/test/fixtures/tiny_frame.cpp is one).
-        if (fence_first) {
+        if (word_is_fence_proxy(a1)) {
             d3d12_trace::record(Slot == 14 ? "XboxID3D12CommandQueue::Signal" : "XboxID3D12CommandQueue::Wait");
             return forward_queue(self, Slot == 14 ? kPcSignal : kPcWait, unwrap_object(a1), a2);
         }
@@ -1433,7 +1446,7 @@ std::uint64_t console_queue_slot(ChildProxy* self, std::uint64_t a1, std::uint64
                 return hr_to_u64(E_NOTIMPL);
             }
         }
-        if (!fence_first) {
+        if (!word_is_fence_proxy(a1)) {
             log_console_queue(Slot, "the first argument is not a fence proxy; E_INVALIDARG", a1, a2, a3, a4);
             d3d12_trace::record(name, "unsupported");
             return hr_to_u64(E_INVALIDARG);
