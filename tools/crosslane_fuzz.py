@@ -63,6 +63,7 @@ Reference semantics (AMD "RDNA 2" ISA reference guide; Mesa ACO and LLVM where t
     s_bfm_b64 (D = ((1 << S0[5:0]) - 1) << S1[5:0]) into a mask or EXEC.
   * A loop in LLVM's SI_LOOP shape: per-lane trip counts, a break mask, s_andn2_b64 exec and s_cbranch_execnz
     back to the head, so lanes of both halves leave on different iterations while the rest keep running.
+Usage: `python -I tools/crosslane_fuzz.py --help` lists the options.
 """
 import argparse
 import os

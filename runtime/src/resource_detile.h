@@ -17,6 +17,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
+#include <limits>
 #include <span>
 
 namespace leonida {
@@ -91,26 +93,76 @@ inline constexpr SwizzleLut64K<4> swizzle_lut_64k_4bpe{};
 inline constexpr SwizzleLut64K<8> swizzle_lut_64k_8bpe{};
 inline constexpr SwizzleLut64K<16> swizzle_lut_64k_16bpe{};
 
-// Compute required tiled byte size for a 2D surface of the given dimensions.
-constexpr std::size_t tiled_surface_size_64k(std::uint32_t width, std::uint32_t height,
-                                            std::uint32_t element_bytes, std::uint32_t block_dim = 1) {
-    if (!width || !height || (block_dim != 1 && block_dim != 4)) return 0;
-    const TileShape shape = element_tile_shape(false, element_bytes);
-    if (!shape.width || !shape.height) return 0;
-    const std::uint32_t blocks_w = (width + block_dim - 1) / block_dim;
-    const std::uint32_t blocks_h = (height + block_dim - 1) / block_dim;
-    const std::uint32_t tiles_x = (blocks_w + shape.width - 1) / shape.width;
-    const std::uint32_t tiles_y = (blocks_h + shape.height - 1) / shape.height;
-    return static_cast<std::size_t>(tiles_x) * tiles_y * tile_size_in_bytes;
+namespace detail {
+
+constexpr bool checked_mul(std::size_t a, std::size_t b, std::size_t& out) {
+    if (a != 0 && b > (std::numeric_limits<std::size_t>::max)() / a) return false;
+    out = a * b;
+    return true;
 }
 
-// Compute required linear byte size for a 2D surface of the given dimensions.
+struct SurfaceLayout64K {
+    std::uint32_t blocks_w = 0;
+    std::uint32_t blocks_h = 0;
+    std::uint32_t tiles_x = 0;
+    std::uint32_t tiles_y = 0;
+    std::size_t linear_bytes = 0;
+    std::size_t tiled_bytes = 0;
+};
+
+constexpr bool compute_surface_layout_64k(std::uint32_t width, std::uint32_t height,
+                                          std::uint32_t element_bytes, std::uint32_t block_dim,
+                                          SurfaceLayout64K& out) {
+    if (!width || !height || (block_dim != 1 && block_dim != 4)) return false;
+    const TileShape shape = element_tile_shape(false, element_bytes);
+    if (!shape.width || !shape.height) return false;
+
+    // Overflow-free ceiling division for positive uint32_t operands: 1 + (n - 1) / d.
+    const std::uint32_t blocks_w = 1u + (width - 1u) / block_dim;
+    const std::uint32_t blocks_h = 1u + (height - 1u) / block_dim;
+    const std::uint32_t tiles_x = 1u + (blocks_w - 1u) / shape.width;
+    const std::uint32_t tiles_y = 1u + (blocks_h - 1u) / shape.height;
+
+    std::size_t block_count = 0;
+    std::size_t linear_bytes = 0;
+    std::size_t tile_count = 0;
+    std::size_t tiled_bytes = 0;
+    if (!checked_mul(blocks_w, blocks_h, block_count) ||
+        !checked_mul(block_count, element_bytes, linear_bytes) ||
+        !checked_mul(tiles_x, tiles_y, tile_count) ||
+        !checked_mul(tile_count, tile_size_in_bytes, tiled_bytes)) {
+        return false;
+    }
+
+    out = {blocks_w, blocks_h, tiles_x, tiles_y, linear_bytes, tiled_bytes};
+    return true;
+}
+
+inline bool spans_overlap(const std::byte* a, std::size_t a_len,
+                          const std::byte* b, std::size_t b_len) {
+    if (!a_len || !b_len) return false;
+    const std::less<const std::byte*> lt{};
+    return lt(a, b + b_len) && lt(b, a + a_len);
+}
+
+}  // namespace detail
+
+// Compute required tiled byte size for a 2D surface of the given dimensions (0 on invalid input or overflow).
+constexpr std::size_t tiled_surface_size_64k(std::uint32_t width, std::uint32_t height,
+                                            std::uint32_t element_bytes, std::uint32_t block_dim = 1) {
+    detail::SurfaceLayout64K layout{};
+    return detail::compute_surface_layout_64k(width, height, element_bytes, block_dim, layout)
+               ? layout.tiled_bytes
+               : 0;
+}
+
+// Compute required linear byte size for a 2D surface of the given dimensions (0 on invalid input or overflow).
 constexpr std::size_t linear_surface_size(std::uint32_t width, std::uint32_t height,
                                          std::uint32_t element_bytes, std::uint32_t block_dim = 1) {
-    if (!width || !height || (block_dim != 1 && block_dim != 4)) return 0;
-    const std::uint32_t blocks_w = (width + block_dim - 1) / block_dim;
-    const std::uint32_t blocks_h = (height + block_dim - 1) / block_dim;
-    return static_cast<std::size_t>(blocks_w) * blocks_h * element_bytes;
+    detail::SurfaceLayout64K layout{};
+    return detail::compute_surface_layout_64k(width, height, element_bytes, block_dim, layout)
+               ? layout.linear_bytes
+               : 0;
 }
 
 namespace detail {
@@ -183,35 +235,26 @@ void tile_typed(std::span<const std::byte> linear, std::span<std::byte> tiled,
 inline bool detile_surface_64k(std::span<const std::byte> tiled, std::span<std::byte> linear,
                                std::uint32_t width, std::uint32_t height,
                                std::uint32_t element_bytes, std::uint32_t block_dim = 1) {
-    if (!width || !height || (block_dim != 1 && block_dim != 4)) return false;
-    const TileShape shape = element_tile_shape(false, element_bytes);
-    if (!shape.width || !shape.height) return false;
-
-    const std::uint32_t blocks_w = (width + block_dim - 1) / block_dim;
-    const std::uint32_t blocks_h = (height + block_dim - 1) / block_dim;
-    const std::uint32_t tiles_x = (blocks_w + shape.width - 1) / shape.width;
-    const std::uint32_t tiles_y = (blocks_h + shape.height - 1) / shape.height;
-
-    const std::size_t expected_linear = static_cast<std::size_t>(blocks_w) * blocks_h * element_bytes;
-    const std::size_t expected_tiled = static_cast<std::size_t>(tiles_x) * tiles_y * tile_size_in_bytes;
-
-    if (linear.size() < expected_linear || tiled.size() < expected_tiled) return false;
+    detail::SurfaceLayout64K layout{};
+    if (!detail::compute_surface_layout_64k(width, height, element_bytes, block_dim, layout)) return false;
+    if (linear.size() < layout.linear_bytes || tiled.size() < layout.tiled_bytes) return false;
+    if (detail::spans_overlap(tiled.data(), layout.tiled_bytes, linear.data(), layout.linear_bytes)) return false;
 
     switch (element_bytes) {
     case 1:
-        detail::detile_typed<1>(tiled, linear, blocks_w, blocks_h, tiles_x);
+        detail::detile_typed<1>(tiled, linear, layout.blocks_w, layout.blocks_h, layout.tiles_x);
         return true;
     case 2:
-        detail::detile_typed<2>(tiled, linear, blocks_w, blocks_h, tiles_x);
+        detail::detile_typed<2>(tiled, linear, layout.blocks_w, layout.blocks_h, layout.tiles_x);
         return true;
     case 4:
-        detail::detile_typed<4>(tiled, linear, blocks_w, blocks_h, tiles_x);
+        detail::detile_typed<4>(tiled, linear, layout.blocks_w, layout.blocks_h, layout.tiles_x);
         return true;
     case 8:
-        detail::detile_typed<8>(tiled, linear, blocks_w, blocks_h, tiles_x);
+        detail::detile_typed<8>(tiled, linear, layout.blocks_w, layout.blocks_h, layout.tiles_x);
         return true;
     case 16:
-        detail::detile_typed<16>(tiled, linear, blocks_w, blocks_h, tiles_x);
+        detail::detile_typed<16>(tiled, linear, layout.blocks_w, layout.blocks_h, layout.tiles_x);
         return true;
     default:
         return false;
@@ -222,35 +265,26 @@ inline bool detile_surface_64k(std::span<const std::byte> tiled, std::span<std::
 inline bool tile_surface_64k(std::span<const std::byte> linear, std::span<std::byte> tiled,
                              std::uint32_t width, std::uint32_t height,
                              std::uint32_t element_bytes, std::uint32_t block_dim = 1) {
-    if (!width || !height || (block_dim != 1 && block_dim != 4)) return false;
-    const TileShape shape = element_tile_shape(false, element_bytes);
-    if (!shape.width || !shape.height) return false;
-
-    const std::uint32_t blocks_w = (width + block_dim - 1) / block_dim;
-    const std::uint32_t blocks_h = (height + block_dim - 1) / block_dim;
-    const std::uint32_t tiles_x = (blocks_w + shape.width - 1) / shape.width;
-    const std::uint32_t tiles_y = (blocks_h + shape.height - 1) / shape.height;
-
-    const std::size_t expected_linear = static_cast<std::size_t>(blocks_w) * blocks_h * element_bytes;
-    const std::size_t expected_tiled = static_cast<std::size_t>(tiles_x) * tiles_y * tile_size_in_bytes;
-
-    if (linear.size() < expected_linear || tiled.size() < expected_tiled) return false;
+    detail::SurfaceLayout64K layout{};
+    if (!detail::compute_surface_layout_64k(width, height, element_bytes, block_dim, layout)) return false;
+    if (linear.size() < layout.linear_bytes || tiled.size() < layout.tiled_bytes) return false;
+    if (detail::spans_overlap(linear.data(), layout.linear_bytes, tiled.data(), layout.tiled_bytes)) return false;
 
     switch (element_bytes) {
     case 1:
-        detail::tile_typed<1>(linear, tiled, blocks_w, blocks_h, tiles_x);
+        detail::tile_typed<1>(linear, tiled, layout.blocks_w, layout.blocks_h, layout.tiles_x);
         return true;
     case 2:
-        detail::tile_typed<2>(linear, tiled, blocks_w, blocks_h, tiles_x);
+        detail::tile_typed<2>(linear, tiled, layout.blocks_w, layout.blocks_h, layout.tiles_x);
         return true;
     case 4:
-        detail::tile_typed<4>(linear, tiled, blocks_w, blocks_h, tiles_x);
+        detail::tile_typed<4>(linear, tiled, layout.blocks_w, layout.blocks_h, layout.tiles_x);
         return true;
     case 8:
-        detail::tile_typed<8>(linear, tiled, blocks_w, blocks_h, tiles_x);
+        detail::tile_typed<8>(linear, tiled, layout.blocks_w, layout.blocks_h, layout.tiles_x);
         return true;
     case 16:
-        detail::tile_typed<16>(linear, tiled, blocks_w, blocks_h, tiles_x);
+        detail::tile_typed<16>(linear, tiled, layout.blocks_w, layout.blocks_h, layout.tiles_x);
         return true;
     default:
         return false;

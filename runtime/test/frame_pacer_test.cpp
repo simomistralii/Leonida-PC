@@ -512,6 +512,62 @@ int main() {
         EXPECT(pacer.frames_in_flight() == 1);
     }
 
+    // Uncapped (LEONIDA_PRESENT_UNCAP): a wait hands a token out at once instead of at the next interval origin,
+    // and a presented frame counts as shown at once. Registration and suspension keep their errors.
+    {
+        ManualFrameClock clock;
+        FramePacer pacer(clock);
+        pacer.set_uncapped(true);
+        EXPECT(pacer.uncapped());
+        std::uint64_t token = 99;
+        // Still invalid_state before registration, after suspend, and after resume until re-registered.
+        EXPECT(pacer.wait_frame_event(frame_event_origin, infinite_timeout_ms, 0, &token) == pacer_hr::invalid_state &&
+               token == 99);
+        EXPECT(setup(pacer, 1));
+        // Tokens at once, no clock advance; as many in a row as asked (the latency limit does not throttle),
+        // each from a wait that would still be blocked without the flag.
+        for (std::uint64_t i = 1; i <= 3; ++i) {
+            auto wait = wait_async(pacer, infinite_timeout_ms);
+            Result r = wait.get();
+            EXPECT(r.hr == pacer_hr::ok && r.token == i);
+        }
+        pacer.commit_present_token(1, 1);
+        pacer.commit_present_token(2, 1);
+        pacer.commit_present_token(3, 1);
+        EXPECT(pacer.frames_in_flight() == 0);  // nothing waits for a vblank
+        std::uint32_t count = 2;
+        FrameStatistic stats[2];
+        EXPECT(pacer.get_frame_statistics(3, stat_present | stat_display, &count, stats) == pacer_hr::ok);
+        EXPECT(count == 2 && stats[0].type == stat_present && stats[0].time_us == 0 &&
+               stats[1].type == stat_display && stats[1].time_us == 0);
+        // An untokened (blank) present is not queued on the grid either.
+        pacer.note_untokened_present();
+        EXPECT(pacer.frames_in_flight() == 0);
+        // An uncapped frame is due at once: present_timing reports no lateness.
+        const FramePacer::PresentTiming timing = pacer.present_timing(3);
+        EXPECT(timing.late_us == 0 && timing.period_us == 0);
+        pacer.suspend();
+        EXPECT(pacer.wait_frame_event(frame_event_origin, 0, 0, &token) == pacer_hr::invalid_state);
+        pacer.resume();
+        EXPECT(pacer.wait_frame_event(frame_event_origin, 0, 0, &token) == pacer_hr::invalid_state);
+        EXPECT(setup(pacer, 1));
+        clock.advance_us(1234);
+        EXPECT(pacer.wait_frame_event(frame_event_origin, 0, 0, &token) == pacer_hr::ok && token == 4);
+        // The flag survives suspend/resume (set once, by the environment).
+        pacer.suspend();
+        pacer.resume();
+        EXPECT(pacer.uncapped());
+        EXPECT(setup(pacer, 1));
+        EXPECT(pacer.wait_frame_event(frame_event_origin, 0, 0, &token) == pacer_hr::ok && token == 5);
+        // Turning the cap back on restores the grid: the next wait blocks until the next origin (the grid was
+        // re-based at the last SetFrameIntervalX, so a whole period is the next origin).
+        pacer.set_uncapped(false);
+        auto wait = wait_async(pacer, infinite_timeout_ms);
+        EXPECT(blocked(wait));
+        clock.advance_us(period);
+        EXPECT(wait.get().token == 6);
+    }
+
     // Real clock: five 10 ms vblanks take about 50 ms.
     {
         SteadyFrameClock clock;

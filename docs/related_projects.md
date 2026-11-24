@@ -6,6 +6,45 @@ cannot be mixed with this repository. This page records what we may learn from e
 The rule is the same for every entry: **facts are fine; code is not.** A format layout, an ABI observation or a
 measured behaviour can be reimplemented independently. The source that expressed it cannot be copied.
 
+## Where this fork came from: ItsNotRexed/Leonida and its continuation
+
+This repository is a fork of <https://github.com/ItsNotRexed/Leonida>. That repository stopped answering on
+2026-11-23 (about 23:40 UTC: "not found" for clones and the API). The last upstream commit merged here is
+`de4c373`, so nothing before it is lost. The PortWatch VI tracker (<https://portwatch-vi.xyz/>, its `tracker.json`
+of 2026-11-23 23:57 UTC) reports the repository deleted and its Discord gone on that day, with its author saying he
+quit; it records the project's last result as the executable running with black frames.
+
+- The original author's own mirror is named in the continuation's README: <https://git.notrexed.dev/notrexed/Leonida>.
+- <https://github.com/ubiquitarianism/leonida> describes itself as the continuation of the project after its author
+  left. Its history contains `de4c373` and everything before it, checked by commit hash, not by name; on 2026-11-24
+  the only commit after it changes the README.
+
+**Licence:** the same history, so the same licence as this repository.
+
+**What we use it for:** it is the upstream to follow if the maintainer of this fork decides to. It is a different
+party from the original author, so its commits are reviewed before they are merged here.
+
+## Marvisak/VIctory
+
+<https://github.com/Marvisak/VIctory>
+
+Another port of the same Xbox Series build, in Rust. The title's x86-64 code runs in its process, as here, but it
+draws through the host's D3D12 and recompiles shaders to DXIL. Its README (2026-11-23) reports the title booting,
+running its menus at 30 fps, playing its intro video with sound and loading into the world, where frames are still
+black. Its console API layer is `crates/victory-hle/src/modules`.
+
+**Licence:** **GPL-3.0-or-later** (`Cargo.toml`), compatible with this repository. Adapted code would have to keep
+its copyright notices and be marked as adapted. The languages and GPU paths differ, so in practice what transfers is
+its measured behaviour, reimplemented here.
+
+**One file must not come over:** `crates/victory-formats/src/bcpack-tables.bin`, about 78 KB of BCPack decoder tables.
+VIctory's own asset policy lists it as its one exception to "nothing from the game". This repository has no such
+exception ([README.md](../README.md), BCPack row).
+
+**What we use it for:** facts about what the title asks of the console APIs, each cited to its file and line and
+checked here before it is relied on. [related_projects_gaps.md](related_projects_gaps.md) lists them against this
+runtime.
+
 ## ivall/xcl
 
 <https://github.com/ivall/xcl>
@@ -20,6 +59,51 @@ code, tables or comments may be copied.**
 
 **What we use it for:** its measured facts only. Verify each one with Leonida's own census, a synthetic test or a
 public specification before relying on it. This repository never contains game data, so a fact XCL measured on a retail package is checked here with synthetic inputs or a contributor's own copy.
+
+## brcly/TuxBox
+
+<https://github.com/brcly/TuxBox>
+
+App-local console DLLs in Rust and C++ for an Xbox Series title under stock Proton or on Windows: `d3d12_xs.dll` with
+its own slot tables for the device, queues, command lists, descriptor heaps, fences and resources, and XMem, XG,
+DirectStorage (`xcrdapi.dll`), `xapu.dll`, `chad.dll`, AcpHal, GameInput and the GDK runtime. Each behaviour is
+checked by small guest programs that write JSON receipts. Its run records for this title (read at `0b80c58`): a first
+run that opened the title's own window, presented at 3840x2160 and stopped on device slot 25 for a depth descriptor
+with console format 118; a later run that reached the player-selection prompt and ended at a title breakpoint.
+
+**Licence:** **Apache-2.0**, which GPL-3.0 code may include with its notices kept. Only facts are taken here.
+
+**Not to bring over:** its `evidence/` folder holds screenshots of another retail title and receipts that carry
+hashes and offsets of game files.
+
+## californiaAlmonds/OpenScarlett
+
+<https://github.com/californiaAlmonds/OpenScarlett>
+
+C++20 shims for 33 console DLLs, D3D12.X proxies over a Vulkan backend, an RDNA2 shader lifter, DirectStorage, audio
+and GameInput (read at `87cdba6`). Its README's retail results (an unnamed title its own code comments identify as
+this one) come with no logs, list of stops or tests of that path in the tree, so they are leads, not measurements;
+one of them, that retail titles never open a window, is contradicted by TuxBox's record and by this repository's own
+boot stop 26 ([retail_boot_intel_host.md](retail_boot_intel_host.md)).
+
+**Licence:** **MIT**, compatible. Its slot tables include interface ids; as with any table, the facts are rebuilt
+here, not the table copied.
+
+## Kajcsi/G6Recomp
+
+<https://github.com/Kajcsi/G6Recomp>
+
+A native PE loader with an import policy, TLS index 0 for the executable and crash reports, the GDK runtime services
+(task queues, async, errors, threads, saves, users), read-only mounts with a DirectStorage factory and a stand-in
+GameInput; no D3D12 layer (read at `0b9e3c5`). Its own runs of this title stop on `XMemAllocatePhysicalPages`, this
+repository's boot stop 6. Its notes record facts it checked on the title's own files (the input block of
+`D3D12ConfigureVirtualMemoryX`, the DirectStorage factory calls before the first assert, the executable's single
+export `__XMemAllocationHooks__`) and, marked as reported, facts from xcl.
+
+**Licence:** **GPL-3.0**, compatible. Only facts are taken here.
+
+**What the three are used for:** [related_projects_gaps.md](related_projects_gaps.md), *Past boot stop 13*, lists
+what they record against this runtime, each fact with its project and file.
 
 ## rpatty-dev/PercyStar
 

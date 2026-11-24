@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -73,11 +73,22 @@ class MergeCheckTest(unittest.TestCase):
     def merge(self, number, branch):
         self.git("merge", "-q", "--no-ff", "-m", f"Merge pull request #{number} from someone/{branch}", branch)
 
+    def squash_merge(self, number, branch, subject=None):
+        self.git("merge", "-q", "--squash", branch)
+        title = subject or f"{branch}: add the effect record section"
+        self.git("commit", "-q", "-m", f"{title} (#{number})")
+
     def run_check(self, *pairs):
         out = io.StringIO()
         with redirect_stdout(out):
             code = mc.main(["--repo", self.repo, "--main", "main", "--json", *pairs])
         return code, json.loads(out.getvalue())
+
+    def run_text(self, *pairs):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = mc.main(["--repo", self.repo, "--main", "main", *pairs])
+        return code, out.getvalue()
 
     def test_a_fresh_pr_is_clean(self):
         base = self.git("rev-parse", "main")
@@ -106,6 +117,20 @@ class MergeCheckTest(unittest.TestCase):
         self.assertEqual(len(r["merges"]), 1)
         self.assertEqual(r["commits"], {"total": 1, "on_main": 1})
 
+    def test_batch_keeps_prior_merges_separate(self):
+        base = self.git("rev-parse", "main")
+        self.pr_branch("landed", base, PARAGRAPH)
+        self.merge(31, "landed")
+        merged_sha = self.git("rev-parse", "--short=12", "main")
+        self.pr_branch("next", "main", "A new line for the unmerged PR.\n")
+        with mock.patch.object(mc, "git", wraps=mc.git) as commands:
+            code, rows = self.run_check("32=next", "31=landed", "32=next")
+        scans = [call for call in commands.call_args_list if call.args[1] == "log" and "--first-parent" in call.args]
+        self.assertEqual(len(scans), 1)
+        self.assertEqual(code, 1)
+        self.assertEqual([(r["pr"], r["verdict"], r["merges"]) for r in rows],
+                         [(32, "clean", []), (31, "already-merged", [merged_sha]), (32, "clean", [])])
+
     def test_text_already_on_main_is_reported_even_when_the_patch_differs(self):
         base = self.git("rev-parse", "main")
         self.pr_branch("first", base, "\n" + PARAGRAPH)
@@ -121,6 +146,117 @@ class MergeCheckTest(unittest.TestCase):
         self.assertEqual(r["verdict"], "duplicates")
         self.assertEqual(r["merges"], [])  # another number: only the text check can see it
         self.assertEqual(r["duplicates"], {"docs/notes.md": 3})
+
+    def test_duplicate_check_reports_failed_blob_reads(self):
+        self.append("docs/notes.md", "\n" + PARAGRAPH)
+        self.commit("Existing paragraph")
+        self.pr_branch("repeat", "main", "\n" + PARAGRAPH)
+        tree = self.git("rev-parse", "repeat^{tree}")
+        run = subprocess.run
+
+        for rev in ("main", tree):
+            with self.subTest(revision=rev):
+                read = ["show", f"{rev}:docs/notes.md"]
+
+                def fail_read(args, **kwargs):
+                    if args[3:] == read:
+                        return subprocess.CompletedProcess(args, 128, b"", b"fatal: could not read blob\n")
+                    return run(args, **kwargs)
+
+                out, err = io.StringIO(), io.StringIO()
+                with mock.patch.object(subprocess, "run", side_effect=fail_read), \
+                        redirect_stdout(out), redirect_stderr(err):
+                    code = mc.main(["--repo", self.repo, "--main", "main", "--json", "20=repeat"])
+                self.assertEqual((code, out.getvalue()), (2, ""))
+                self.assertEqual(err.getvalue(), f"merge_check: git {' '.join(read)}: fatal: could not read blob\n")
+
+    def test_a_new_path_is_clean(self):
+        self.append("docs/notes.md", "\n" + PARAGRAPH)
+        self.commit("Existing paragraph")
+        self.git("checkout", "-q", "-b", "new-path")
+        self.write("docs/new.md", PARAGRAPH)
+        self.commit("Add a separate document")
+        self.git("checkout", "-q", "main")
+
+        code, [result] = self.run_check("20=new-path")
+        self.assertEqual((code, result["verdict"], result["duplicates"]), (0, "clean", {}))
+
+    def test_a_gitlink_update_needs_no_submodule_objects(self):
+        path = "deps/sample"
+        oid_length = len(self.git("rev-parse", "main"))
+        for digit, branch in (("1", "main"), ("2", "updated")):
+            if branch == "updated":
+                self.git("checkout", "-q", "-b", branch)
+            oid = digit * oid_length
+            self.git("update-index", "--add", "--cacheinfo", f"160000,{oid},{path}")
+            self.git("commit", "-q", "-m", f"Set gitlink on {branch}")
+        self.git("checkout", "-q", "main")
+
+        code, [result] = self.run_check("20=updated")
+        self.assertEqual((code, result["verdict"], result["duplicates"]), (0, "clean", {}))
+
+    def test_patch_paths_and_added_header_like_lines_still_count_duplicates(self):
+        paths = ("docs/quoted \u65e5\u672c\u8a9e.md", "docs/notes with spaces.md", "docs/header-like.md")
+        header_like = "++ " + PARAGRAPH
+        introduction = "A separator between copies keeps Git's added hunk easy to identify.\n"
+        self.git("config", "core.quotePath", "true")
+        for path in paths:
+            self.write(path, PARAGRAPH + header_like + introduction)
+        self.commit("Existing translated documents")
+        self.git("checkout", "-q", "-b", "duplicated")
+        for path in paths:
+            self.append(path, "\n" + (header_like if path.endswith("header-like.md") else PARAGRAPH))
+        self.commit("Duplicate docs")
+        self.git("checkout", "-q", "main")
+
+        code, [result] = self.run_check("18=duplicated")
+        self.assertEqual((code, result["verdict"]), (1, "duplicates"))
+        self.assertEqual(result["duplicates"], dict.fromkeys(paths, 3))
+
+        self.git("config", "diff.noprefix", "true")
+        self.git("config", "core.quotePath", "false")
+        self.assertEqual(self.run_check("18=duplicated"), (code, [result]))
+
+    def test_duplicate_blocks_span_retained_blank_lines_only(self):
+        first, second, third = PARAGRAPH.splitlines(keepends=True)
+        paragraph = first + "\n" + second + third
+        intro = paragraph + "Start of the changed section.\n"
+        ending = "End of the changed section.\n"
+        duplicate = "docs/notes.md"
+        partial_edit = "docs/partial.md"
+        self.write(duplicate, intro + "\n" + ending)
+        self.write(partial_edit, intro + second + ending)
+        self.commit("Add two documents and placeholders")
+        self.git("checkout", "-q", "-b", "fill-placeholders")
+        for path in (duplicate, partial_edit):
+            self.write(path, intro + paragraph + ending)
+        self.commit("Fill placeholders")
+        self.git("checkout", "-q", "main")
+
+        # Git keeps the blank line in notes.md and the second content line in partial.md.
+        # Both split the additions into separate hunks, but only notes.md adds all three content lines.
+        code, [result] = self.run_check("20=fill-placeholders")
+        self.assertEqual((code, result["verdict"]), (1, "duplicates"))
+        self.assertEqual(result["duplicates"], {duplicate: 3})
+        self.assertEqual(result["duplicate_samples"], {duplicate: PARAGRAPH.splitlines()})
+
+    def test_duplicate_blocks_use_git_line_boundaries(self):
+        unicode_lines = "".join(f"Paragraph {i} begins with enough text to count as a line.\u2028"
+                                "Its continuation is also longer than forty characters.\n" for i in range(3))
+        bare_cr_lines = unicode_lines.replace("\u2028", "\r")
+        paths = {"docs/notes.md": unicode_lines, "docs/cr.md": bare_cr_lines}
+        for path, text in paths.items():
+            self.write(path, text + "An unrelated line separates the two copies.\n")
+        self.commit("Add paragraphs with embedded line separators")
+        self.git("checkout", "-q", "-b", "duplicate-separators")
+        for path, text in paths.items():
+            # Read bytes here because normal text reads turn a bare CR into an LF.
+            with open(os.path.join(self.repo, path), "ab") as f:
+                f.write(text.encode("utf-8"))
+        self.commit("Duplicate both paragraphs")
+        self.git("checkout", "-q", "main")
+        code, [result] = self.run_check("19=duplicate-separators")
+        self.assertEqual((code, result["duplicates"]), (1, dict.fromkeys(paths, 3)))
 
     def test_a_block_the_pr_moves_is_not_a_duplicate(self):
         base = self.git("rev-parse", "main")
@@ -170,6 +306,94 @@ class MergeCheckTest(unittest.TestCase):
         code, [r] = self.run_check("13=fence2")
         self.assertEqual(r["duplicates"], {})
         self.assertEqual(code, 0)
+
+    def test_a_squash_merged_single_commit_pr_is_already_merged(self):
+        base = self.git("rev-parse", "main")
+        self.pr_branch("sq1", base, "\n" + PARAGRAPH)
+        self.squash_merge(21, "sq1")
+        self.write("docs/other.md", "Another document that changes nothing in notes.md at all, but moves main.\n")
+        self.commit("other work")
+        self.git("checkout", "-q", "-b", "sq1_copy", base)
+        self.append("docs/notes.md", "\n" + PARAGRAPH)
+        self.commit("sq1: add the effect record section (rebased)")
+        self.git("checkout", "-q", "main")
+        code, [r] = self.run_check("21=sq1_copy")
+        self.assertEqual(code, 1)
+        self.assertEqual(r["verdict"], "already-merged")
+        self.assertEqual(len(r["merges"]), 1)
+        self.assertEqual(r["commits"], {"total": 1, "on_main": 1})
+
+    def test_a_multi_commit_squash_merged_pr_is_already_merged_despite_cherry_miss(self):
+        base = self.git("rev-parse", "main")
+        self.git("checkout", "-q", "-b", "sq2", base)
+        lines = PARAGRAPH.splitlines(keepends=True)
+        self.append("docs/notes.md", "\n" + lines[0])
+        self.commit("sq2: first half")
+        self.append("docs/notes.md", "".join(lines[1:]))
+        self.commit("sq2: second half")
+        self.git("checkout", "-q", "main")
+        self.squash_merge(22, "sq2", "sq2: add the effect record section (#999)")
+        # Unrelated change on main (separate file plus a non-conflicting edit at the top of notes.md).
+        self.write("docs/other.md", "Another document that moves main without touching the squashed block.\n")
+        self.write("docs/notes.md",
+                   "# Notes (updated)\n\nAn introduction long enough to be counted as a line of its own here.\n"
+                   "\n" + PARAGRAPH)
+        self.commit("other work")
+        code, [r] = self.run_check("22=sq2")
+        self.assertEqual(code, 1)
+        self.assertEqual(r["verdict"], "already-merged")
+        self.assertEqual(len(r["merges"]), 1)
+        self.assertEqual(r["commits"], {"total": 2, "on_main": 0})
+        self.assertEqual(r["duplicates"], {})
+        tcode, text = self.run_text("22=sq2")
+        self.assertEqual(tcode, 1)
+        self.assertIn("merged tree matches main", text)
+        self.assertIn("merged before at", text)
+        # Earlier issue number in the squash subject must not match as a prior merge.
+        code_issue, [r_issue] = self.run_check("999=sq2")
+        self.assertEqual(code_issue, 0)
+        self.assertEqual(r_issue["merges"], [])
+
+    def test_a_follow_up_commit_after_a_multi_commit_squash_merge_is_clean(self):
+        base = self.git("rev-parse", "main")
+        self.git("checkout", "-q", "-b", "sq3", base)
+        lines = PARAGRAPH.splitlines(keepends=True)
+        self.append("docs/notes.md", "\n" + lines[0])
+        self.commit("sq3: first half")
+        self.append("docs/notes.md", "".join(lines[1:]))
+        self.commit("sq3: second half")
+        self.git("checkout", "-q", "main")
+        self.squash_merge(23, "sq3")
+        self.git("checkout", "-q", "sq3")
+        self.write("docs/followup.md", "A follow-up document pushed after the PR was squash-merged.\n")
+        self.commit("sq3: follow-up")
+        self.git("checkout", "-q", "main")
+        code, [r] = self.run_check("23=sq3")
+        self.assertEqual(code, 0)
+        self.assertEqual(r["verdict"], "clean")
+        self.assertEqual(len(r["merges"]), 1)
+        self.assertEqual(r["commits"], {"total": 3, "on_main": 0})
+
+    def test_a_revert_commit_is_not_counted_as_a_prior_merge(self):
+        self.write("docs/other.md", "unrelated\n")
+        self.commit('Revert "pr: something (#24)"')
+        self.write("docs/other2.md", "unrelated2\n")
+        self.commit("Revert pr: something (#24)")
+        base = self.git("rev-parse", "main")
+        self.pr_branch("fresh24", base, "\n" + PARAGRAPH)
+        code, [r] = self.run_check("24=fresh24")
+        self.assertEqual(code, 0)
+        self.assertEqual(r["verdict"], "clean")
+        self.assertEqual(r["merges"], [])
+
+    def test_merged_pr_number_subject_parsing(self):
+        self.assertEqual(mc._merged_pr_number("Merge pull request #7 from someone/first"), 7)
+        self.assertEqual(mc._merged_pr_number("Merge pull request #7 from someone/fix (#99)"), 7)
+        self.assertEqual(mc._merged_pr_number("docs: fix wording (#5515) (#5523)"), 5523)
+        self.assertIsNone(mc._merged_pr_number('Revert "docs: fix wording (#5523)"'))
+        self.assertIsNone(mc._merged_pr_number("Revert docs: fix wording (#5523)"))
+        self.assertIsNone(mc._merged_pr_number("docs: see (#5523) for details"))
+        self.assertIsNone(mc._merged_pr_number("docs: fix(#5523)"))
 
     def test_usage_errors(self):
         with self.assertRaises(SystemExit), redirect_stdout(io.StringIO()), \

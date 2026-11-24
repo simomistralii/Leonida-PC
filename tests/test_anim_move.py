@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOL = os.path.join(ROOT, "tools", "anim_move.py")
@@ -388,6 +389,25 @@ class AnimMoveTest(unittest.TestCase):
         self.assertIn("refuses to overwrite", res.stderr)
         with open(rpf, "rb") as f:
             self.assertEqual(f.read(), original)
+
+    def test_json_write_failure_preserves_previous_report(self):
+        previous = '{"previous": true}\n'
+        path = os.path.join(self.tmp.name, "keep.json")
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(previous)
+        with mock.patch.object(anim_move, "replace_retry", side_effect=OSError(13, "Permission denied")):
+            with self.assertRaises(OSError):
+                anim_move._write_json_atomic(path, {"new": True})
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), previous)
+
+    def test_module_docstring_has_no_double_encoded_characters(self):
+        """The preamble layout uses U+00D7; it was once stored as the pair U+00C3 U+2014."""
+        with open(TOOL, encoding="utf-8") as f:
+            source = f.read()
+        for broken in ("\u00c3\u2014", "\u00e2\u20ac", "\u00c2"):
+            self.assertNotIn(broken, source)
+        self.assertIn("N_req \u00d7 u32 request hashes", source)
 
 
 if __name__ == "__main__":

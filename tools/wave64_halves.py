@@ -33,6 +33,7 @@ candidate cross-half opcodes and decides nothing. This module decides per shader
 the tiers the translator wrote into an index.json. They answer different questions.
 
 Standard library only.
+Usage: `python -I tools/wave64_halves.py --help` lists the options.
 """
 import argparse
 import json
@@ -675,6 +676,12 @@ class Analysis:
                 addr_t |= self.add_tid_lane(n, i, a, mods)
             elected = bool(st["xg"] and st["xg"][0] == "elect")
             bits_violation(addr_t, ELECT if elected else 0)
+            if elected and any(x.get("k") == "vgpr" and not all(
+                    r in st["u"] or r in st["ua"] or self.scalar_def_since_exec(n, i, r)
+                    for r in range(x["r"], x["r"] + x.get("n", 1))) for x in addr_ops):
+                # only the elected lane runs it, at its own address: each half elects another lane, so a per-lane
+                # address (an untainted pixel coordinate too) picks another word there and the counter splits
+                violation("elected-lane")
             if data_t & CNT:
                 dreg = _regs(data_op)[0] if data_op is not None and _regs(data_op) else None
                 if not (elected and (op.endswith("add") or op.endswith("add_u32") or op.endswith("_add"))
@@ -1227,6 +1234,19 @@ class Analysis:
         st["xg"], st["f"] = None, False
         st["ua"] = st["u"]
 
+    def scalar_def_since_exec(self, n, i, r):
+        """Whether VGPR r was last written in block n before instruction i, after the block's last EXEC write, from
+        scalars and constants only (the elected lane computed it itself from wave-uniform values)."""
+        for j in range(i - 1, -1, -1):
+            ins = self.blocks[n][j]
+            dests, srcs, defs, _ = operands(ins)
+            if ins["op"].startswith(SAVEEXEC) or "exec" in defs:
+                return False
+            if any(("v", r) in _regs(d) for d in dests):
+                return all(x.get("k") in ("sgpr", "imm") or (x.get("k") == "special" and x.get("t") not in (
+                    "exec", "exec_lo", "exec_hi", "vcc", "vcc_lo", "vcc_hi")) for x in srcs)
+        return False
+
     def ancestor(self, anc, tok):
         seen = set()
         while tok is not None and tok not in seen:
@@ -1718,7 +1738,7 @@ def main(argv=None):
     # JSON document that is not the index object used to end in a traceback (FileNotFoundError, PermissionError,
     # JSONDecodeError, AttributeError).
     try:
-        with open(args.census, encoding="utf-8") as f:
+        with open(args.census, encoding="utf-8-sig") as f:
             index = json.load(f)
     except OSError as exc:
         print(f"ERROR: cannot read {args.census}: {exc.strerror or exc}", file=sys.stderr)

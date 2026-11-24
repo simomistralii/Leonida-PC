@@ -40,6 +40,90 @@ def _validate(spv: bytes, target_env: str = "vulkan1.2") -> None:
 
 
 class SpirvAsmUnitTests(unittest.TestCase):
+    def test_unicode_separators_remain_in_literal_strings(self):
+        literal = "first\u0085second\u2028third\u2029last"
+        expected = literal.encode("utf-8") + b"\x00"
+        expected += b"\x00" * (-len(expected) % 4)
+        for newline in ("\n", "\r\n", "\r"):
+            with self.subTest(newline=newline):
+                asm = f'%str = OpString "{literal}"{newline}OpNop{newline}'
+                spv = spirv_asm.assemble(asm)
+                words = _literal_words(spv, 7, 1)  # OpString result ID precedes its literal.
+                self.assertEqual(struct.pack(f"<{len(words)}I", *words), expected)
+
+    def test_literal_line_endings_preserve_bytes(self):
+        comment = '; An unmatched " in this comment is ordinary text.'
+        for ending in ("\r", "\r\n", "\n"):
+            with self.subTest(literal_ending=ending):
+                operand = f'first \\"; middle{ending}last'
+                expected = f'first "; middle{ending}last'.encode("utf-8")
+                asm = f'{comment}\r\n%str = OpString "{operand}"\r\nOpNop\r\n'
+                words = _literal_words(spirv_asm.assemble(asm), 7, 1)
+                self.assertEqual(struct.pack(f"<{len(words)}I", *words).split(b"\0", 1)[0], expected)
+
+    def test_error_line_after_multiline_literal_is_physical_line(self):
+        asm = '; comment\r\n%str = OpString "first\rsecond\r\nthird\nlast"\r\nOpNotReal\n'
+        with self.assertRaisesRegex(spirv_asm.SpirvAsmError, r"line 6: unknown opcode"):
+            spirv_asm.assemble(asm)
+
+    def test_cli_preserves_literal_crlf_in_source_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            src = os.path.join(directory, "literal.spvasm")
+            dst = os.path.join(directory, "literal.spv")
+            literal = b"first\r\nsecond"
+            with open(src, "wb") as f:
+                f.write(b'%str = OpString "' + literal + b'"\nOpNop\n')
+            result = subprocess.run([sys.executable, "-I", os.path.join(TOOLS, "spirv_asm.py"), src, "-o", dst],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with open(dst, "rb") as f:
+                words = _literal_words(f.read(), 7, 1)
+            self.assertEqual(struct.pack(f"<{len(words)}I", *words).split(b"\0", 1)[0], literal)
+
+    def test_instruction_boundaries_follow_tokens_across_physical_lines(self):
+        canonical = (
+            "OpCapability Shader\n"
+            "OpMemoryModel Logical GLSL450\n"
+            'OpEntryPoint GLCompute %main "main"\n'
+            "OpExecutionMode %main LocalSize 1 1 1\n"
+            '%file = OpString "OpNop ; = %id"\n'
+            "%int = OpTypeInt 32 1\n"
+            "%pair = OpTypeStruct %int %int\n"
+            "%void = OpTypeVoid\n"
+            "%fn = OpTypeFunction %void\n"
+            "%main = OpFunction %void None %fn\n"
+            "%entry = OpLabel\n"
+            "OpNop\nOpReturn\nOpFunctionEnd\n"
+        )
+        mixed = (
+            "OpCapability Shader OpMemoryModel\r\nLogical GLSL450\n"
+            'OpEntryPoint GLCompute %main "main" OpExecutionMode %main LocalSize 1 1 1\n'
+            '%file = OpString "OpNop ; = %id" %int\r=\nOpTypeInt 32 ; signedness follows\n1 '
+            "%pair = OpTypeStruct %int\n%int\n"
+            "%void = OpTypeVoid %fn = OpTypeFunction %void\n"
+            "%main = OpFunction %void None\n%fn %entry = OpLabel\n"
+            "OpNop OpReturn OpFunctionEnd\n"
+        )
+        assembled = spirv_asm.assemble(mixed)
+        self.assertEqual(assembled, spirv_asm.assemble(canonical))
+        _validate(assembled)
+
+    def test_prefixed_specialization_mnemonic_can_start_a_physical_line(self):
+        prefix = "%int = OpTypeInt 32 1\n%one = OpSpecConstant %int 1\n"
+        canonical = prefix + "%two = OpSpecConstantOp %int IAdd %one %one\nOpNop\n"
+        wrapped = prefix + "%two = OpSpecConstantOp %int\nOpIAdd %one\n%one OpNop\n"
+        self.assertEqual(spirv_asm.assemble(wrapped), spirv_asm.assemble(canonical))
+
+    def test_result_id_starts_instruction_on_its_physical_line(self):
+        text = '%str = OpString "first\r\nlast" %x\r=\nOpNotReal\n'
+        with self.assertRaisesRegex(spirv_asm.SpirvAsmError, r"line 2: unknown opcode"):
+            spirv_asm.assemble(text)
+
+    def test_later_unterminated_literal_reports_its_physical_line(self):
+        text = '%str = OpString "first\rlast" %bad = OpString "unterminated'
+        with self.assertRaisesRegex(spirv_asm.SpirvAsmError, r"line 2: unterminated string"):
+            spirv_asm.assemble(text)
+
     def test_reject_repeated_type_result_ids(self):
         declarations = (
             ("OpTypeInt 32 0", "OpTypeFloat 32"),
@@ -100,6 +184,7 @@ class SpirvAsmUnitTests(unittest.TestCase):
         for env, expected_ver in (
             ("vulkan1.0", 0x00010000),
             ("vulkan1.1", 0x00010300),
+            ("vulkan1.1spv1.4", 0x00010400),
             ("vulkan1.2", 0x00010500),
             ("vulkan1.3", 0x00010600),
         ):

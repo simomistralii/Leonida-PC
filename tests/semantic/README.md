@@ -2,8 +2,16 @@
 
 Standard library only; no GPU, no LLVM, no SPIRV-Tools, no game files.
 
-    python -I scripts/run_semantic_tests.py tests/semantic        # one file per core: 26 s instead of 253 s on 16 cores
-    python -m unittest discover -s tests/semantic -v             # the same tests, one file after another
+```sh
+python -I scripts/run_semantic_tests.py tests/semantic        # one file per core: 26 s instead of 253 s on 16 cores
+python -m unittest discover -s tests/semantic -v             # the same tests, one file after another
+python -I scripts/run_semantic_tests.py tests/semantic -j 4 -p 'test_image_*.py'  # a matching subset
+```
+
+`-p PATTERN` / `--pattern PATTERN` selects Python test filenames, including those inside packages. It uses the
+same filename glob syntax as `unittest discover -p`; the default is `test*.py`. Quote the pattern to keep the shell
+from expanding it. Both serial and parallel runs return a nonzero status if no files match. Patterns match file
+basenames, not paths or individual test method names.
 
 The runner starts `python -m unittest <file>` for each file, several at a time, prints the output of the files that
 fail and one summary line; `-j N` sets how many run at once (`-j 1` is the discover command above) and `-v` prints
@@ -75,6 +83,10 @@ instruction family per file; the list below describes some of them, not every fi
 - `test_saveexec_b64.py` does the same for `s_and_saveexec_b64`, `s_or_saveexec_b64`, `s_andn2_saveexec_b64` and
   `s_andn2_wrexec_b64` with S0 a compare result in VCC or in an SGPR pair (13 pairs of S0 and EXEC for each op and
   source), and runs the GPU test `cs_w64x_saveexec_b64`.
+- `test_exec_computed.py` runs the GPU tests `cs_w32_exec_computed` (32 lanes) and `cs_w64_exec_computed` (64
+  lanes): computed values (`s_lshl_b32`, `s_add_u32`, `s_bfm_b32`, `s_not_b32`, `s_mov_b32`, a lane mask
+  `s_and_b32` a number) written to `exec_lo` / `exec_hi` turn on only the lanes of that half whose bit is set
+  (SHADER-1264). A plain-Python reference recomputes the words from each case's EXEC.
 - `spirv_wave_interp.py` runs every invocation of one subgroup at once through structured control flow
   (split at a selection, rejoin at its merge, loops until no invocation is left) with the subgroup
   operations the translator emits. It is the SPIR-V side of `tools/cf_diff.py` (FUZZ-8);
@@ -105,6 +117,12 @@ instruction family per file; the list below describes some of them, not every fi
   single-lane rows (slots, both windings, misses, remap byte, t max and t sign, zero area, NaN and inf in the node
   and the ray, shared edges and vertices) and 84 lane results. The table is written from the raw outputs, not by
   hand.
+- `test_ms_prim_export.py` runs `fixtures/ms_prim_export.asm`, a 72-thread wave64 mesh shader, as a mesh shader and
+  with `--mesh-compute`, as one workgroup: `s_sendmsg(MSG_GS_ALLOC_REQ)` with m0 = prims << 12 | verts gives the
+  counts, `exp prim` gives indices from bits [8:0], [18:10] and [28:20] (the edge flags in bits 9, 19 and 29 are
+  not part of them) and CullPrimitiveEXT from the null-primitive bit 31, and threads at or past a count write no
+  vertex or primitive (Mesa 22.3 `ac_llvm_build.c`, `ac_pack_prim_export`). The interpreter returns a mesh
+  shader's arrayed outputs as words and the `OpSetMeshOutputsEXT` counts.
 - `test_interp.py` tests the interpreter against the SPIR-V / GLSL.std.450 definitions. The interpreter raises
   `UnsupportedConstruct` for anything it does not model instead of approximating it. It can seed Input variables,
   PushConstant words and a flat physical-address memory map for the tests above.
@@ -144,6 +162,16 @@ instruction family per file; the list below describes some of them, not every fi
   `v_pk_fma_f16`, `v_fma_f16 op_sel`, `v_subrev_co_ci_u32`, `v_cmpx_eq_u64`, `v_mul_i32_i24`, `v_ffbh_i32`,
   `v_pk_lshlrev_b16`, `v_sin_f16` and `v_mul_legacy_f32`) and requires `test_ps_semantics.py` to fail for the
   matching shader.
+- To check a new test file the same way before sending it, run `python -I tools/semantic_mutants.py
+  tests/semantic/test_x.py --op <op>` (or `--function NAME`, `--lines A-B`). It makes one-line mutants of the
+  translator code for that op (swapped opcode and GLSL pairs, comparisons, small constants ±1, swapped `OpSelect`
+  arms, a repeated operand) in a private copy of `tools/`, and lists the ones the file still passes. An op that is
+  translated through a lookup table (`F1`, `LDS_ATOMICS`, ...) also gets its table entry swapped for the table's other
+  values. A survivor
+  usually means a case asserts on the file's own reference model rather than on translated output, or that its
+  inputs can't tell the variants apart (all bytes of S0 >= S1, no bits overlapping, only lanes 0–3 checked). Some
+  survivors are equivalent mutants, and in a branch shared by several ops the other ops' lines are listed too, so
+  read each one before adding a case. `tests/test_semantic_mutants.py` tests the tool.
 - `test_f32_valu.py` runs `ps_f32_mods` (`v_mac_f32` rounds the product before the add; VOP3 clamp and output
   modifiers on `v_cvt_f32_ubyte*`/`u32`/`f16` and `v_rcp_iflag_f32`), found by `tools/f32_fuzz.py` (FUZZ-3), and
   tests the interpreter's float operations against GLSL.std.450 (signed zeros, undefined inputs, a single-rounding

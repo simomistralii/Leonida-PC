@@ -507,6 +507,15 @@ def same_output_path(first, second):
         return False
 
 
+def _inside(path, folder):
+    """True when `path` is `folder` or lies below it, compared as the report check compares paths."""
+    path, folder = _path_key(path), _path_key(folder)
+    try:
+        return os.path.commonpath([path, folder]) == folder
+    except ValueError:   # different drives on Windows
+        return False
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("target", help="RPF9 archive or a directory of .rpf/.bin payloads")
@@ -528,13 +537,23 @@ def main(argv=None):
             ap.error(f"{flag} is a folder, not a report file: {path}")
     if os.path.isdir(a.target):
         manifest = os.path.join(a.target, "index.json")
+
+        def unlistable(error):
+            # os.walk skips a folder it cannot list unless onerror stops it. A report path inside that folder could
+            # then be an input this check never saw, so refuse it. Any other unlistable folder is left to the scan,
+            # which names it and reports the run as incomplete (exit 1).
+            folder = error.filename or a.target
+            if _inside(path, folder):
+                ap.error(f"{flag} cannot be checked against the inputs: cannot list {folder}: "
+                         f"{error.strerror or error}")
+
         for flag, path in (("--out", a.out), ("--csv", a.csv)):
             if not path:
                 continue
             if os.path.isfile(manifest) and same_output_path(path, manifest):
                 ap.error(f"{flag} would overwrite the carve manifest: {path}")
             if os.path.isfile(path):
-                for root, _dirs, names in os.walk(a.target):
+                for root, _dirs, names in os.walk(a.target, onerror=unlistable):
                     for name in names:
                         if name.lower().endswith((".json", ".csv")):
                             continue
@@ -555,7 +574,9 @@ def main(argv=None):
         try:
             rows, summaries = scan_rpf(a.target, a.start, a.limit, a.max_inflate)
         except (OSError, ValueError) as e:
-            print(f"{a.target}: {e}", file=sys.stderr)
+            # An OSError repeats the target we already print, and reprs it: name the reason once.
+            reason = e.strerror if isinstance(e, OSError) and e.filename and e.strerror else e
+            print(f"{a.target}: {reason}", file=sys.stderr)
             return 2
     for s in summaries:
         print(json.dumps(s, indent=1))

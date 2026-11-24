@@ -9,13 +9,32 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <new>
 #include <random>
 #include <unordered_map>
 #include <vector>
 
 using leonida::BufferVaIndex;
 using Index = BufferVaIndex<std::uintptr_t>;
+
+// Single-threaded test: arm only around insert(), after constructing the index and its existing ranges.
+static int allocations_before_failure = -1;
+void* operator new(std::size_t size) {
+    if (allocations_before_failure == 0) {
+        allocations_before_failure = -1;
+        throw std::bad_alloc();
+    }
+    if (allocations_before_failure > 0) --allocations_before_failure;
+    if (void* p = std::malloc(size ? size : 1)) return p;
+    throw std::bad_alloc();
+}
+void* operator new[](std::size_t size) { return operator new(size); }
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
 
 namespace {
 
@@ -105,6 +124,58 @@ void fixed_cases() {
     check(bound.longest() == 0x40 && at(bound, 0x20040) == 0, "re-registering replaces the size");
     bound.erase(0x20000, 2);
     check(bound.longest() == 0 && bound.size() == 0, "an empty index has no bound");
+}
+
+void allocation_failures() {
+    for (bool replace : {false, true}) {
+        for (std::uint64_t size : {0x40u, 0x100u, 0x400u}) {
+            // New entries allocate a range and a size node; replacement only needs a size node.
+            for (int fail_after = 0; fail_after < (replace ? 1 : 2); ++fail_after) {
+                Index index;
+                index.insert(0x1000, 0x100, 1);
+                index.insert(0x2000, 0x100, 2);  // equal sizes must retain separate multiset entries
+                const std::uint64_t va = replace ? 0x1000 : 0x3000;
+                const std::uintptr_t id = replace ? 1 : 3;
+                bool threw = false;
+                allocations_before_failure = fail_after;
+                try {
+                    index.insert(va, size, id);
+                } catch (const std::bad_alloc&) {
+                    threw = true;
+                }
+                allocations_before_failure = -1;
+                check(threw, "injected insert allocation failure reached");
+                Index::Hit first{}, second{};
+                const bool unchanged = index.size() == 2 && index.longest() == 0x100 &&
+                    index.find(0x1000, first) && first.id == 1 && first.size == 0x100 &&
+                    index.find(0x2000, second) && second.id == 2 && second.size == 0x100 &&
+                    at(index, 0x10ff) == 1 && at(index, 0x1100) == 0 && at(index, 0x3000) == 0;
+                check(unchanged, "failed insert preserves ranges and lookup bound");
+                if (!unchanged) continue;  // do not erase an inconsistent index in the negative control
+
+                if (replace && size == 0x100) {
+                    // A failed same-size replacement can look unchanged while silently dropping a size node.
+                    index.erase(0x2000, 2);
+                    const bool counted = index.size() == 1 && index.longest() == 0x100;
+                    check(counted, "failed same-size replacement retains both size entries");
+                    if (!counted) continue;
+                    index.insert(0x2000, 0x100, 2);
+                }
+
+                index.insert(va, size, id);
+                Index::Hit retried{};
+                check(index.size() == (replace ? 2u : 3u) && index.find(va, retried) &&
+                      retried.id == id && retried.size == size, "insert succeeds after allocation failure");
+                check(index.longest() == (size > 0x100 ? size : 0x100), "retry updates the lookup bound");
+                index.erase(va, id);
+                check(index.longest() == 0x100 && at(index, 0x20ff) == 2,
+                      "erasing retried range keeps the other size entry");
+                index.erase(0x1000, 1);
+                index.erase(0x2000, 2);
+                check(index.size() == 0 && index.longest() == 0, "all size entries disappear after erase");
+            }
+        }
+    }
 }
 
 // The rule BufferVaIndex follows, by a scan: among the ranges that hold all of [va, va + bytes), the greatest
@@ -252,6 +323,7 @@ void time_miss_after_free() {
 
 int main(int argc, char** argv) {
     fixed_cases();
+    allocation_failures();
     random_tables();
     if (failures) {
         std::printf("%d failure(s)\n", failures);

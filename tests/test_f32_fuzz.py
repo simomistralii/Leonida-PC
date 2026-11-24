@@ -117,16 +117,6 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("Traceback", r.stderr)
 
 
-class CliTests(unittest.TestCase):
-    TOOL = os.path.join(ROOT, "tools", "f32_fuzz.py")
-
-    def test_no_arguments_prints_usage(self):
-        r = subprocess.run([sys.executable, "-I", self.TOOL], capture_output=True, text=True, timeout=5)
-        self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertIn("usage:", r.stderr)
-        self.assertNotIn("Traceback", r.stderr)
-
-
 class HardwareOracle(unittest.TestCase):
     """--oracle hw: kernel text, verdicts, GFX11 skips and the exit-77 contract (no GPU needed), plus a run on the
     GPU when the oracle tools are present."""

@@ -280,6 +280,14 @@ class TestProfileShader(unittest.TestCase):
 
 
 class TestWarningWords(unittest.TestCase):
+    def test_header_words_with_or_without_llvm_diagnostics(self):
+        header = "; cs_test  code 0x10..0x20 (header), gfx1013, 2 invalid words\n"
+        self.assertEqual(P.warning_words(header + "\ts_endpgm\n"), ([], 2))
+        diagnostics = messages(diag(1, 1, echo("feffffff")))
+        self.assertEqual(P.warning_words(header + diagnostics), (["fe ff ff ff"], 1))
+        self.assertEqual(P.warning_words(header.replace("2 invalid", "1 invalid") + diagnostics),
+                         (["fe ff ff ff"], 0))
+
     def test_positions_in_echo(self):
         self.assertEqual(P.warning_words(messages(diag(1, 1, echo("feffffff")))), (["fe ff ff ff"], 0))
         # Standalone LLVM: line 2 of the input, indented two spaces, so column 3.
@@ -388,9 +396,28 @@ class TestCommandLineEndToEnd(unittest.TestCase):
         self.assertEqual(data["categories"]["memory"], 0)
         self.assertIsNone(data["ratios"]["alu_to_memory"])
 
+    def test_cli_counts_category_occurrences_by_stage(self):
+        self.write("ps_first", "\tv_mov_b32 v0, 1\n" * 2)
+        self.write("ps_second", "\tv_mov_b32 v1, 2\n\ts_endpgm\n")
+        self.write("vs_first", "\ts_load_dword s0, s[2:3], 0\n")
+        self.write("unclassified", "")
+        self.write("zz_foo", "\tv_mov_b32 v2, 1\n")
+        self.write("LIB_helper", "\ts_endpgm\n")
+        _, data = self.run_profile()
+        stages = data["categories_by_stage"]
+        self.assertEqual(list(stages), ["?", "lib", "ps", "vs"])
+        self.assertEqual(stages["ps"], {"alu": 3, "memory": 0, "branch": 0,
+                                        "export": 0, "other": 1, "total": 4})
+        self.assertEqual(stages["vs"]["memory"], 1)
+        self.assertEqual(stages["?"]["alu"], 1)
+        self.assertEqual(stages["lib"]["total"], 1)
+        for key, count in data["categories"].items():
+            self.assertEqual(sum(stage[key] for stage in stages.values()), count)
+
     def test_cli_empty_corpus(self):
         stdout, data = self.run_profile()
         self.assertEqual(data["shaders"], 0)
+        self.assertEqual(data["categories_by_stage"], {})
         self.assertEqual(data["ratios"]["alu_to_memory"], 0.0)
         self.assertEqual(data["undecoded"], {"warnings": 0, "unresolved": 0, "by_word": []})
         self.assertIn("  undecoded: 0 LLVM warnings, 0 distinct words, 0 unresolved", stdout)

@@ -6,8 +6,10 @@
 // with whether the call wrote its outputs (they start as a sentinel), and the two records must be the same. A
 // resource one device refuses to create is reported and its steps aren't compared. No shaders or game data. Skips
 // (77) without a Vulkan GPU or the standalone device; without a host D3D12 device only the layer's own record is
-// printed. Set LEONIDA_D3D49_VERBOSE=1 to print every value.
+// printed. The host runs on the layer's adapter (host_adapter.h; LEONIDA_HOST_ADAPTER picks another, "warp" WARP).
+// Set LEONIDA_D3D49_VERBOSE=1 to print every value.
 #include "../shims/d3d12_com.h"
+#include "host_adapter.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -241,17 +243,57 @@ int main() {
     const auto create_host = d3d12 ? reinterpret_cast<PFN_D3D12_CREATE_DEVICE>(
                                          reinterpret_cast<void*>(GetProcAddress(d3d12, "D3D12CreateDevice")))
                                    : nullptr;
+    // The host on the layer's adapter: on a PC with two GPUs D3D12's default adapter can be the other one.
+    Ref<IDXGIFactory4> factory;
+    Ref<IDXGIAdapter> adapter;
+    std::string host_name = "the default adapter";
+    const LUID luid = device->GetAdapterLuid();
+    // No factory, or no adapter for the pass (LEONIDA_HOST_ADAPTER=warp without WARP): don't compare, rather than
+    // fall back to the default adapter and compare with a GPU the layer doesn't run on.
+    const bool have_adapter =
+        SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory.p))) &&
+        hostadapter::reference(factory.p, &luid, hostadapter::wanted() == "warp", &adapter.p, host_name);
     Ref<ID3D12Device> host;
-    if (!create_host || FAILED(create_host(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&host.p)))) {
+    if (!have_adapter) {
+        std::printf("heap properties: no host adapter to compare with; %zu values recorded, not compared\n",
+                    ours.values.size());
+    } else if (!create_host || FAILED(create_host(adapter.p, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&host.p)))) {
         std::printf("heap properties: no host D3D12 device to compare with; %zu values recorded, not compared\n",
                     ours.values.size());
     } else {
         Record theirs;
         run(host.p, theirs);
+        // D3D12 refuses MEMORY_POOL_L1 on a UMA adapter. The layer answers UMA on an integrated GPU and refuses L1
+        // there too, so with the host on the layer's own adapter every case is compared; a host of the other
+        // architecture (LEONIDA_HOST_ADAPTER, or WARP) refusing or accepting the L1 cases is not a layer bug.
+        D3D12_FEATURE_DATA_ARCHITECTURE host_arch{}, our_arch{};
+        const bool uma_differs =
+            SUCCEEDED(host->CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE, &host_arch, sizeof(host_arch))) &&
+            SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE, &our_arch, sizeof(our_arch))) &&
+            host_arch.UMA != our_arch.UMA;
+        std::vector<std::string> l1_cases;
+        for (const Case& c : cases())
+            if (c.props.Type == D3D12_HEAP_TYPE_CUSTOM && c.props.MemoryPoolPreference == D3D12_MEMORY_POOL_L1)
+                l1_cases.emplace_back(c.name);
+        const auto in_l1_case = [&](const std::string& name) {
+            for (const std::string& c : l1_cases)
+                if (name.compare(0, c.size(), c) == 0 && name.size() > c.size() && (name[c.size()] == ':' ||
+                    name[c.size()] == ',' || name[c.size()] == ' ')) return true;
+            return false;
+        };
+        std::printf("heap properties: host %s (UMA %d, the layer's UMA %d)\n", host_name.c_str(), host_arch.UMA,
+                    our_arch.UMA);
         // A resource one side couldn't create has fewer entries: compare case by case on the names both have.
         int mismatches = 0, compared = 0, skipped = 0;
         std::size_t j = 0;
         for (std::size_t i = 0; i < ours.names.size(); ++i) {
+            if (uma_differs && in_l1_case(ours.names[i])) {
+                if (verbose || ours.names[i].ends_with(": created"))
+                    std::printf("heap properties %s: not comparable on this host (MEMORY_POOL_L1 on a %s host)\n",
+                                ours.names[i].c_str(), host_arch.UMA ? "UMA" : "NUMA");
+                ++skipped;
+                continue;
+            }
             while (j < theirs.names.size() && theirs.names[j] != ours.names[i]) ++j;
             if (j == theirs.names.size()) {
                 std::printf("heap properties %s: ours 0x%llx, the host has no such value (not compared)\n",

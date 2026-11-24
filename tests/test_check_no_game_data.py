@@ -7,7 +7,10 @@ name, files that must pass (text, PNG, a lone "MZ", magics past the start), and 
 repository. The script runs as itself, through its own command line.
 """
 import bz2
+import contextlib
+import errno
 import gzip
+import importlib.util
 import io
 import lzma
 import os
@@ -19,10 +22,19 @@ import tempfile
 import tarfile
 import unittest
 import zipfile
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, "scripts", "check_no_game_data.py")
 
+
+def shown(path):
+    """The name the script prints for `path`: relative to the working directory, or `path` itself when it is on
+    another drive (on Windows the temporary folder can be on C: and the checkout on D:)."""
+    try:
+        return os.path.relpath(path)
+    except ValueError:
+        return path
 
 def pe_header(e_lfanew=0x80):
     head = bytearray(e_lfanew + 4)
@@ -65,6 +77,13 @@ CAUGHT = [
     ("texcontainer.dat", b"RDS5" + bytes(12), "RDS5 texture container"),
     ("bank2.json", b"AWC\x00" + bytes(12), "AWC audio bank"),
     ("script.lol", b"YSC\x00" + bytes(12), "YSC compiled script"),
+    ("anim.bin", b"MoVE" + (19).to_bytes(4, "little") + bytes(8), "MoVE animation container"),
+    ("bones.dat", b"SKEL_" + b"SKEL_Head\x00" + bytes(8), "SKEL_ bone table"),
+    ("script2.lol", b"SCRP" + bytes(12), "SCRP compiled script"),
+    ("story_save.txt", b"JSAV" + (3).to_bytes(4, "little") + bytes(8), "JSAV story save"),
+    ("profile.json", b"ASAV" + (1).to_bytes(4, "little") + bytes(8), "ASAV save record"),
+    ("chives.txt", b"SLAYER1\0" + bytes(8), "SLAYER1 packed save"),
+    ("chunk.json", b"LPK1" + (2).to_bytes(4, "little") + b"[]", "LPK1 world staging pack"),
 ]
 
 PASSED = [
@@ -72,7 +91,10 @@ PASSED = [
     ("logo.png", b"\x89PNG\r\n\x1a\n" + bytes(16)),
     ("mz.txt", b"MZ is not enough on its own\n"),
     ("metadata.txt", b"METADATA ADAT later in the line\n"),
+    ("bones.md", b"# SKEL_HEAD, MoVE and SCRP name formats; none of them starts this file\n"),
     ("riff.bin", b"RIFF" + bytes(4) + b"AVI LIST"),
+    ("saves.md", b"# Saves\n\nA story save starts with JSAV, a profile with ASAV, its packed copy with SLAYER1.\n"),
+    ("slayer.txt", b"SLAYER1 without the zero byte after it is just a word\n"),
     ("empty.txt", b""),
     ("mz_past_end.txt", pe_header(0x80)[:0x40]),  # e_lfanew points past the end of the file
     ("mz_cut_signature.txt", pe_header(0x300)[:-2]),  # only "PE" of the signature is there
@@ -240,6 +262,49 @@ class CheckNoGameData(unittest.TestCase):
         os.mkdir(os.path.join(self.dir, "sub"))
         result = run([os.path.join(self.dir, "sub"), os.path.join(self.dir, "missing.bin")])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def run_with_unreadable(self, locked, paths):
+        """main() in this process with open() refusing `locked`; (exit status, stdout, stderr)."""
+        spec = importlib.util.spec_from_file_location("check_no_game_data_under_test", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        real_open = open
+
+        def refusing_open(file, *args, **kwargs):
+            if os.fspath(file) == locked:
+                raise PermissionError(errno.EACCES, "Permission denied", locked)
+            return real_open(file, *args, **kwargs)
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("builtins.open", refusing_open), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = module.main(paths)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_unreadable_file_is_one_stderr_line_and_exit_2(self):
+        locked = self.write("locked.bin", b"plain text\n")
+        sibling = self.write("sibling.bin", b"DDS " + bytes(12))
+        clean = self.write("README.md", b"# fine\n")
+        rc, out, err = self.run_with_unreadable(locked, [locked, clean])
+        self.assertEqual(rc, 2, out + err)
+        self.assertEqual(out, "")
+        self.assertEqual(len(err.splitlines()), 1, err)
+        self.assertTrue(err.startswith("check_no_game_data: cannot read "), err)
+        self.assertIn("locked.bin: Permission denied", err)
+        self.assertNotIn("Traceback", err)
+
+        # the other files are still scanned; a real match wins over the unreadable one
+        rc, out, err = self.run_with_unreadable(locked, [locked, sibling, clean])
+        self.assertEqual(rc, 1, out + err)
+        self.assertEqual(out.splitlines(), [f"{shown(sibling)}: DDS texture"], out)
+        self.assertIn("cannot read", err)
+        self.assertIn("1 file(s) start like game data", err)
+        self.assertNotIn("Traceback", err)
+
+        pe = self.write("pe.bin", pe_header())
+        rc, out, err = self.run_with_unreadable(locked, [locked, pe])
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("PE executable", out)
 
     @unittest.skipUnless(shutil.which("git"), "git not installed")
     def test_default_mode_reads_tracked_files_only(self):

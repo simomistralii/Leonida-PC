@@ -14,6 +14,7 @@
 #include "xbox_present_readback_size.h"
 #include "../shims/d3d12_com.h"
 #include "../shims/d3d12_xs_device.h"
+#include "../shims/d3d12_trace.h"
 #include "../shims/xbox_present.h"
 
 #include <algorithm>
@@ -24,6 +25,11 @@
 #include <cstdint>
 #include <cstdlib>
 #include <array>
+#include <filesystem>
+#include <fstream>
+#include <io.h>
+#include <iterator>
+#include <string>
 #include <vector>
 
 #define EXPECT(condition) do { \
@@ -33,6 +39,41 @@
 namespace {
 
 using XboxHeapHandleFn = std::uint64_t(WINAPI*)(void* heap);  // heap slot 9: 8-byte handle in RAX
+
+// Sends stderr (where the D3D12 trace goes) to a file while it lives, with the trace on or off. `redirected` is false
+// when the file could not be opened (the capture then holds nothing, which must not read as "no trace line").
+struct TraceCapture {
+    std::filesystem::path path;
+    int saved = -1;
+    bool redirected = false;
+    TraceCapture(const std::filesystem::path& file, bool trace_on) : path(file) {
+        std::fflush(stderr);
+        std::FILE* out = nullptr;
+        if (_wfopen_s(&out, path.c_str(), L"wb") != 0) out = nullptr;  // wide: a TEMP outside the ANSI code page
+        saved = _dup(2);
+        if (out && saved >= 0) redirected = _dup2(_fileno(out), 2) == 0;
+        if (out) std::fclose(out);
+        rt::d3d12_trace::set_enabled(trace_on);
+    }
+    std::string finish() {
+        rt::d3d12_trace::set_enabled(false);
+        std::fflush(stderr);
+        if (saved >= 0) {
+            _dup2(saved, 2);
+            _close(saved);
+            saved = -1;
+        }
+        std::ifstream in(path, std::ios::binary);
+        return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    }
+    ~TraceCapture() { finish(); }
+};
+
+int count_of(const std::string& text, const char* needle) {
+    int count = 0;
+    for (std::size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) ++count;
+    return count;
+}
 
 template<class T>
 struct Ref {
@@ -440,8 +481,38 @@ int main() {
         EXPECT(region_is(frame, 0, 0, width, height, {51, 153, 230}));
         std::printf("1 plane, RGBA8 solid: ok (swapchain format %d)\n", int(frame.format));
 
-        // 0 planes: a black frame, and no token is needed.
-        EXPECT(xbox.PresentX(0, nullptr, nullptr) == S_OK);
+        // 0 planes: a black frame, and no token is needed. With the D3D12 trace on, each PresentX writes one line
+        // with its outcome, a refused call included; with it off, none.
+        {
+            std::error_code ignored;
+            const std::filesystem::path trace_file =
+                std::filesystem::temp_directory_path(ignored) / "leonida_xbox_present_trace.txt";
+            std::string trace, untraced;
+            HRESULT blank = E_FAIL, refused = S_OK, refused_untraced = S_OK;
+            bool captured = false, captured_untraced = false;
+            {
+                TraceCapture capture(trace_file, true);
+                captured = capture.redirected;
+                blank = xbox.PresentX(0, nullptr, nullptr);
+                refused = xbox.PresentX(3, &plane, nullptr);  // more than two planes: refused before anything is shown
+                trace = capture.finish();
+            }
+            {
+                TraceCapture capture(trace_file, false);
+                captured_untraced = capture.redirected;
+                refused_untraced = xbox.PresentX(3, &plane, nullptr);
+                untraced = capture.finish();
+            }
+            std::filesystem::remove(trace_file, ignored);
+            EXPECT(captured && captured_untraced);
+            EXPECT(blank == S_OK);
+            EXPECT(refused == E_INVALIDARG);
+            EXPECT(refused_untraced == E_INVALIDARG);
+            EXPECT(count_of(untraced, "[d3d12-trace]") == 0);
+            EXPECT(count_of(trace, " XboxPresentation::PresentX ok\n") == 1);
+            EXPECT(count_of(trace, " XboxPresentation::PresentX failed\n") == 1);
+            EXPECT(count_of(trace, "[d3d12-trace] #") == 2);
+        }
         EXPECT(grab(frame));
         EXPECT(region_is(frame, 0, 0, width, height, {0, 0, 0}, 0));
         // (The blank frame is a frame in flight like any other: with latency 1 the next wait needs it shown first.)
@@ -863,20 +934,29 @@ int main() {
                 EXPECT(frame_matches(frame, &href, 1, false, 203.0, 2));
                 std::printf("compose: HDR10 plane to an SDR swapchain (tone mapped to SDR, white = 203 nits, peak 1000): within 2 levels of the model\n");
             } else {
-                // A real HDR10 swapchain: the 10-bit codes come out as they went in (plane 0, point, 1:1 PQ).
+                // A real HDR10 swapchain: the 10-bit codes come out as they went in (plane 0, point, 1:1 PQ). Vulkan packing:
+                // A2B10G10R10 has R in bits 0-9 and B in 20-29, A2R10G10B10 the reverse; G is bits 10-19 in both.
                 EXPECT(frame.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 || frame.format == VK_FORMAT_A2R10G10B10_UNORM_PACK32);
+                const bool abgr = frame.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32;
                 bool ok = true;
                 for (UINT y = 0; y < height && ok; y += 7)
                     for (UINT x = 0; x < width && ok; x += 5) {
                         std::uint32_t word;
                         std::memcpy(&word, &frame.bytes[(std::size_t(y) * frame.extent.width + x) * 4], 4);
-                        const bool abgr = frame.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32;
-                        const int r = int(abgr ? (word & 1023) : ((word >> 20) & 1023));
-                        const auto want = hdr.tex.px[std::size_t(y / 4) * 80 + x / 4];
-                        ok = std::abs(r - int(std::lround(want[0] * 1023.0))) <= 1;
+                        const int lo = int(word & 1023), g = int((word >> 10) & 1023), hi = int((word >> 20) & 1023);
+                        const int got[3] = {abgr ? lo : hi, g, abgr ? hi : lo};
+                        const auto src = hdr.tex.px[std::size_t(y / 4) * 80 + x / 4];
+                        int want[3];
+                        for (int c = 0; c < 3; ++c) {
+                            want[c] = int(std::lround(src[c] * 1023.0));
+                            ok = ok && std::abs(got[c] - want[c]) <= 1;
+                        }
+                        if (!ok)
+                            std::fprintf(stderr, "HDR10 pixel %u,%u is %d,%d,%d, expected %d,%d,%d\n", x, y, got[0], got[1], got[2],
+                                         want[0], want[1], want[2]);
                     }
                 EXPECT(ok);
-                std::printf("compose: HDR10 plane to an HDR10 (ST.2084) swapchain: codes within 1 of the source: ok\n");
+                std::printf("compose: HDR10 plane to an HDR10 (ST.2084) swapchain: R, G and B codes within 1 of the source: ok\n");
             }
             // Same plane, conversions to the PQ encoding of an 8-bit swapchain (test hook): an SDR overlay over it.
             xbox.presenter().force_hdr_encoding(true);

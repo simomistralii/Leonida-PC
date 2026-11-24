@@ -573,6 +573,29 @@ class PedCataloguesTests(unittest.TestCase):
             self.assertEqual(dir_rep["by_framing"], {"0drp": 1})
             self.assertEqual(dir_rep["presets"], 5)
 
+    def test_carve_index_rows_with_bad_types_are_skipped(self):
+        blocks, _ = build_rich_catalogue_blocks()
+        raw = build_synthetic_0drp(blocks)
+        split = len(raw) // 2
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "000000000100.bin"), "wb") as fh:
+                fh.write(raw[:split])
+            with open(os.path.join(tmp, "000000000300.bin"), "wb") as fh:
+                fh.write(raw[split:])
+            rows = [
+                {"offset": 0, "file": 5},  # non-string file name
+                {"offset": True},  # bool offset
+                {"offset": -16, "file": "x.bin"},  # negative offset
+                "not a row",
+                {"offset": 0x100, "stored": 0x1F5, "file": "000000000100.bin"},
+                # the continuation row's file name is not a string: falls back to <offset>.bin
+                {"offset": 0x300, "stored": 0x200, "file": 5},
+            ]
+            with open(os.path.join(tmp, "index.json"), "w", encoding="utf-8") as fh:
+                json.dump({"files": rows}, fh)
+            cats = list(pc.iter_catalogues_in_dir(tmp))
+            self.assertEqual(len(cats), 1)
+
     def test_large_single_stream_and_adjacent_complete_0drp_in_rpf(self):
         # 1. A >1 MiB single zlib stream followed by trailing bytes (exercises multi-chunk decompress + eof/unused_data).
         blocks_big, _ = build_rich_catalogue_blocks()

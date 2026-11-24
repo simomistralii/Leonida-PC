@@ -31,6 +31,7 @@ cell of every placed tile: that is data derived from your own copy of the game, 
 Unlike most tools here this one imports numpy and Pillow (Pillow decodes BC6H); it is one of the texture-tool
 exceptions in AGENTS.md. The placement, ordering and fitting logic is plain Python, and its tests run on the
 standard library alone.
+Usage: `python -I tools/world_grid_atlas.py --help` lists the options.
 """
 import argparse
 import json
@@ -45,6 +46,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 import report_paths  # noqa: E402
+import world_atlas_accel  # noqa: E402
 from file_mode import published_mode  # noqa: E402
 
 DX10_HEADER = 148
@@ -224,7 +226,7 @@ def load_manifests(work: str) -> list:
         path = os.path.join(root, "manifest.json")
         if not os.path.isfile(path):
             continue
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             manifest = json.load(f)
         for item in manifest.get("Items", []):
             for t in item.get("Textures", []):
@@ -342,15 +344,19 @@ def match_mask(tiles: list, fallback, geom: dict) -> dict:
         m = (np.abs(img - bg).max(-1) > MASK_THRESHOLD).reshape(p, b, p, b).mean((1, 3)) > MASK_BLOCK_SHARE
         tm.append(m)
     tm = np.array(tm, dtype=np.int32)
-    inter = np.einsum("tij,cij->tc", tm, cm)
-    union = tm.sum((1, 2))[:, None] + cm.sum((1, 2))[None, :] - inter
-    iou = np.where(union > 0, inter / np.maximum(union, 1), 0.0)
-    top = np.sort(iou, 1)[:, ::-1]
-    clear = {i: int(iou[i].argmax()) for i in range(len(tiles)) if top[i, 0] - top[i, 1] > CLEAR_MARGIN}
     order = text_order(len(cells))
-    path = align(iou[:, order].tolist())
-    placed = {i: order[j] for i, j in enumerate(path) if iou[i, order[j]] > 0}
-    scores = sorted(float(iou[i, c]) for i, c in placed.items())
+    native = world_atlas_accel.match(np, tm, cm, order, CLEAR_MARGIN)
+    if native is None:
+        inter = np.einsum("tij,cij->tc", tm, cm)
+        union = tm.sum((1, 2))[:, None] + cm.sum((1, 2))[None, :] - inter
+        iou = np.where(union > 0, inter / np.maximum(union, 1), 0.0)
+        top = np.sort(iou, 1)[:, ::-1]
+        clear = {i: int(iou[i].argmax()) for i in range(len(tiles)) if top[i, 0] - top[i, 1] > CLEAR_MARGIN}
+        path = align(iou[:, order].tolist())
+        placed = {i: order[j] for i, j in enumerate(path) if iou[i, order[j]] > 0}
+        scores = sorted(float(iou[i, c]) for i, c in placed.items())
+    else:
+        clear, placed, scores = native
     featureless = tm.sum((1, 2)) == 0
     return {"background": [int(v) for v in bg], "clear": clear, "placed": placed,
             "featureless_tiles": int(featureless.sum()),

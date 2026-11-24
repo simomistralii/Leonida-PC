@@ -213,9 +213,16 @@ def _chains(rows, read):
     """(offset, bytes) per logical blob: a stream plus the streams that continue a full one.
 
     A stream is full when its size is a whole number of 64 KiB blocks: a resource's first stream is often 128 or
-    192 KiB (docs/page_directory.md), not only 64 KiB, and its descriptors then end in the stream that follows."""
+    192 KiB (docs/page_directory.md), not only 64 KiB, and its descriptors then end in the stream that follows.
+    An indexed video ends the chain without reading its payload.
+    """
     cur_off, parts, last = None, [], 0
     for row in rows:
+        if row.get("type") == "bink2":
+            if cur_off is not None:
+                yield cur_off, b"".join(parts)
+            cur_off, parts, last = None, [], 0
+            continue
         data = read(row)
         continues = (cur_off is not None and last > 0 and last % BLOCK == 0 and not _is_resource(data)
                      and data[:4] != b"PSIN" and data[:4] != b"RBF0")
@@ -235,15 +242,13 @@ def blobs(source: str):
     if os.path.isdir(source) and os.path.isfile(os.path.join(source, "index.json")):
         import gamedata_index
         src = gamedata_index.DirectorySource(source)
-        rows = [r for r in src.rows if r.get("type") != "bink2"]
-        for off, data in _chains(rows, src.read):
+        for off, data in _chains(src.rows, src.read):
             yield source, off, data
     elif os.path.isfile(source) and source.lower().endswith(".rpf"):
         import gamedata_index
         src = gamedata_index.ArchiveSource(source)
         try:
-            rows = [r for r in src.rows if r.get("type") != "bink2"]
-            for off, data in _chains(rows, src.read):
+            for off, data in _chains(src.rows, src.read):
                 yield source, off, data
         finally:
             src.close()

@@ -7,8 +7,9 @@ exporter agree on stream ids, codecs, sample rates and streamed-music descriptor
 scanned recursively for *.awc. CSV is the default on stdout; --out writes a file and a .json
 extension selects JSON unless --format says otherwise. A report cannot replace an input bank, including one
 found during a directory scan. Unreadable banks are reported on stderr, skipped,
-and excluded from bank_count. The bank column gives the path relative to the scanned directory or the basename
-for a single file.
+and excluded from bank_count, but a single named file that holds no bank is an error (exit 2) instead of an
+empty manifest, since then the path or the format is wrong. The bank column gives the path relative to the
+scanned directory or the basename for a single file.
 
 CSV columns: bank, stream, codec, codec_name, channels, sample_rate, declared_samples, duration_s,
 streamed_music, data_offset, data_size, bank_size, notes. JSON is an object with bank_count,
@@ -34,6 +35,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import awc_opus  # noqa: E402
 from file_mode import published_mode  # noqa: E402
+from replace_retry import replace as replace_retry  # noqa: E402
 from report_paths import same_report_path  # noqa: E402
 
 FIELDS = ("bank", "stream", "codec", "codec_name", "channels", "sample_rate", "declared_samples",
@@ -184,19 +186,12 @@ def collect(src: str, *, out: str | None = None):
 
 
 def write_manifest(rows: list, banks: int, streamed: int, fmt: str, out: str) -> None:
-    """Write to stdout, or to a temporary file renamed over `out` once it is complete, so a failed
-    write keeps the previous manifest instead of truncating it."""
+    """Write to stdout, or publish a complete file over `out` so a failed replace keeps the previous
+    manifest instead of truncating it."""
     doc = {"bank_count": banks, "stream_count": len(rows),
            "streamed_music_channel_count": streamed, "streams": rows}
-    tmp = None
-    if out:
-        folder = os.path.dirname(os.path.abspath(out))
-        os.makedirs(folder, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=folder, prefix=".awc_manifest-", suffix=".tmp")
-        f = os.fdopen(fd, "w", encoding="utf-8", newline="")
-    else:
-        f = sys.stdout
-    try:
+
+    def _emit(f):
         if fmt == "json":
             json.dump(doc, f, indent=2)
             f.write("\n")
@@ -208,25 +203,48 @@ def write_manifest(rows: list, banks: int, streamed: int, fmt: str, out: str) ->
                 row["duration_s"] = "" if r["duration_s"] is None else f"{r['duration_s']:.6f}"
                 row["streamed_music"] = "yes" if r["streamed_music"] else "no"
                 w.writerow(row)
-        if tmp:
-            f.close()
-            os.chmod(tmp, published_mode(out))   # mkstemp creates 0600
-            os.replace(tmp, out)
-            tmp = None
+
+    if not out:
+        _emit(sys.stdout)
+        return
+
+    destination = os.path.abspath(out)
+    folder = os.path.dirname(destination) or "."
+    os.makedirs(folder, exist_ok=True)
+    try:
+        mode = os.stat(destination).st_mode
+    except FileNotFoundError:
+        mode = None
+    except OSError:
+        # Non-regular destinations (pipes/devices) keep a direct write.
+        with open(destination, "w", encoding="utf-8", newline="") as f:
+            _emit(f)
+        return
+    if mode is not None:
+        # Retain the direct writer's permission check without truncating the report.
+        os.close(os.open(destination, os.O_WRONLY))
+
+    staged = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", newline="", delete=False,
+        dir=folder, prefix=".awc_manifest-", suffix=".tmp",
+    )
+    try:
+        with staged:
+            _emit(staged)
+        if os.name != "nt":
+            os.chmod(staged.name, published_mode(destination))
+        replace_retry(staged.name, destination)
     finally:
-        if f is not sys.stdout:
-            f.close()
-        if tmp:
-            # The staging file may have inherited a read-only destination's mode; make it deletable
-            # first, or Windows strands it beside the manifest when the replace fails.
-            try:
-                os.chmod(tmp, 0o600)
-            except OSError:
-                pass
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
+        # The staging file may have inherited a read-only destination's mode; make it deletable
+        # first, or Windows strands it beside the manifest when the replace fails.
+        try:
+            os.chmod(staged.name, 0o600)
+        except OSError:
+            pass
+        try:
+            os.unlink(staged.name)
+        except FileNotFoundError:
+            pass
 
 
 def main(argv=None) -> int:
@@ -249,6 +267,11 @@ def main(argv=None) -> int:
     except OSError as e:
         print(f"awc_manifest: error: cannot read {e.filename or a.src}: {e.strerror or e}", file=sys.stderr)
         return 1
+    if not banks and not os.path.isdir(a.src):
+        # A named file that parsed as no bank is a wrong path or format, not an empty result; a directory scan
+        # keeps reporting 0 banks because scanning a folder with no bank in it is a valid answer.
+        print(f"awc_manifest: error: {a.src}: holds no AWC bank", file=sys.stderr)
+        return 2
     try:
         write_manifest(rows, banks, streamed, fmt, a.out)
     except OSError as e:

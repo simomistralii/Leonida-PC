@@ -51,6 +51,27 @@ class Rpf9CarveWriteErrorTests(unittest.TestCase):
         self.assertIn(f"{16:012x}.bk2", p.stderr)
         self.assertNotIn("Traceback", p.stderr)
 
+    def test_index_json_aliasing_input_archive_is_refused(self):
+        out_dir = os.path.join(self.tmp.name, "out_alias")
+        os.makedirs(out_dir)
+        arch = os.path.join(out_dir, "index.json")
+        original = b"9FPR" + struct.pack("<I", 8) + b"\x00" * 16
+        with open(arch, "wb") as f:
+            f.write(original)
+
+        aliases = [arch]
+        if os.name == "nt":
+            aliases.append(os.path.join(out_dir, "INDEX.JSON"))
+        for alias in aliases:
+            with self.subTest(archive=os.path.basename(alias)):
+                p = subprocess.run([sys.executable, "-I", TOOL, alias, out_dir, "--index-only"],
+                                   capture_output=True, text=True)
+                self.assertNotEqual(p.returncode, 0)
+                self.assertIn("must not overwrite input archive", p.stderr)
+                self.assertNotIn("Traceback", p.stderr)
+                with open(arch, "rb") as f:
+                    self.assertEqual(f.read(), original)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -269,6 +269,44 @@ class ArchiveTest(unittest.TestCase):
                 self.assertNotIn("Traceback", cp.stderr)
                 self.assertEqual(cp.stdout, "")
 
+    def test_cli_refuses_an_unwritable_out_before_the_archives_are_read(self):
+        # Both archives are read before the summary is written, so a --out that cannot be written used to cost
+        # the whole run and then end in a traceback.
+        out = os.path.join(self.tmp.name, "read-only.json")
+        with open(out, "w", encoding="utf-8", newline="\n") as f:
+            f.write("{}\n")
+        os.chmod(out, 0o444)
+        try:
+            junk = os.path.join(self.tmp.name, "junk.rpf")
+            with open(junk, "wb") as f:
+                f.write(b"not an archive")
+            if getattr(os, "geteuid", lambda: 1)() == 0:
+                # Root may write a 0o444 file, so os.access says yes and the kernel would not refuse it either. Run
+                # the same command in-process with os.access answering for that file as it does for any other user.
+                import contextlib
+                import io
+                from unittest import mock
+                import navmesh_nodes
+                real_access = os.access
+                err = io.StringIO()
+                with (mock.patch.object(navmesh_nodes.os, "access",
+                                        lambda p, mode: False if os.path.abspath(p) == os.path.abspath(out)
+                                        and mode == os.W_OK else real_access(p, mode)),
+                      contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm):
+                    navmesh_nodes.main([junk, self.levels, "--out", out])
+                cp = subprocess.CompletedProcess([], cm.exception.code, "", err.getvalue())
+            else:
+                cp = subprocess.run([sys.executable, "-I", TOOL, junk, self.levels, "--out", out],
+                                    capture_output=True, text=True)
+            self.assertEqual(cp.returncode, 2, cp.stderr)
+            self.assertIn("read-only", cp.stderr)
+            self.assertNotIn("Traceback", cp.stderr)
+            self.assertNotIn("not an RPF9 archive", cp.stderr)   # refused before either archive is read
+            with open(out, "rb") as f:
+                self.assertEqual(f.read(), b"{}\n")
+        finally:
+            os.chmod(out, 0o666)
+
     def test_cli_reports_a_file_that_is_not_an_archive(self):
         junk = os.path.join(self.tmp.name, "junk.rpf")
         with open(junk, "wb") as f:

@@ -36,6 +36,7 @@ prints the program. Exit code: 0 when every program that ran matches, 1 on a mis
 A wave32 program is skipped where vk_compute_test can't pin 32-lane subgroups ("compute subgroup size: 32 not
 available", e.g. Mesa llvmpipe, whose subgroups are 8 wide): its words would come from another wave size. Wave64
 programs translated with --emulate use no subgroup operations, so they are compared at any subgroup size.
+Usage: `python -I tools/lds_fuzz.py --help` lists the options.
 """
 import argparse
 import copy
@@ -106,6 +107,7 @@ PERTURBATIONS = {
     "wrxchg2_swapped": ("wrxchg2", "ds_wrxchg2 stores data1 in its first element"),
     "bpermute_inactive_reads": ("bpermute", "ds_bpermute reads an inactive source lane's register, not 0"),
     "bpermute_wave64_cross": ("bpermute", "a wave64 ds_bpermute reaches all 64 lanes"),
+    "permute_wave64_cross": ("permute", "a wave64 ds_permute reaches all 64 lanes"),
     "swizzle_quad_reversed": ("swizzle", "the quad-permute selectors are taken in reverse lane order"),
     "swizzle_or_xor_swapped": ("swizzle", "the bit-mask or and xor fields are swapped"),
     "permute_no_zero": ("permute", "ds_permute_b32 leaves an unwritten lane's register alone instead of writing 0"),
@@ -732,7 +734,10 @@ class Program:
             for t in lanes:
                 if act[t]:
                     word = ((t * op["mul"] + op["add"]) * 4 + op["offset"]) >> 2
-                    sent[(t & ~31) | (word & 31)] = src[t]
+                    if self.wave == 64 and "permute_wave64_cross" in PERTURB:
+                        sent[(t & ~63) | (word & 63)] = src[t]
+                    else:
+                        sent[(t & ~31) | (word & 31)] = src[t]
             for t in range(T):
                 if act[t] and not ("permute_no_zero" in PERTURB and t not in sent):
                     regs[t][op["dst"]] = sent.get(t, 0)
@@ -927,15 +932,19 @@ def hw_skip_reason(p, arch):
     emits is spelled the same on GFX10, GFX11 and GFX12 (assembled for gfx1030, gfx1100, gfx1150 and gfx1201), so
     the other skips are the assembler's own rejections, which the runner reports.
 
-    One behaviour differs on GFX12: a wave64 ds_bpermute_b32 reaches all 64 lanes there, while RDNA2 (the console's
-    generation, and what this model describes) keeps each 32-lane half separate. Measured with every lane asking for
-    lane (l + 32) mod 64: an RX 9070 XT (gfx1201) returns lane l ^ 32, a gfx1036 iGPU returns lane l, and on gfx1201
-    300 of 300 wave64 programs match --perturb bpermute_wave64_cross. So those programs can't check the RDNA2 model on
-    GFX12 and are skipped there; wave32 and every other wave64 program still run."""
+    One behaviour differs on GFX12: a wave64 ds_bpermute_b32 or ds_permute_b32 reaches all 64 lanes there, while
+    RDNA2 (the console's generation, and what this model describes) keeps each 32-lane half separate. Measured with
+    every lane asking for lane (l + 32) mod 64, and with every lane sending to that lane: an RX 9070 XT (gfx1201)
+    returns and delivers lane l ^ 32 in both directions, a gfx1036 iGPU returns and delivers lane l, and on gfx1201
+    300 of 300 wave64 programs match --perturb bpermute_wave64_cross. So those programs can't check the RDNA2 model
+    on GFX12 and are skipped there; wave32 and every other wave64 program still run."""
     from hw_oracle import asm
-    if asm.family(arch) == "gfx12" and p.wave == 64 and "bpermute_wave64_cross" not in PERTURB \
-            and any(op["kind"] == "bpermute" for op in p.ops):
-        return "a wave64 ds_bpermute_b32 reaches all 64 lanes on GFX12 (measured on gfx1201), not each 32-lane half"
+    if asm.family(arch) == "gfx12" and p.wave == 64:
+        cross = {"bpermute": "bpermute_wave64_cross", "permute": "permute_wave64_cross"}
+        kinds = {op["kind"] for op in p.ops} & set(cross)
+        if any(k for k in kinds if cross[k] not in PERTURB):
+            return ("a wave64 ds_bpermute_b32 / ds_permute_b32 reaches all 64 lanes on GFX12 (measured on gfx1201), "
+                    "not each 32-lane half")
     return None
 
 
@@ -1195,12 +1204,6 @@ def main():
             oracle = runner.open_oracle(arch=a.hw_arch)
         except runner.Unavailable as e:
             print(f"hardware oracle unavailable: {e}")
-            return 77
-        from hw_oracle import asm
-        why = asm.rdna23_skip_reason(oracle.arch)
-        if why:
-            oracle.close()
-            print(f"hardware oracle unavailable: {why}")
             return 77
         print(f"hardware oracle: {oracle.device}")
     tally, rcs, results = {}, [], []

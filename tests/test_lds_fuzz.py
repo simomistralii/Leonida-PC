@@ -233,6 +233,19 @@ class Model(unittest.TestCase):
             src_lane = (t & ~31) | ((t - 2) & 31)
             self.assertEqual(regs[t][22], init_regs[src_lane][20])
 
+    def test_permute_wave64_cross_models_the_measured_gfx12_behaviour(self):
+        # the same program under the perturbation that mirrors what GFX12 measures: +2 lanes mod 64, across halves
+        p = f.Program(2, 1, 64)
+        p.ops = [{"kind": "permute", "mul": 1, "add": 0, "offset": 8, "src": 20, "dst": 22, "exec": None}]
+        base = f.Program(2, 1, 64)
+        base.ops = []
+        init_regs, _ = base.model()
+        with f.perturbed("permute_wave64_cross"):
+            regs, _ = p.model()
+        for t in range(64):
+            src_lane = (t & ~63) | ((t - 2) & 63)
+            self.assertEqual(regs[t][22], init_regs[src_lane][20])
+
     def test_d16_hi_read_keeps_the_low_half(self):
         p = f.Program(1, 0, 64)
         p.ops = [{"kind": "read", "name": "ds_read_u16_d16_hi", "addr": (0, 0, 0), "dst": 20, "exec": None}]

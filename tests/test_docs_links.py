@@ -68,7 +68,7 @@ def markdown_files(root):
             return [os.path.join(root, os.fsdecode(name)) for name in result.stdout.split(b"\0") if name]
     found = []
     for base, dirs, names in os.walk(root):
-        dirs[:] = [d for d in dirs if d not in (".git", "third_party", "node_modules", "__pycache__")]
+        dirs[:] = [d for d in dirs if d not in (".git", "third_party", "node_modules", "__pycache__", ".pytest_cache")]
         found.extend(os.path.join(base, name) for name in names if name.endswith(".md"))
     return found
 

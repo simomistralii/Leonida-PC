@@ -1,7 +1,7 @@
 """Progress dashboard: what works, what changed and what blocks next, from outcomes the project already produces.
 
     python -I tools/progress_dashboard.py --out <folder outside the repository> [--work <work>] [--run-tests]
-                                          [--junit FILE ...] [--github] [--login NAME]
+                                          [--ctest-junit FILE] [--junit FILE ...] [--github] [--login NAME]
 
 Writes, into --out only (a folder inside the repository is refused, so nothing here can be committed by accident):
     progress.html                 one self-contained page (no network, no packages; open it from disk)
@@ -12,7 +12,8 @@ Writes, into --out only (a folder inside the repository is refused, so nothing h
 Sources, each optional and reported as missing rather than counted as zero when absent:
     unit tests      --run-tests runs tests/test_*.py the way CI selects them (standard-library files with a
                     __main__ block), one process each; the outcome and the commit it ran on are kept
-    ctest           runtime/build/Testing/Temporary/LastTest.log, and any --junit file (CTest or pytest flavour)
+    ctest           --ctest-junit selects the local CTest report (default: runtime/build/Testing/Temporary/LastTest.log).
+                    --junit adds independent CTest or pytest runs.
     gpu tests       --gpu-log: saved output of runtime/test/shaders/check.py, one panel group per GPU
     contract        the translator contract table in docs/design.md, by how each row says it was confirmed
     imports         the measured import tables in docs/runtime_imports.md
@@ -23,6 +24,7 @@ Sources, each optional and reported as missing rather than counted as zero when 
 
 No game data leaves the inputs: the page and the JSON carry counts, pass/fail, error classes and the project's
 own document text; never a shader name, a carved file name or a path into the game copy.
+Usage: `python -I tools/progress_dashboard.py --help` lists the options.
 """
 import argparse
 import base64
@@ -41,6 +43,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from file_mode import published_mode  # noqa: E402
+from report_paths import same_report_path  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEMPLATE = os.path.join(ROOT, "tools", "progress_dashboard.html")
@@ -277,7 +280,7 @@ def run_one_test(rel, timeout):
         return {"test": rel, "result": "fail", "seconds": timeout, "detail": f"timed out after {timeout} s"}
 
 
-CODE_DIRS = ("tools", "scripts")
+CODE_DIRS = ("tools", "scripts", "runtime/test/shaders")
 
 
 def file_digest(rel):
@@ -289,8 +292,7 @@ def file_digest(rel):
 
 
 def code_digest():
-    """One digest over the Python code the unit tests exercise: tools/, scripts/ and make_game.py (content, not
-    timestamps, so it does not depend on git or on whether the change is committed)."""
+    """Hash make_game.py and the Python files in CODE_DIRS by content, including uncommitted edits."""
     h = hashlib.sha256()
     rels = ["make_game.py"]
     for d in CODE_DIRS:
@@ -354,7 +356,8 @@ def collect_unit(col, out_dir, args):
     n = len(data["results"])
     col.metric("tests.passed", "tests", "Unit-test files passing (last run)", passed, n, "files whose last run exited 0 / files run")
     col.metric("tests.current", "tests", "Unit-test files passing on the current code", current, n,
-               "files that passed with no change since to themselves or to tools/, scripts/, make_game.py / files run")
+               "files that passed with no change since to themselves, make_game.py or Python files under "
+               + ", ".join(d + "/" for d in CODE_DIRS) + " / files run")
 
 
 def group_of_test(name):
@@ -448,25 +451,36 @@ def collect_ctest(col, args):
     seen = 0
     log = os.path.join(ROOT, "runtime", "build", "Testing", "Temporary", "LastTest.log")
     sets = []
-    if os.path.isfile(log):
+    reports = []
+    local_report = getattr(args, "ctest_junit", None)
+    if local_report:
+        reports.append(("ctest_junit", "ctest", local_report))
+    elif os.path.isfile(log):
         sets.append(("ctest", log, [(n, r, s, "") for n, r, s in parse_lasttest(read_utf8(log))], True))
         col.source("ctest_lasttest", log, "ok", len(sets[-1][2]))
     else:
         col.source("ctest_lasttest", log, "missing", note="no runtime/build CTest run on this machine")
     for path in args.junit or []:
+        if local_report and same_report_path(path, local_report):
+            continue
+        reports.append(("junit", "junit:" + os.path.basename(path), path))
+    for source_id, label, path in reports:
         if not os.path.isfile(path):
-            col.source("junit", path, "missing")
+            col.source(source_id, path, "missing")
             continue
         try:
             root = ET.parse(path).getroot()
-        except (ET.ParseError, LookupError, ValueError) as e:
-            col.source("junit", path, "invalid", note=str(e))
+        except (ET.ParseError, LookupError, ValueError, OSError) as e:
+            col.source(source_id, path, "invalid", note=str(e))
             continue
         # CTest writes a single testsuite with a disabled count and hostname. pytest wraps its suite in testsuites.
         is_ctest = root.tag == "testsuite" and {"disabled", "hostname"} <= root.attrib.keys()
+        if source_id == "ctest_junit" and not is_ctest:
+            col.source(source_id, path, "invalid", note="expected a CTest --output-junit report")
+            continue
         rows = parse_junit(root)
-        sets.append(("junit:" + os.path.basename(path), path, rows, is_ctest))
-        col.source("junit", path, "ok", len(rows))
+        sets.append((label, path, rows, is_ctest))
+        col.source(source_id, path, "ok", len(rows))
     for label, path, rows, is_ctest in sets:
         ran = os.path.getmtime(path)
         for name, res, secs, detail in rows:
@@ -998,13 +1012,20 @@ def main(argv=None):
     ap.add_argument("--tests", metavar="REGEX", help="with --run-tests, only the test files matching REGEX")
     ap.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) // 2), help="test processes at a time")
     ap.add_argument("--test-timeout", type=int, default=300, help="seconds per test file")
-    ap.add_argument("--junit", nargs="*", metavar="FILE", help="CTest --output-junit or pytest --junitxml files")
+    ap.add_argument("--ctest-junit", metavar="FILE", help="use the local CTest --output-junit report in place of LastTest.log")
+    ap.add_argument("--junit", nargs="*", metavar="FILE", help="additional independent CTest or pytest JUnit reports")
     ap.add_argument("--gpu-log", nargs="*", metavar="FILE[=LABEL]",
                     help="saved output of runtime/test/shaders/check.py; LABEL names the GPU, driver and OS")
     ap.add_argument("--github", action="store_true", help="read pull requests into main, CI runs, #313 and the coordination issue through gh")
     ap.add_argument("--repo", default=DEFAULT_REPO, help=f"GitHub repository (default {DEFAULT_REPO})")
     ap.add_argument("--login", help="with --github, show this account's claims and pull requests")
     args = ap.parse_args(argv)
+    if args.login is not None and not args.github:
+        ap.error("--login requires --github")
+    if args.jobs < 1:
+        ap.error("--jobs must be a positive integer")
+    if args.test_timeout < 1:
+        ap.error("--test-timeout must be a positive integer")
     if args.run_tests and args.tests:
         try:
             args.tests = re.compile(args.tests)
@@ -1021,7 +1042,14 @@ def main(argv=None):
         args.test_files = [f for f in ci_test_files() if not args.tests or re.search(args.tests, f)]
         if args.tests and not args.test_files:
             ap.error("--tests did not match any test files")
-    os.makedirs(out_dir, exist_ok=True)
+    if os.path.exists(out_dir) and not os.path.isdir(out_dir):
+        print(f"--out {args.out} is not a directory", file=sys.stderr)
+        return 2
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError as exc:
+        print(f"--out {args.out}: {exc.strerror or exc}", file=sys.stderr)
+        return 2
     try:
         snap = build(args, out_dir)
     except OSError as exc:

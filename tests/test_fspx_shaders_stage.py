@@ -351,11 +351,9 @@ class ShadersStageWithTheDll(unittest.TestCase):
                 elif tool == "rdna2spirv.py":
                     out = args[args.index("--out") + 1]
                     touch(out, "index.json")
-                    # The FSPX translation must publish a real program, not `{}`: an empty index is an empty step and
-                    # makes the second stage() call retranslate. An entry with no fspx_code_sha256 is skipped by
-                    # fspx_key_clash, so this is enough to model one translated module.
+                    # Publish a runtime-addressable module for the cache reuse check.
                     with open(os.path.join(out, "index.json"), "w", encoding="utf-8", newline="\n") as f:
-                        f.write('{"upscaler_00": {}}')
+                        json.dump({"upscaler_00": {"stage": "cs", "fspx_code_sha256": "e" * 64}}, f)
                     with open(os.path.join(out, "upscaler_00.spv"), "wb") as f:
                         f.write(b"synthetic module")
 
@@ -414,14 +412,24 @@ class FspxCacheComplete(unittest.TestCase):
                 self.assertFalse(make_game.fspx_cache_complete(self.spirv))
 
     def test_one_entry_with_its_module_is_complete(self):
-        self.write_index('{"upscaler_00": {}}')
+        self.write_index(json.dumps({"upscaler_00": {"stage": "cs", "fspx_code_sha256": "e" * 64}}))
         with open(os.path.join(self.spirv, "upscaler_00.spv"), "wb") as f:
             f.write(b"synthetic module")
         self.assertTrue(make_game.fspx_cache_complete(self.spirv))
 
     def test_one_entry_without_its_module_is_not_complete(self):
-        self.write_index('{"upscaler_00": {}}')
+        self.write_index(json.dumps({"upscaler_00": {"stage": "cs", "fspx_code_sha256": "e" * 64}}))
         self.assertFalse(make_game.fspx_cache_complete(self.spirv))
+
+    def test_existing_module_without_runtime_lookup_metadata_is_not_complete(self):
+        with open(os.path.join(self.spirv, "upscaler_00.spv"), "wb") as f:
+            f.write(b"synthetic module")
+        for metadata in ({"error": "synthetic metadata failure"},
+                         {"stage": "cs", "fspx_code_sha256": "abbreviated"},
+                         {"stage": "ps", "fspx_code_sha256": "e" * 64}):
+            with self.subTest(metadata=metadata):
+                self.write_index(json.dumps({"upscaler_00": metadata}))
+                self.assertFalse(make_game.fspx_cache_complete(self.spirv))
 
 
 if __name__ == "__main__":

@@ -33,12 +33,13 @@ int main() {
     CHECK(list.uav_barrier({0}));
     CHECK(list.aliasing_barrier({0, 24}));
 
-    // Depth-stencil clears: at least one flag, no unknown flags, depth in [0, 1].
+    // Depth-stencil clears: no unknown flags. A clear that names no plane records nothing, and a depth outside [0, 1]
+    // is kept as given (WARP does that on a D32 target: d3d12_clear_test).
     const TargetView depth{48, 0, 0, 1};
-    CHECK(!list.clear_depth_stencil(depth, 0, 1.0f, 0));
+    CHECK(list.clear_depth_stencil(depth, 0, 1.0f, 0));
     CHECK(!list.clear_depth_stencil(depth, 0x4, 1.0f, 0));
-    CHECK(!list.clear_depth_stencil(depth, clear_depth, 1.5f, 0));
-    CHECK(!list.clear_depth_stencil(depth, clear_depth, -0.0001f, 0));
+    CHECK(list.clear_depth_stencil(depth, clear_depth, 1.5f, 0));
+    CHECK(list.clear_depth_stencil(depth, clear_depth, -0.0001f, 0));
     CHECK(!list.clear_depth_stencil({}, clear_depth, 1.0f, 0));
     CHECK(list.clear_depth_stencil(depth, clear_stencil, 7.0f, 0x5a));  // depth is ignored without clear_depth
     CHECK(list.clear_depth_stencil(depth, clear_depth | clear_stencil, 0.25f, 3));
@@ -51,7 +52,7 @@ int main() {
     CHECK(!list.uav_barrier({0}));
 
     const auto commands = list.commands();
-    CHECK(commands.size() == 7);
+    CHECK(commands.size() == 9);
     const auto* first = std::get_if<ClearRenderTarget>(&commands[0]);
     const auto* second = std::get_if<ClearRenderTarget>(&commands[1]);
     CHECK(first && second);
@@ -64,9 +65,13 @@ int main() {
     CHECK(transition->before == s::render_target && transition->after == s::copy_source);
     CHECK(std::get_if<UavBarrier>(&commands[3]) && std::get<UavBarrier>(commands[3]).resource == 0);
     CHECK(std::get_if<AliasingBarrier>(&commands[4]) && std::get<AliasingBarrier>(commands[4]).after == 24);
-    const auto* stencil = std::get_if<ClearDepthStencil>(&commands[5]);
+    const auto* oversized = std::get_if<ClearDepthStencil>(&commands[5]);
+    CHECK(oversized && oversized->depth == 1.5f);
+    const auto* negative = std::get_if<ClearDepthStencil>(&commands[6]);
+    CHECK(negative && negative->depth == -0.0001f);
+    const auto* stencil = std::get_if<ClearDepthStencil>(&commands[7]);
     CHECK(stencil && stencil->flags == clear_stencil && stencil->stencil == 0x5a);
-    const auto* both = std::get_if<ClearDepthStencil>(&commands[6]);
+    const auto* both = std::get_if<ClearDepthStencil>(&commands[8]);
     CHECK(both && both->flags == (clear_depth | clear_stencil) && both->depth == 0.25f && both->stencil == 3);
 
     // Rectangles are copied while recording.
@@ -187,12 +192,14 @@ int main() {
     CHECK(!list.atomic_copy({42, 8, 42, 8, 8, {dependent}}));     // onto itself
     CHECK(!list.atomic_copy({42, 4, 43, 16, 8, {dependent}}));    // UINT64 at an offset that is not 8-aligned
     CHECK(!list.atomic_copy({42, 8, 43, 16, 2, {dependent}}));    // neither UINT nor UINT64
-    CHECK(!list.atomic_copy({42, 8, 43, 16, 4, {}}));             // no dependencies
+    CHECK(list.atomic_copy({42, 8, 43, 16, 4, {}}));              // zero dependencies is valid on Windows D3D12
+    CHECK(!list.atomic_copy({42, 8, 43, 16, 4, {{41, 0, 8, 4}}})); // inverted dependent range
+    CHECK(!list.atomic_copy({42, 8, 43, 16, 4, {{41, 0, 4, 4}}})); // empty dependent range
     CHECK(!list.atomic_copy({42, 8, 43, 16, 4, {{0, 0, 0, 4}}})); // a null dependent resource
     CHECK(!list.atomic_copy({0, 8, 43, 16, 4, {dependent}}));
     CHECK(list.close());
     CHECK(!list.discard({40, 0, 0, false, true}) && !list.discard({40, 0, 0, false}));
-    CHECK(list.commands().size() == 5);
+    CHECK(list.commands().size() == 6);
     CHECK(std::get<DiscardResource>(list.commands()[0]).whole);
     CHECK(std::get<DiscardResource>(list.commands()[1]).first_subresource == 2 &&
           std::get<DiscardResource>(list.commands()[1]).partial && !std::get<DiscardResource>(list.commands()[1]).whole);

@@ -98,6 +98,28 @@ test('hostile model and texture file names render as text, not as elements or at
     }
 });
 
+test('a texture preview that fails to load fires its error handler once, not in a loop', () => {
+    // Chromium fires "error" again for every src='' it is given, so a handler that sets src='' without clearing
+    // itself first runs forever (about 424,000 times in 3 s for one card in Chromium 156). This fake image fires the
+    // handler again on every src write, as that browser does, and both card paths (first 80, "show all") are used.
+    const cards = renderTextureGrid('plain name');
+    const handlers = [...cards.matchAll(/<img\b[^>]*\sonerror="([^"]*)"/g)].map(m => m[1]);
+    assert.equal(handlers.length, 2);
+    for (const code of handlers) {
+        let fired = 0;
+        const img = {
+            alt: '',
+            onerror: null,
+            set src(_value) { if (this.onerror && fired < 1000) { fired++; this.onerror(); } },
+        };
+        img.onerror = new Function(code);
+        fired++;
+        img.onerror();
+        assert.equal(fired, 1, `the handler ran ${fired} times: ${code}`);
+        assert.equal(img.alt, 'DDS / Pre-converted');
+    }
+});
+
 test('a download that finishes or fails after a later click does not replace the model last clicked', () => {
     const studio = loadStudio();
     studio.run(`loadModel('/models/a.glb', 'a.glb', '', 1);
@@ -275,4 +297,22 @@ test('half-float coordinates follow the selected mip and late reads cannot repla
     pending[1].resolve({ok: false});
     await older;
     assert.equal(output.textContent, 'R = -2.5');
+});
+
+test('single-mip single-layer DDS still shows dimensions without adding inputs', async () => {
+    const { context, elements, run } = loadStudio();
+    const info = {width: 32, height: 16, mip_count: 1, array_size: 1, format: 'BC1_UNORM'};
+    const requests = [];
+    context.fetch = async url => {
+        requests.push(url);
+        return {ok: true, json: async () => info};
+    };
+    await run("openModal({name:'a', preview:'/a.png', ddsPreview:'/api/dds/a.dds'})");
+    const image = elements.get('modal-img');
+    const controls = elements.get('dds-controls');
+    assert.deepEqual(requests, ['/api/dds/a.dds?info']);
+    assert.equal(controls.children.length, 1);
+    assert.equal(controls.children[0].textContent, '32 \u00d7 16');
+    assert.equal(controls.children[0].children.length, 0);
+    assert.equal(image.src, '/a.png');
 });

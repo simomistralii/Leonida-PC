@@ -1030,6 +1030,92 @@ class DecodeTest(unittest.TestCase):
         with self.assertRaisesRegex(anim_clips.NotClipDictionary, "rig"):
             anim_clips.parse_dictionary(anim_clips.System(bytes(b)))
 
+    def test_truncated_parametric_clip_raises_decode_error(self):
+        # Put a parametric clip (+0x20 >= 16) at the very end of the page so u64(+0x30) fits while d[+0x3F] is OOB.
+        p = Page()
+        pm = p.alloc(bytes(16))
+        p.b[pm + 8], p.b[pm + 9] = 1, 0
+        p.ptr(8, pm)
+        p.string(0x38, "trunc@clip")
+        struct.pack_into("<I", p.b, 0x68, joaat32("trunc@clip"))
+        buckets = p.alloc(bytes(8))
+        entry = p.alloc(bytes(0x18))
+        clip = p.alloc(bytes(0x38))
+        struct.pack_into("<I", p.b, clip + 0x20, 0x5000)
+        struct.pack_into("<Q", p.b, entry, joaat32("trunc@clip") << 32 | 1)
+        p.ptr(entry + 8, clip)
+        p.ptr(buckets, entry)
+        p.ptr(0x48, buckets)
+        struct.pack_into("<I", p.b, 0x50, 1)
+        data = bytes(p.b)
+        self.assertEqual(len(data), clip + 0x38)
+        with self.assertRaises(anim_clips.DecodeError):
+            anim_clips.parse_dictionary(anim_clips.System(data))
+        with tempfile.TemporaryDirectory() as tmp:
+            rpf = os.path.join(tmp, "trunc.rpf")
+            write_rpf(rpf, [data])
+            _rows, summary = anim_clips.scan(rpf)
+            self.assertEqual(summary["counts"]["dictionaries_unparsed"], 1)
+
+    def test_null_and_truncated_sequence_raise_decode_error(self):
+        anim = {"frames": 2, "sequences": [None], "tracks": TRACKS[:1]}
+        with self.assertRaisesRegex(anim_clips.DecodeError, "null"):
+            anim_clips.decode_animation(self.s, anim)
+        seq = bytearray(encode_sequence(3, [(2, 0, 0, 1.0)]))
+        struct.pack_into("<I", seq, 4, len(seq) + 0x100)    # declared length runs past the pages
+        with self.assertRaisesRegex(anim_clips.DecodeError, "past the pages"):
+            anim_clips.decode_sequence(anim_clips.System(bytes(seq)), 0)
+
+    def test_type5_words_and_type10_overrun_rejected(self):
+        # Huge type-5 word count must fail bounds check immediately instead of allocating billions of entries.
+        seq = bytearray(encode_sequence(2, [(5, 0, 0, (2, 1, [0, 1], 1.0, 0.0, [0, 1]))]))
+        struct.pack_into("<I", seq, 0x20 + 8, 0x10000000)   # words = 268M -> (32 * words) // 1 = 8.5B
+        with self.assertRaisesRegex(anim_clips.DecodeError, "type-5"):
+            anim_clips.decode_sequence(anim_clips.System(bytes(seq)), 0)
+        # Smaller type-5 word count that still overruns frame_offset into frame bits.
+        seq2 = bytearray(encode_sequence(2, [(5, 0, 0, (2, 4, TABLE, 0.1, 1.0, [0, 1]))]))
+        struct.pack_into("<I", seq2, 0x20 + 8, 2)           # 2 words > 1 word allocated before frame_offset
+        with self.assertRaisesRegex(anim_clips.DecodeError, "type-5"):
+            anim_clips.decode_sequence(anim_clips.System(bytes(seq2)), 0)
+        # Type-10 word count overrunning frame_offset into frame bits / counts.
+        seq3 = bytearray(encode_sequence(4, [(10, 0, 0, (0.5, 0.0, [1, 2, 3, 4]))]))
+        words = struct.unpack_from("<I", seq3, 0x20)[0]
+        struct.pack_into("<I", seq3, 0x20, words + 1)
+        with self.assertRaisesRegex(anim_clips.DecodeError, "type-10"):
+            anim_clips.decode_sequence(anim_clips.System(bytes(seq3)), 0)
+
+    def test_multi_sequence_empty_and_boundary_edge_cases(self):
+        # Continuation sequence with 0 frames must not shrink total below already decoded frames.
+        s_ok = encode_sequence(3, [(2, 0, 0, 1.0)])
+        s_empty = encode_sequence(0, [(2, 0, 0, 1.0)])
+        page = Page()
+        a1 = animation(page, 3, TRACKS[3:4], [s_ok, s_empty])
+        s = anim_clips.System(bytes(page.b))
+        with self.assertRaisesRegex(anim_clips.DecodeError, "empty sequence"):
+            anim_clips.decode_animation(s, anim_clips.parse_animation(s, a1))
+        # First sequence with 0 frames in a multi-sequence animation must also raise DecodeError.
+        page2 = Page()
+        a2 = animation(page2, 3, TRACKS[3:4], [s_empty, s_ok])
+        s2 = anim_clips.System(bytes(page2.b))
+        with self.assertRaisesRegex(anim_clips.DecodeError, "empty sequence"):
+            anim_clips.decode_animation(s2, anim_clips.parse_animation(s2, a2))
+        # Boundary comparison with mismatched vector lengths (3-vec vs 1-float) must not count as matching.
+        seq_vec3 = encode_sequence(2, [(1, 0, 0, (1.0, 2.0, 3.0))])
+        seq_f1 = encode_sequence(2, [(2, 0, 0, 1.0)])
+        page3 = Page()
+        a3 = animation(page3, 3, TRACKS[2:3], [seq_vec3, seq_f1])
+        s3 = anim_clips.System(bytes(page3.b))
+        stats = anim_clips.new_stats()
+        anim_clips.decode_animation(s3, anim_clips.parse_animation(s3, a3), stats)
+        self.assertEqual(stats["boundary_values"], 1)
+        self.assertEqual(stats["boundary_values_within_1e-3"], 0)
+        # Zero-sequence animation: frames_sum_matches is True only when declared frames == 0.
+        for declared, want in ((0, 1), (1, 0)):
+            stats = anim_clips.new_stats()
+            tracks, total = anim_clips.decode_animation(
+                self.s, {"frames": declared, "sequences": [], "tracks": []}, stats)
+            self.assertEqual((tracks, total, stats["frames_sum_matches"]), ({}, 0, want))
+
 
 def write_raw(path, parts):
     """parts: [(bytes, compress?)] written 16-byte aligned after a minimal RPF9 header."""
@@ -1097,6 +1183,45 @@ class GapPageTest(unittest.TestCase):
         self.assertEqual(summary["gap_pages"], {})
         self.assertEqual(summary["unresolved"], {"system page not the next stream": 1})
         self.assertEqual(summary["counts"]["dictionaries"], 1)
+
+    def test_small_zlib_last_page_under_16_stored_bytes_at_eof(self):
+        # A 32-byte all-zero tail compresses to 11 stored bytes (< 16) at archive EOF with no trailing padding.
+        base = two_sequence_dictionary("eofzlib@dict")
+        page = bytearray(base) + bytes(32)
+        a, b = split(bytes(page), len(base), move_map=False)
+        zb = zlib.compress(b)
+        self.assertLess(len(zb), 16)
+        body = bytearray(0x100)
+        body[:4] = b"9FPR"
+        struct.pack_into("<I", body, 4, 0x100)
+        body += zlib.compress(a)
+        body += bytes((-len(body)) % 16)
+        body += zb
+        with open(self.rpf, "wb") as f:
+            f.write(body)
+        _rows, summary = anim_clips.scan(self.rpf)
+        self.assertEqual(summary["gap_pages"], {"small zlib page": 1})
+        self.assertEqual(summary["unresolved"], {})
+        self.assertEqual(summary["counts"]["dictionaries"], 1)
+        self.assertEqual(summary["counts"]["animations_decoded"], 1)
+
+    def test_raw_16_byte_last_page_starting_with_zlib_header_bytes(self):
+        # A raw 16-byte tail whose leading bytes match ZHDR (both invalid deflate and a short valid empty zlib
+        # stream whose inflated result fails parse_dictionary) must fall back to the 16-byte raw page.
+        for tail_prefix in (b"\x78\x9c\xff\xff", zlib.compress(b"")):
+            base = bytearray(two_sequence_dictionary("rawzhdr@dict"))
+            name_at = len(base)
+            tail = (tail_prefix + b"rawtail@dict").ljust(16, b"\x00")[:16]
+            self.assertEqual(len(tail), 16)
+            base += tail
+            # Point the dictionary name at the 16-byte tail so parse_dictionary requires all 16 bytes to parse.
+            struct.pack_into("<QHH", base, 0x38, SYSTEM + name_at, 16, 16)
+            a, b = split(bytes(base), name_at, move_map=False)
+            _rows, summary = self.scan([(a, True), (b, False), (two_sequence_dictionary("next@dict"), True)])
+            self.assertEqual(summary["gap_pages"], {"raw 16-byte page": 1}, tail_prefix)
+            self.assertEqual(summary["unresolved"], {}, tail_prefix)
+            self.assertEqual(summary["counts"]["dictionaries"], 2, tail_prefix)
+            self.assertEqual(summary["counts"]["animations_decoded"], 2, tail_prefix)
 
 
 class ArchiveTest(unittest.TestCase):

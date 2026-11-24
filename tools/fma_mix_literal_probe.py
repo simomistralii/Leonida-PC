@@ -35,6 +35,7 @@ Sides:
 
 Exit code: 0 when every side that ran follows the same reading, 1 when they differ or a side follows neither (or a
 control is wrong), 2 on a harness error, 77 when the hardware side is unavailable. Nothing here reads game files.
+Usage: `python -I tools/fma_mix_literal_probe.py --help` lists the options.
 """
 import argparse
 import os

@@ -29,6 +29,50 @@ At start the runtime prints what it loaded, for example:
 [rt] mods: 1 archetype swap(s) loaded; not applied yet: the archetype lookup hook for this executable is not known
 ```
 
+## Managing them (`tools/leonida_mods.py`)
+
+`tools/leonida_mods.py` is the small mod manager. It writes only in the port's `mods` folder: it can create,
+install, list, check, enable, disable, pack and remove mods. A package is a normal ZIP file (the `.leonidamod`
+extension is only a name) with `mod.json` at its top level or inside one top-level folder. The installer refuses
+paths that climb out of the package, links and manifests the runtime would reject; it never goes online and never
+copies game data.
+
+On Windows, double-click **`Mods.bat`** for the Tkinter window: choose the port folder, install a ZIP or folder,
+toggle a mod, create a swap, pack or remove one, and launch `gta6rt` normally or as a dry run. The GUI uses the same
+standard-library code as the CLI below.
+
+Point `--port` at the built port (the folder with `gta6rt.exe` and `game_path.txt`), or `--dir` at a mods folder:
+
+```powershell
+python -I tools/leonida_mods.py gui
+python -I tools/leonida_mods.py --port "D:\Games\Leonida" list
+python -I tools/leonida_mods.py --port "D:\Games\Leonida" install .\mandy.zip
+python -I tools/leonida_mods.py --port "D:\Games\Leonida" new lucia_to_mandy `
+    --name "Mandy" --game-version 1.0.2.1 --swap player_story000_00=cs_mandy
+python -I tools/leonida_mods.py --port "D:\Games\Leonida" disable mandy_prison_intro
+python -I tools/leonida_mods.py --dir "D:\Games\Leonida\mods" check
+```
+
+`pack` writes an installed folder back to a ZIP for sharing; `uninstall` removes it. `run` is a convenience
+launcher for the same options `gta6rt` already takes:
+
+```powershell
+python -I tools/leonida_mods.py --port "D:\Games\Leonida" run --archetype-lookup 1A2B3C0
+```
+
+Without the measured `--archetype-lookup` RVA the runtime still loads and reports the manifests but the swaps are
+not applied, as above. The game executable itself is still needed; the manager does not supply it.
+
+The repository's `mods/` folder has four manifest-only examples. `mandy_prison_intro` is enabled; the other three
+are installed disabled so a copied folder cannot surprise anyone or silently fight it:
+
+| Folder | Swap | State |
+|---|---|---|
+| `mandy_prison_intro` | `player_story000_00` -> `cs_mandy` | enabled |
+| `lucia_cutscene_model` | `player_story000_00` -> `cs_lucia` | disabled |
+| `monalisa_player_model` | `player_story000_00` -> `cs_monalisa` | disabled |
+| `mandy_to_monalisa` | `cs_mandy` -> `cs_monalisa` | disabled |
+
 ## mod.json
 
 ```json
@@ -53,6 +97,10 @@ At start the runtime prints what it loaded, for example:
 written `0x…`. A swap is one step: a model swapped to another that is itself swapped is not followed
 again, so two mods cannot loop. `when` is `always`; a narrower condition (one mission, one cutscene) is
 refused until a hook provides the game's mission state, so a mod never silently does more than it says.
+
+`mod.json` is UTF-8. A byte-order mark in front is accepted (Notepad's "UTF-8 with BOM", Windows
+PowerShell 5.1's `-Encoding utf8`). A UTF-16 file, which PowerShell 5.1's `>` writes, is skipped with
+`mod.json is UTF-16; save it as UTF-8`.
 
 The format is in `runtime/src/mods.h`; `runtime/test/mods_test.cpp` (ctest `mods`) covers it.
 
@@ -126,7 +174,7 @@ the engine, which shipped a first-person mode), a hit-reaction `RecoveryDirectio
 and a `firstpersonshooter_hud` UI texture. So the mod switches on a mode the engine has rather than building
 a camera. Whether the game exposes it to the player is not known.
 
-**Assumptions to confirm in the executable:** that the view mode is chosen through one getter of the form
+**ASSUMPTION:** three things to confirm in the executable: that the view mode is chosen through one getter of the form
 `mode = get(context)`, that context 0 is on foot, and that first person is enum value 4 (GTA V's
 `camViewModeSettings` order: third person near, medium, far, cinematic, first person). All three are
 settings in `mod.json`, so a different answer changes the manifest, not the runtime.

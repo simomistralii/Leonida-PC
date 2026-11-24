@@ -24,6 +24,7 @@
 #include "vk_shader_fma.h"
 #include "vk_pc_tail.h"
 #include "spirv_capability.h"
+#include "../src/spirv_words.h"
 #include "../src/vulkan_bindless.h"
 
 #include <algorithm>
@@ -71,11 +72,9 @@ VKAPI_ATTR VkBool32 VKAPI_CALL on_message(VkDebugUtilsMessageSeverityFlagBitsEXT
 }
 
 std::vector<std::uint32_t> read_spv(const char* path) {
-    std::ifstream f(path, std::ios::binary);
-    std::vector<char> bytes((std::istreambuf_iterator<char>(f)), {});
-    std::vector<std::uint32_t> words(bytes.size() / 4);
-    std::memcpy(words.data(), bytes.data(), words.size() * 4);
-    return words;
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) return {};
+    return leonida::read_spirv_words(f, f.tellg());
 }
 
 // Expected RGBA values in this test are finite. Report the worst channel error per pixel.
@@ -117,6 +116,13 @@ int main(int argc, char** argv) {
         float pixel[4]{};
         pixel[c] = std::numeric_limits<float>::quiet_NaN();
         EXPECT(std::isinf(pixel_error(pixel, black)));
+    }
+    const std::vector<std::uint32_t> shader_code[] = {read_spv(argv[1]), read_spv(argv[2])};
+    for (int stage = 0; stage < 2; ++stage) {
+        if (shader_code[stage].empty()) {
+            std::fprintf(stderr, "cannot read %s\n", argv[1 + stage]);
+            return 1;
+        }
     }
     constexpr std::uint32_t W = 64, H = 64, TW = 8;
     constexpr std::uint32_t table_va = 256;  // console VA of the descriptor table: T# at +0, S# at +32
@@ -251,14 +257,9 @@ int main(int argc, char** argv) {
     VkPhysicalDeviceFeatures2 enable{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &enable12};
     enable.features.shaderInt64 = int64 ? VK_TRUE : VK_FALSE;
     enable.features.shaderSampledImageArrayDynamicIndexing = VK_TRUE;
-    const std::vector<std::uint32_t> shader_code[] = {read_spv(argv[1]), read_spv(argv[2])};
     bool dynamic_storage = false;
     for (int stage = 0; stage < 2; ++stage) {
         const auto& code = shader_code[stage];
-        if (code.empty()) {
-            std::fprintf(stderr, "cannot read %s\n", argv[1 + stage]);
-            return 1;
-        }
         dynamic_storage = dynamic_storage || leonida::vk_test::spirv_declares_capability(
             code.data(), code.size() * sizeof(code[0]), leonida::vk_test::spv_storage_image_array_dynamic_indexing);
     }

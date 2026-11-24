@@ -121,7 +121,26 @@ void names(const fs::path& source, const fs::path& root) {
                 bool handled = false;
                 check(loader.load_runtime_module(rt::lower(narrow), 0, handled) == m.base && handled,
                       "runtime ACP load reuses the mapped DLL");
+                // The code page's own letters in upper case (as Windows ignores them), not only ASCII ones.
+                std::wstring upper(name);
+                LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_UPPERCASE, name.c_str(), -1, upper.data(),
+                              static_cast<int>(upper.size()) + 1, nullptr, nullptr, 0);
+                bool upper_exact = false;
+                const auto narrow_upper = encoded(upper, CP_ACP, upper_exact);
+                if (upper_exact)
+                    check(loader.find_loaded_module(rt::lower(narrow_upper)) == m.base,
+                          "mapped ACP name lookup ignores case outside ASCII");
             }
+            // The wide lookups the W entries use: as named, in the system table's upper case, and a run-time load
+            // that returns the mapped module (what Windows does for LoadLibraryW of a loaded image).
+            check(loader.find_loaded_module_w(name) == m.base, "mapped wide name lookup finds the DLL");
+            std::wstring wide_upper(name);
+            LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_UPPERCASE, name.c_str(), -1, wide_upper.data(),
+                          static_cast<int>(wide_upper.size()) + 1, nullptr, nullptr, 0);
+            check(loader.find_loaded_module_w(wide_upper) == m.base, "mapped wide name lookup ignores case");
+            bool handled_w = false;
+            check(loader.load_runtime_module_w(name, 0, handled_w) == m.base && handled_w,
+                  "runtime wide load reuses the mapped DLL");
             for (const auto* previous : mapped)
                 check(previous != &m && previous->base != m.base, "distinct Unicode basenames remain distinct mappings");
             mapped.push_back(&m);

@@ -259,18 +259,21 @@ class RuntimePackagingTest(unittest.TestCase):
         self.assertIn(image, missing.stderr)
         with open(os.path.join(self.game, image), "wb"):
             pass
+        # The launcher resolves its own folder (readlink -f) and the child reports its working directory, so both
+        # are physical paths: on macOS a temp folder under /var shows up as /private/var.
+        real_root, real_game, real_out = (os.path.realpath(p) for p in (self.root, self.game, self.out))
         for mode in ("--dry-run", "--init"):
             with self.subTest(mode=mode):
                 result = subprocess.check_output([launcher, mode], cwd=self.root, env=env)
                 self.assertEqual(json.loads(result), [
-                    self.game, [mode, "./" + image, "--overlay", "Z:" + self.out + "/overlay"],
+                    real_game, [mode, "./" + image, "--overlay", "Z:" + real_out + "/overlay"],
                     None, "vulkan",
                 ])
         env.update(LEONIDA_SHADERS="D:/custom", LEONIDA_D3D12="trace")
         result = subprocess.check_output([launcher, "--run"], cwd=self.root, env=env)
         self.assertEqual(json.loads(result)[2:], ["D:/custom", "trace"])
         result = subprocess.check_output([launcher, "--run", "other.exe", "--", "two words"], cwd=self.root, env=env)
-        self.assertEqual(json.loads(result)[:2], [self.root, ["--run", "other.exe", "--", "two words"]])
+        self.assertEqual(json.loads(result)[:2], [real_root, ["--run", "other.exe", "--", "two words"]])
 
         work = os.path.join(self.out, "Shader cache '$HOME'")
         make_game.runtime(self.game, self.out, {"expected_exe": image}, self.build, work=work)
@@ -278,7 +281,7 @@ class RuntimePackagingTest(unittest.TestCase):
         os.rename(self.out, moved)
         env.pop("LEONIDA_SHADERS")
         result = subprocess.check_output([os.path.join(moved, "gta6rt.sh"), "--dry-run"], cwd=self.root, env=env)
-        self.assertEqual(json.loads(result)[2], "Z:" + moved + "/Shader cache '$HOME'/shaders/spirv")
+        self.assertEqual(json.loads(result)[2], "Z:" + os.path.realpath(moved) + "/Shader cache '$HOME'/shaders/spirv")
 
     def test_runtime_records_shader_work_directory(self):
         self.write_artifact("gta6rt_tls_host.dll", b"TLS host")
@@ -559,12 +562,50 @@ class PipelineCheckExeTest(unittest.TestCase):
 class RuntimeStageCopyTest(unittest.TestCase):
     """runtime() with --runtime-build: the build's files go to the output folder, which may be the build folder."""
 
-    def run_stage(self, build, out):
+    def run_stage(self, build, out, *, work=None):
         for name in make_game.RUNTIME_FILES:
             with open(os.path.join(build, name), "wb") as f:
                 f.write(name.encode())
         with mock.patch.object(make_game, "log"), mock.patch.object(make_game.os, "name", "posix"):
-            make_game.runtime(os.path.join(build, "game"), out, {"expected_exe": "game.exe"}, runtime_build=build)
+            make_game.runtime(os.path.join(build, "game"), out, {"expected_exe": "game.exe"},
+                              runtime_build=build, work=work)
+
+    def test_directory_at_a_generated_path_leaves_the_previous_runtime_untouched(self):
+        outputs = (*make_game.RUNTIME_FILES, "game_path.txt", "shader_path.txt", "gta6rt.sh")
+        for blocked in outputs:
+            with self.subTest(blocked=blocked), tempfile.TemporaryDirectory() as build, \
+                    tempfile.TemporaryDirectory() as out:
+                directory = os.path.join(out, blocked)
+                os.mkdir(directory)
+                marker = os.path.join(directory, "marker")
+                with open(marker, "wb") as f:
+                    f.write(b"existing directory content")
+                previous = {name: b"previous " + name.encode() for name in outputs if name != blocked}
+                for name, contents in previous.items():
+                    with open(os.path.join(out, name), "wb") as f:
+                        f.write(contents)
+
+                error = io.StringIO()
+                with mock.patch.object(sys, "stderr", error), self.assertRaises((SystemExit, OSError)) as failure:
+                    self.run_stage(build, out, work=os.path.join(build, "work"))
+
+                for name, contents in previous.items():
+                    with open(os.path.join(out, name), "rb") as f:
+                        self.assertEqual(f.read(), contents, name)
+                with open(marker, "rb") as f:
+                    self.assertEqual(f.read(), b"existing directory content")
+                self.assertIsInstance(failure.exception, SystemExit)
+                self.assertIn(directory, error.getvalue())
+
+    def test_directory_collision_is_checked_before_building(self):
+        with tempfile.TemporaryDirectory() as out:
+            os.mkdir(os.path.join(out, "game_path.txt"))
+            with mock.patch.object(make_game, "run") as build, \
+                    mock.patch.object(make_game, "cross_build_runtime") as cross_build, \
+                    mock.patch.object(sys, "stderr"), self.assertRaises(SystemExit):
+                make_game.runtime(out, out, {"expected_exe": "game.exe"})
+            build.assert_not_called()
+            cross_build.assert_not_called()
 
     def test_the_build_is_copied_to_another_folder(self):
         with tempfile.TemporaryDirectory() as build, tempfile.TemporaryDirectory() as out:

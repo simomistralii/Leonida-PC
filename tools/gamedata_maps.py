@@ -52,6 +52,7 @@ Both formats scale a u8 value into the header's Z box:
 <carve_dir> is an rpf9_carve.py output directory (index.json plus <offset>.bin
 files). Only header fields, dimensions, row counts and value ranges are
 printed or written; the height bytes are not. Standard library only.
+Usage: `python -I tools/gamedata_maps.py --help` lists the options.
 """
 from __future__ import annotations
 
@@ -319,9 +320,18 @@ def _join(row: dict, data: bytes) -> dict:
 
 
 def _read_index_rows(directory: str) -> list[dict]:
-    with open(os.path.join(directory, "index.json"), encoding="utf-8") as f:
+    index_path = os.path.join(directory, "index.json")
+    with open(index_path, encoding="utf-8") as f:
         index = json.load(f)
-    return sorted(index["files"], key=lambda r: r["off"])
+    # A hand-edited or half-written index used to fail as `error: 'files'`, naming neither the folder nor the
+    # file. Name the index and the malformed row like gamedata_blobs.check_carve_index does.
+    rows = index.get("files") if isinstance(index, dict) else None
+    if not isinstance(rows, list):
+        raise ValueError(f"{index_path} has no 'files' list")
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict) or "off" not in row:
+            raise ValueError(f"{index_path}: row {i} needs an 'off'")
+    return sorted(rows, key=lambda r: r["off"])
 
 
 def read_payloads(directory: str, rows: list[dict] | None = None) -> list[dict]:
@@ -498,6 +508,11 @@ def main() -> int:
     a = ap.parse_args()
     if not os.path.exists(a.carve_dir):
         print(f"ERROR: {a.carve_dir}: does not exist", file=sys.stderr)
+        return 2
+    if not os.path.isfile(os.path.join(a.carve_dir, "index.json")):
+        # A file, or a folder without the carve's index, otherwise fails below as a raw
+        # FileNotFoundError naming "<source>\index.json", which the user never typed.
+        print(f"ERROR: {a.carve_dir}: not an rpf9_carve.py folder (no index.json)", file=sys.stderr)
         return 2
 
     try:

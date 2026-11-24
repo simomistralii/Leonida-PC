@@ -596,6 +596,15 @@ class ReadObjTests(unittest.TestCase):
             f.write(text)
         return path
 
+    def test_requires_finite_vertex_positions(self):
+        for coordinates in ("nan 0 0", "0 inf 0", "0 0 -inf", "0 1e999 0"):
+            with self.subTest(coordinates=coordinates):
+                path = self._write_obj(f"v {coordinates}\nv 1 0 0\nv 0 1 0\nf 1 2 3\n")
+                with self.assertRaises(SystemExit) as caught:
+                    fl.read_obj(path)
+                self.assertIn(path, str(caught.exception))
+                self.assertIn("non-finite vertex coordinates", str(caught.exception))
+
     def test_requires_finite_texture_coordinates(self):
         def triangle(u, v):
             return self._write_obj(
@@ -983,6 +992,16 @@ class CameraTests(unittest.TestCase):
         behind = [(0.0, -1000.0, 2.0, 0.0, 0.0)]  # far behind the camera, which looks along +Y from -Y
         with self.assertRaises(SystemExit):
             fl.project(behind, world, viewproj)
+
+    def test_image_size_is_at_least_one_pixel(self):
+        # camera_matrices divides by the width. 0 used to raise ZeroDivisionError once a model was loaded.
+        err = io.StringIO()
+        for argv in (["--width", "0", "--list"], ["--height", "0", "--list"], ["--width", "-3", "--height", "4", "--list"]):
+            with self.subTest(argv=argv), contextlib.redirect_stderr(err):
+                with self.assertRaises(SystemExit) as caught:
+                    fl.main(argv)
+                self.assertEqual(caught.exception.code, 2)
+        self.assertIn("--width and --height must be at least 1", err.getvalue())
 
     def test_camera_flags_are_checked(self):
         for argv in (

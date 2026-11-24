@@ -21,6 +21,48 @@ DEVICE_64 = "device: X (subgroup 32..64)\n"
 CONFIRMED = "compute subgroup size: 64\n"
 
 
+class BarycentricFallbackSelection(unittest.TestCase):
+    def setUp(self):
+        rgt._BARYCENTRIC_FALLBACK.clear()
+
+    def test_env_override(self):
+        with patch.dict(os.environ, {"LEONIDA_BARY_FALLBACK": "1"}, clear=False):
+            self.assertTrue(rgt.bary_fallback())
+        with patch.dict(os.environ, {"LEONIDA_BARY_FALLBACK": "0"}, clear=False):
+            proc = SimpleNamespace(stdout='{"barycentric_fallback": true}\n')
+            with patch.object(rgt.subprocess, "run", return_value=proc):
+                self.assertFalse(rgt.bary_fallback())
+
+    def test_anv_probe_is_selected_when_env_is_unset(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("LEONIDA_BARY_FALLBACK", None)
+            proc = SimpleNamespace(stdout='{"barycentric_fallback": true}\n')
+            with patch.object(rgt.subprocess, "run", return_value=proc):
+                self.assertTrue(rgt.bary_fallback())
+
+    def test_env_override_beats_the_probe(self):
+        """#5933: =0 brings back native barycentrics on a device the probe flags (gfx90c on AMD's Windows driver),
+        and =1 does not need the probe at all."""
+        proc = SimpleNamespace(stdout='{"barycentric_fallback": true, "vendor_id": 4098, "device_id": 5607, '
+                                      '"driver_id": 1}\n')
+        with patch.object(rgt.subprocess, "run", return_value=proc) as run:
+            with patch.dict(os.environ, {"LEONIDA_BARY_FALLBACK": "0"}, clear=False):
+                self.assertIs(rgt.bary_fallback(), False)
+            with patch.dict(os.environ, {"LEONIDA_BARY_FALLBACK": "1"}, clear=False):
+                self.assertIs(rgt.bary_fallback(), True)
+            run.assert_not_called()
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("LEONIDA_BARY_FALLBACK", None)
+                self.assertIs(rgt.bary_fallback(), True)
+            run.assert_called_once()
+
+    def test_probe_failure_is_not_a_fallback(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("LEONIDA_BARY_FALLBACK", None)
+            with patch.object(rgt.subprocess, "run", side_effect=OSError("no Vulkan")):
+                self.assertIs(rgt.bary_fallback(), False)
+
+
 def dump(words, pad=8):
     return "out[0..7] = " + " ".join(str(w) for w in (list(words) + [0] * pad)[:8]) + "\n"
 
@@ -193,7 +235,7 @@ class StoreHelperUnsupported(unittest.TestCase):
             return suite_rc, output.getvalue()
 
     def test_unsupported_is_a_skip_with_its_reason(self):
-        for shader in ("cs_imgstore", "cs_imgload", "cs_imgload_d16"):
+        for shader in ("cs_imgstore", "cs_imgload", "cs_imgload_tfe", "cs_imgload_d16", "cs_imgload_d16_tfe"):
             with self.subTest(shader=shader):
                 rc, out = self.run_store(shader, 77, "unsupported: shaderStorageImageWriteWithoutFormat=0\ndevice: X")
                 self.assertEqual(rc, 0, out)

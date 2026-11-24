@@ -91,6 +91,7 @@ class ModeRoundProbeTests(unittest.TestCase):
             raw = out_json.read_bytes()
             self.assertNotIn(b"\r\n", raw)
             self.assertEqual(json.loads(raw.decode("utf-8")), {"arch": "gfx1030", "waves": {"32": {"ok": 1}}})
+            self.assertEqual([p.name for p in out_json.parent.glob(".mode_round_probe-*")], [])
 
     def test_json_write_oserror_returns_exit_1_without_traceback(self):
         fake_oracle = mock.MagicMock()
@@ -106,6 +107,61 @@ class ModeRoundProbeTests(unittest.TestCase):
                 rc = probe.main(["--waves", "32", "--json", str(out_json)])
             self.assertEqual(rc, 1)
             self.assertIn("denied", err.getvalue())
+            self.assertEqual([p.name for p in Path(d).glob(".mode_round_probe-*")], [])
+
+    def test_json_write_failure_preserves_previous_report_and_cleans_temp(self):
+        previous = '{"previous": true}'
+        fake_oracle = mock.MagicMock()
+        fake_oracle.arch = "gfx1030"
+        real_open = open
+
+        def failing_open(*args, **kwargs):
+            handle = real_open(*args, **kwargs)
+            orig_write = handle.write
+
+            def fail_write(data):
+                orig_write(data[:8])
+                raise OSError(28, "No space left on device")
+
+            handle.write = fail_write
+            return handle
+
+        for label, patch in (
+            ("write", mock.patch("builtins.open", side_effect=failing_open)),
+            ("replace", mock.patch.object(probe, "replace_retry", side_effect=PermissionError(13, "Permission denied"))),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as d:
+                out_json = Path(d) / "keep.json"
+                out_json.write_text(previous, encoding="utf-8", newline="\n")
+                err = io.StringIO()
+                with mock.patch.object(runner, "open_oracle", return_value=fake_oracle), \
+                     mock.patch.object(probe, "probe_cases", return_value={"total": 1, "ok": 1, "mismatches": []}), \
+                     mock.patch.object(probe, "probe_transcendentals", return_value={"all_ok": True, "ops": {}}), \
+                     patch, \
+                     mock.patch.object(sys, "stdout", io.StringIO()), \
+                     mock.patch.object(sys, "stderr", err):
+                    rc = probe.main(["--waves", "32", "--json", str(out_json)])
+                self.assertEqual(rc, 1)
+                self.assertIn("cannot write --json", err.getvalue())
+                self.assertEqual(out_json.read_text(encoding="utf-8"), previous)
+                self.assertEqual([p.name for p in Path(d).glob(".mode_round_probe-*")], [])
+
+    def test_readonly_existing_report_is_preserved_without_temp_files(self):
+        if os.name != "nt" and os.geteuid() == 0:
+            self.skipTest("root bypasses read-only file mode")
+        previous = '{"readonly": true}'
+        with tempfile.TemporaryDirectory() as d:
+            out_json = Path(d) / "readonly.json"
+            out_json.write_text(previous, encoding="utf-8", newline="\n")
+            os.chmod(out_json, 0o444)
+            try:
+                err = probe.write_json_report(str(out_json), {"arch": "gfx1030", "waves": {}})
+                self.assertIsNotNone(err)
+                self.assertIn("cannot write --json", err)
+                self.assertEqual(out_json.read_text(encoding="utf-8"), previous)
+                self.assertEqual([p.name for p in Path(d).glob(".mode_round_probe-*")], [])
+            finally:
+                os.chmod(out_json, 0o600)
 
 
 class FakeModeOracle:

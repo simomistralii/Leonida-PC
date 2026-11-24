@@ -10,6 +10,8 @@ values, the JSON report, and the input-alias guard.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import struct
 import subprocess
@@ -17,6 +19,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 TOOLS = ROOT / "tools"
@@ -281,6 +284,83 @@ class GlbSkinningTests(unittest.TestCase):
         self.assertEqual(0, proc.returncode, proc.stderr)
         self.assertIn("skinned", proc.stdout)
 
+    def test_duplicate_skin_joints_are_rejected(self):
+        doc, binary, _ = glb_skinning.parse_glb(make_glb(joints=((0, 1, 0, 0),) * 3))
+        doc["skins"][0]["joints"] = [0, 0]
+        data = build_glb(doc, binary)
+        report = glb_skinning.analyze_glb(data)
+        self.assertFalse(report["ok"])
+        self.assertIn("duplicate joint node 0", "\n".join(report["errors"]))
+        path = self.write("duplicate.glb", data)
+        proc = self.run_tool(path)
+        self.assertEqual(proc.returncode, 1)
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertEqual(Path(path).read_bytes(), data)
+
+    def test_skin_sets_must_start_at_zero_and_have_no_gaps(self):
+        for two_sets, old, new in ((False, 0, 1), (True, 1, 2), (False, 0, 999999999)):
+            with self.subTest(two_sets=two_sets, new=new):
+                doc, binary, _ = glb_skinning.parse_glb(make_glb(two_sets=two_sets))
+                attrs = doc["meshes"][0]["primitives"][0]["attributes"]
+                for semantic in ("JOINTS", "WEIGHTS"):
+                    attrs[f"{semantic}_{new}"] = attrs.pop(f"{semantic}_{old}")
+                report = glb_skinning.analyze_glb(build_glb(doc, binary))
+                self.assertFalse(report["ok"])
+                self.assertIn("consecutive", "\n".join(report["errors"]))
+
+    def test_quantized_weight_sums_are_exact(self):
+        for component, maximum in (("u8", 255), ("u16", 65535)):
+            for delta in (-1, 0, 1):
+                with self.subTest(component=component, delta=delta):
+                    weights = ((maximum - 10, 10 + delta, 0, 0),) * 3
+                    report = glb_skinning.analyze_glb(make_glb(weights=weights, weight_component=component, joints=((0, 1, 0, 0),) * 3))
+                    self.assertEqual(report["ok"], delta == 0, report["errors"])
+                    self.assertEqual(report["summary"]["bad_weight_sum_count"], 0 if delta == 0 else 3)
+                    self.assertEqual(report["meshes"][0]["primitives"][0]["weight_sum"]["tolerance"], 0)
+
+    def test_mixed_quantized_sets_use_common_integer_scale(self):
+        # 128/255 + 32639/65535 == 1 exactly; +/- one u16 unit must fail.
+        for delta in (-1, 0, 1):
+            with self.subTest(delta=delta):
+                doc, binary, _ = glb_skinning.parse_glb(make_glb(two_sets=True, joints=((0, 0, 0, 0, 1, 0, 0, 0),) * 3))
+                binary = bytearray(binary)
+                attrs = doc["meshes"][0]["primitives"][0]["attributes"]
+                for set_no, component, value, fmt in ((0, 5121, 128, "<4B"), (1, 5123, 32639 + delta, "<4H")):
+                    acc = doc["accessors"][attrs[f"WEIGHTS_{set_no}"]]
+                    acc.update(componentType=component, normalized=True)
+                    view = doc["bufferViews"][acc["bufferView"]]
+                    view["byteStride"] = 16  # original float VEC4 allocation
+                    for vertex in range(3):
+                        struct.pack_into(fmt, binary, view["byteOffset"] + vertex * 16, value, 0, 0, 0)
+                report = glb_skinning.analyze_glb(build_glb(doc, binary))
+                self.assertEqual(report["ok"], delta == 0, report["errors"])
+
+    def test_mixed_float_and_integer_sets_keep_float_tolerance(self):
+        doc, binary, _ = glb_skinning.parse_glb(make_glb(two_sets=True, joints=((0, 0, 0, 0, 1, 0, 0, 0),) * 3))
+        binary = bytearray(binary)
+        attrs = doc["meshes"][0]["primitives"][0]["attributes"]
+        for set_no in (0, 1):
+            acc = doc["accessors"][attrs[f"WEIGHTS_{set_no}"]]
+            view = doc["bufferViews"][acc["bufferView"]]
+            if set_no == 0:
+                acc.update(componentType=5121, normalized=True)
+                view["byteStride"] = 16
+            for vertex in range(3):
+                value = 128 if set_no == 0 else 1 - 128 / 255 + 1e-5
+                struct.pack_into("<4B" if set_no == 0 else "<4f", binary,
+                                 view["byteOffset"] + vertex * 16, value, 0, 0, 0)
+        report = glb_skinning.analyze_glb(build_glb(doc, binary))
+        self.assertTrue(report["ok"], report["errors"])
+        self.assertEqual(report["meshes"][0]["primitives"][0]["weight_sum"]["tolerance"],
+                         glb_skinning.WEIGHT_SUM_TOLERANCE)
+
+    def test_float_weight_tolerance_is_preserved(self):
+        weights = ((0.5, 0.50001, 0, 0),) * 3
+        report = glb_skinning.analyze_glb(make_glb(weights=weights, joints=((0, 1, 0, 0),) * 3))
+        self.assertTrue(report["ok"], report["errors"])
+        self.assertEqual(report["meshes"][0]["primitives"][0]["weight_sum"]["tolerance"],
+                         glb_skinning.WEIGHT_SUM_TOLERANCE)
+
     def test_weight_sum_not_one_identifies_primitive_and_vertex(self):
         weights = ((1.0, 0.0, 0.0, 0.0),
                    (0.5, 0.25, 0.0, 0.0),
@@ -438,6 +518,30 @@ class GlbSkinningTests(unittest.TestCase):
                 self.assertEqual(1, len(lines), proc.stderr)
                 self.assertTrue(lines[0].startswith("ERROR: "), lines[0])
                 self.assertNotIn("Traceback", proc.stderr)
+
+    def test_json_decoder_recursion_is_a_container_error(self):
+        data = make_glb()
+        # Decoder depth limits differ between Python versions.
+        with mock.patch.object(glb_skinning.json, "loads", side_effect=RecursionError):
+            with self.assertRaisesRegex(glb_skinning.GlbSkinError, "nesting is too deep"):
+                glb_skinning.parse_glb(data)
+
+    def test_json_decoder_recursion_preserves_existing_report(self):
+        data = make_glb()
+        path = self.write("deep.glb", data)
+        previous = b"existing report\n"
+        out = self.write("report.json", previous)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(glb_skinning.json, "loads", side_effect=RecursionError):
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                status = glb_skinning.main([str(path), "--json", str(out)])
+        self.assertEqual(1, status)
+        self.assertEqual("", stdout.getvalue())
+        self.assertEqual(
+            "ERROR: invalid GLB JSON chunk: nesting is too deep\n", stderr.getvalue()
+        )
+        self.assertEqual(previous, out.read_bytes())
+        self.assertEqual(data, path.read_bytes())
 
     def test_normalized_byte_and_short_weights(self):
         cases = {

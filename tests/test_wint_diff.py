@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import unittest
+import unittest.mock
 
 TOOL = Path(__file__).resolve().parents[1] / "tools" / "wint_diff.py"
 sys.path.insert(0, str(TOOL.parent))
@@ -102,6 +103,19 @@ class Generator(unittest.TestCase):
             dst = line.split()[1].rstrip(",")
             return "exec" if dst.startswith("exec") else "vcc" if dst.startswith("vcc") else "smask"
         return re.sub(r"_e(32|64)$", "", op)
+
+    def test_empty_op_selection_raises_value_error(self):
+        for wave in (32, 64):
+            for ops in ([], ["v_nonexistent_op"]):
+                with self.subTest(call="Gen", wave=wave, ops=ops):
+                    with self.assertRaisesRegex(ValueError, r"^no ops selected$"):
+                        d.Gen(d.random.Random(0), wave, ops)
+                with self.subTest(call="generate", wave=wave, ops=ops):
+                    with self.assertRaisesRegex(ValueError, r"^no ops selected$"):
+                        d.generate(d.random.Random(0), 1, ops, wave)
+                with self.subTest(call="run_suite", wave=wave, ops=ops):
+                    with self.assertRaisesRegex(ValueError, r"^no ops selected$"):
+                        d.run_suite(1, 0, 1, ops, (wave,))
 
     def test_every_op_is_generated(self):
         for wave in (32, 64):
@@ -243,6 +257,69 @@ class Cli(unittest.TestCase):
         words = list(range(256))
         self.assertEqual(d.hw_words(words, 64)[1], (4, 5, 6, 7))
         self.assertEqual(d.hw_words("assembler rejected: x", 64), "assembler rejected: x")
+
+
+class OracleGuards(unittest.TestCase):
+    def setUp(self):
+        self.orig_known = d.KNOWN
+
+    def tearDown(self):
+        d.KNOWN = self.orig_known
+
+    def test_hw_words_refuses_none_or_short_words(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            d.hw_words(None, 32)
+        self.assertIn("no result from the hardware runner", str(ctx.exception))
+
+        with self.assertRaises(RuntimeError) as ctx:
+            d.hw_words([0] * 50, 32)
+        self.assertIn("the hardware runner returned 50 words (expected 128)", str(ctx.exception))
+
+    def test_check_refuses_none_or_short_lanes(self):
+        p = program(["v_mov_b32_e32 v1, 5"], wave=32)
+        with self.assertRaises(RuntimeError) as ctx:
+            d.check(p, backends=("hw",), hw=None)
+        self.assertIn("no result from the hardware runner", str(ctx.exception))
+
+        with self.assertRaises(RuntimeError) as ctx:
+            d.check(p, backends=("hw",), hw=[(0, 0, 0, 0)] * 10)
+        self.assertIn("the hardware runner returned 10 lanes (expected 32)", str(ctx.exception))
+
+    def test_run_suite_refuses_short_or_none_oracle_results(self):
+        mock_oracle = unittest.mock.MagicMock()
+        mock_oracle.run.return_value = [[0] * 128] * 2
+        with self.assertRaises(RuntimeError) as ctx:
+            d.run_suite(programs=3, seed=1, max_ops=2, ops=["v_mov_b32"], backends=("hw",), oracle=mock_oracle)
+        self.assertIn("the hardware runner returned 2 results for 3 programs", str(ctx.exception))
+
+        mock_oracle.run.return_value = None
+        with self.assertRaises(RuntimeError) as ctx:
+            d.run_suite(programs=3, seed=1, max_ops=2, ops=["v_mov_b32"], backends=("hw",), oracle=mock_oracle)
+        self.assertIn("the hardware runner returned 0 results for 3 programs", str(ctx.exception))
+
+    def test_main_exits_2_on_oracle_count_mismatch(self):
+        mock_oracle = unittest.mock.MagicMock()
+        mock_oracle.device = "mock device"
+        mock_oracle.run.return_value = [[0] * 128] * 2
+        out, err = io.StringIO(), io.StringIO()
+        with unittest.mock.patch("hw_oracle.runner.open_oracle", return_value=mock_oracle):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = d.main(["--oracle", "hw", "--programs", "3", "--seed", "1"])
+        self.assertEqual(rc, 2)
+        self.assertIn("harness error: the hardware runner returned 2 results for 3 programs", out.getvalue())
+        mock_oracle.close.assert_called_once()
+
+    def test_main_shrink_refuses_empty_oracle_result(self):
+        mock_oracle = unittest.mock.MagicMock()
+        mock_oracle.device = "mock device"
+        mock_oracle.run.side_effect = [[[0x11111111] * 128], []]
+        out, err = io.StringIO(), io.StringIO()
+        with unittest.mock.patch("hw_oracle.runner.open_oracle", return_value=mock_oracle):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = d.main(["--oracle", "hw", "--programs", "1", "--seed", "1"])
+        self.assertEqual(rc, 2)
+        self.assertIn("harness error:", out.getvalue())
+        mock_oracle.close.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -29,6 +29,8 @@ python -I tools/gamedata_index.py <work>\carve\common --csv common.csv --json co
 
 The CSV/JSON contain offsets, sizes, the coarse type and the XML root element. They contain no element values
 or entry names, but they are still local work products and must not be committed or attached to an issue.
+`--csv` and `--json` refuse a path that would replace the carve's `index.json` or one of its
+`<offset>.bin`/`.bk2` streams, so a report cannot be written over a carved input.
 
 ### Coverage
 
@@ -382,6 +384,20 @@ Python, and the tests of that part run on the standard library alone. The forwar
 synthetic grids with tiles at known cells, stored in text order, and requires every tile with content to come back
 at its cell; stored in number order instead, the text-order check reports breaks. The `--json` file holds the cell
 of every placed tile, derived from your own copy of the game: keep it local.
+
+The shoreline mask matcher can use a dependency-free Rust library for overlap ranking and order-constrained
+alignment. Build it in the default Cargo target directory; the tool picks up the release library automatically.
+Without a usable library, or with `LEONIDA_WORLD_ATLAS_NATIVE=0`, the NumPy/Python matcher still runs. This does
+not change image decoding, mask extraction, the other grid matchers, or the report format.
+
+```powershell
+cargo build --release --locked --offline --manifest-path tools/world_atlas_native/Cargo.toml
+python -I tests/test_world_grid_atlas_native.py
+```
+
+Set `LEONIDA_WORLD_ATLAS_BENCHMARK=1` to include a synthetic benchmark. It times the matching kernel (including
+Python-to-Rust packing) separately from the full mask report, where finding the background and extracting the
+masks can dominate runtime. Neither test reads game files.
 
 ### `TextureGridInfo`
 

@@ -113,6 +113,11 @@ ReturnClass classify(const std::string& dll, const std::string& name) {
         if (name == "GameInputCreate") return ReturnClass::HResult;
     } else if (dll == "dstorage.dll" || dll == "dstorage_xs.dll") {
         if (name == "DStorageGetFactory") return ReturnClass::HResult;
+    } else if (dll == "acphal.dll") {
+        if (name == "AcpHalAllocateShapeContexts" || name == "AcpHalCreate" ||
+            name == "AcpHalReleaseShapeContexts" || name == "ApuAlloc" ||
+            name == "ApuCreateHeap")
+            return ReturnClass::HResult;
     } else if (dll == "xgameruntime.dll") {
         if (name == "XGameRuntimeInitialize" || name == "XGameEventWrite") return ReturnClass::HResult;
         for (const char* n : kNotHResult)
@@ -435,6 +440,27 @@ void* load_bundled_module(const std::string& dll_lower, uint32_t flags, bool& ha
     return nullptr;
 }
 
+void* find_loaded_bundled_module_w(const std::wstring& basename) {
+    for (const auto& entry : snapshot_bundled_loaders())
+        if (entry.ops->find_loaded_w)
+            if (void* h = entry.ops->find_loaded_w(entry.ctx, basename)) return h;
+    return nullptr;
+}
+
+void* load_bundled_module_w(const std::wstring& basename, uint32_t flags, bool& handled) {
+    handled = false;
+    for (const auto& entry : snapshot_bundled_loaders()) {
+        if (!entry.ops->load_bundled_w) continue;
+        bool loader_handled = false;
+        void* h = entry.ops->load_bundled_w(entry.ctx, basename, flags, loader_handled);
+        if (loader_handled) {
+            handled = true;
+            return h;
+        }
+    }
+    return nullptr;
+}
+
 void* get_bundled_proc_address(void* module, const std::string& sym, bool& owns_handle) {
     owns_handle = false;
     for (const auto& entry : snapshot_bundled_loaders()) {
@@ -464,8 +490,8 @@ void* find(const std::string& dll_lower, const std::string& name) {
 }
 
 bool owns_dll(const std::string& dll_lower) {
-    static const char* const host[] = {"kernel32.dll", "kernelbase.dll", "msvcrt.dll", "ucrtbase.dll", "ucrtbased.dll",
-                                       "vulkan-1.dll", "ntdll.dll", "user32.dll"};
+    static const char* const host[] = {"kernel32.dll", "kernelbase.dll", "advapi32.dll", "msvcrt.dll", "ucrtbase.dll",
+                                       "ucrtbased.dll", "vulkan-1.dll", "ntdll.dll", "user32.dll"};
     if (starts_with(dll_lower, "api-ms-") || starts_with(dll_lower, "ext-ms-")) return false;
     for (const char* h : host)
         if (dll_lower == h) return false;

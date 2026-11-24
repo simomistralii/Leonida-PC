@@ -8,10 +8,13 @@ method, scope and caveats. No game data is included.
 
 | Document | What it covers |
 |---|---|
+| [HANDOFF.md](HANDOFF.md) | This fork's state on 2026-11-24: progress, remaining work, the DirectStorage plan and Windows commands. |
 | [design.md](design.md) | Overall project design, asset status, translator contract and open blockers. |
 | [related_projects.md](related_projects.md) | Prior art we may read and the licence boundaries on it. |
+| [related_projects_gaps.md](related_projects_gaps.md) | What VIctory records the title asks of the console APIs, against this runtime: the five likeliest next stops of the retail boot, then the other differences. |
 | [rpf.md](rpf.md) | RPF9 archive layout, the carve tools and the unreadable encrypted TOC. |
 | [testing.md](testing.md) | Running the GPU tests on your own GPU: setup per OS, wave64 emulation, running without a GPU on Mesa llvmpipe, and known problems. |
+| [modding.md](modding.md) | The mod format: `mods/<folder>/mod.json`, checked and loaded in name order by `gta6rt`; a swap takes effect once the game's archetype lookup is hooked (needs the executable, RT-5). A mod names game models and holds no game data. |
 | [progress_dashboard.md](progress_dashboard.md) | A local page of what works, what changed since it last passed and what blocks next: unit and runtime tests, the translator contract by confirmation method, measured imports, corpus counts and, with `--github`, CI and the D3D- items (`tools/progress_dashboard.py`). |
 
 ## Archives and assets
@@ -19,8 +22,10 @@ method, scope and caveats. No game data is included.
 | Document | Measured content |
 |---|---|
 | [models.md](models.md) | 382,781 models (0 decode failures) at the `e293917` pin, including 159,511 drawable-dictionary children; 55,417 fragments, 89,887 bone-bound and 2,636,248,990 triangles over all ten archives (`levels.rpf` from a full export); the re-count table is in models.md. |
+| [strand_grooms.md](strand_grooms.md) | GPU strand grooms (`smh`): hair, beards, brows and fur are groom LOD resources consumed by the `smh_*` compute passes, not triangle drawables (each is a one-triangle stub); 5,751 assets / 20,046 LOD resources, 0 decode errors, 902,456,856 GPU buffer bytes and 112,491,621 strands; the measured resource layout, the `smh_gen_1` Class 0 strand scattering RNG, the barycentric strand interpolation and split-chain rejoin, and a GLB export (`tools/smh_groom.py`). |
 | [character_models.md](character_models.md) | `packs.rpf` character parts at `e293917`: 26,585 rows / 11,335 unique names, 2,865 fragments (all a flat 25-vertex / 32-triangle 5x5 bounds grid at z=0), Lucia's 22 named records and the decoded 13-part export, the `player_story000_00` drawable set, slot-name token counts, texture coverage (184/215), and what is not decoded (fragment children, ped variation, hair, bind pose). |
 | [character_skeleton.md](character_skeleton.md) | Character `.#ft` fragments: the 597-name shared skeleton table (596 `joaat32` hashes), the 597-record instance tree with 580 measured parents, the model-side bone-hash mapping, and the measured vertex joint-index/skin-weight layouts (`tools/skin_streams.py`); the default bone transforms compose to the stored inverse bind matrices, and `tools/anim_glb.py` exports a skinned part with clips as an animated GLB. |
+| [ped_catalogues.md](ped_catalogues.md) | Ped and wardrobe appearance catalogues: one schema rooted at struct `0x8dcb4cf5`, in both framings (`0DRP` v122 resources in `packs.rpf` and the standalone `PSIN` player/wardrobe catalogue), with their 1-based block table and 64-bit pointer encoding (`block = ptr & 0xfffff`, `offset = ptr >> 20`); 2,716 catalogues and 632,778 presets (612,950 in `0DRP`, 19,828 in the `PSIN`), 345,780 presets with a parent (chain depth 3, 0 cycles), 896,115 `0x37e52277` states resolved, 0 parse errors (`tools/ped_catalogues.py`). |
 | [resource_names.md](resource_names.md) | RPF9 named-resource index: bounded-inflate lookup for `name.#dr`/`#ft`/`#dd` without the TOC. |
 | [sgd5_render_states.md](sgd5_render_states.md) | The three effect-local render-state indices in an SGD5 pass, checked across all 28,798 passes. |
 | [textures.md](textures.md) | 357,115 TTPF descriptors across 57 pools: `rpf9dump` (`e293917`) decodes 354,991 strict-clean (99.41%) directly including BCPack BC1/BC3/BC4/BC5; `tools/bcpack.py` decodes all six BCPack modes (BC1–BC7). |
@@ -59,8 +64,11 @@ method, scope and caveats. No game data is included.
 | Document | Measured content |
 |---|---|
 | [d3d12_vulkan.md](d3d12_vulkan.md) | Xbox D3D12 to Vulkan plan and status; device proxy, queues, command lists, barriers, copies. |
+| [mobile.md](mobile.md) | arm64/mobile path: the x86-64 → arm64 static-recompiler groundwork (`tools/x64_recomp.py`), the `.pdata` coverage census (`tools/recomp_census.py`), and what still blocks iOS. |
 | [boot.md](boot.md) | The first real boot: the `gta6rt --trace`/`--trace-d3d12` runbook, the startup + D3D12 trace summary (`tools/boot_trace.py`), the triage order and the Q1–Q22 checklist. |
 | [retail_boot_chain.md](retail_boot_chain.md) | How far `gta6rt --run` gets with the retail executable: the stops in order and what clears each, the physical-page export shapes, and device slots 26, 48 and 73. |
+| [retail_boot_intel_host.md](retail_boot_intel_host.md) | The retail boot on an Intel host with 16 GB: which stops of the two boot pages hold there with #7111, the commit-limit stop at the 6.1 GiB physical-page request that #7556 clears, the frame loop to the 900 s timeout with stub pipelines, and what the layer refuses at that depth (the console mesh-shader subobject among it). |
+| [modding.md](modding.md) | The mod format: a `mods/<folder>/mod.json` next to `gta6rt.exe` or under `--mods DIR`, swapping a named (or `joaat`) archetype for another; the `tools/leonida_mods.py` manager (`Mods.bat` on Windows); load order, the start-up log, and the fact that a swap waits for the executable's archetype lookup address (RT-5). |
 | [descriptor_lookup_apple.md](descriptor_lookup_apple.md) | M3 Max GPU timings for texture and sampler descriptor lookups at 1k, 10k and 100k live entries. |
 | [descriptor_lookup_ada.md](descriptor_lookup_ada.md) | RTX 4070 SUPER (Ada, Windows) timings for the same lookups in VRAM, host-visible and ReBAR memory. |
 | [descriptor_lookup_intel.md](descriptor_lookup_intel.md) | Intel UHD Graphics 770 (Xe-LP, Windows, driver 101.6129) timings for the same lookups at 1k–100k live entries; both memory placements within 0.6% of each other. |
@@ -84,7 +92,7 @@ method, scope and caveats. No game data is included.
 | [fspx.md](fspx.md) | `FSPX`, the FidelityFX DLL's native compute programs (its shaders' `ACCC` part): directory as the DLL reads it, kind-0 dispatch state, the hash prologue, `gfx1030` for its `v_dot4` code; 13 of 29 translate with `tools/fspx_unpack.py`. |
 | [first_light.md](first_light.md) | Draw an exported model's UVs or sample a supplied texture with `--dds`. The UV draw covered 78.1% on an RTX 2060 SUPER (4,213 vertices, 7,968 triangles). The first draw of a real game model with its own translated VS/PS on a GPU: 4,213 vertices / 7,968 triangles, 78.1% coverage on an RTX 2060 SUPER; `tools/first_light.py`, the `vk_harness` mesh mode, and the same draw through the D3D12 layer (`d3d12_first_light`). |
 | [material_pass_replay.md](material_pass_replay.md) | How one authored mesh writes packed draw indices, how six compute programs read the layout, and which sibling passes read the surface material. |
-| [embedded_shaders.md](embedded_shaders.md) | DXBC containers embedded in the package's DLLs: 52 in `XboxBvhBuilder.dll` (console `FSSM` via the `XDAT`/`XBCH` record; 51/52 pass `spirv-val` today) and 29 `ACCC`/`FSPX` in the FidelityFX upscaler; the scan/extract tool and the one rule still missing. |
+| [embedded_shaders.md](embedded_shaders.md) | DXBC containers embedded in the package's DLLs: 52 in `XboxBvhBuilder.dll` (console `FSSM` via the `XDAT`/`XBCH` record; 51/52 pass `spirv-val` today) and 29 `ACCC`/`FSPX` in the FidelityFX upscaler; the scan/extract tool, the one rule still missing, and the build step and run-time lookup of the builder's programs (`<shaders>/bvh/index.json`). |
 | [shader_library.md](shader_library.md) | The pipeline library in `shaders.rpf`'s zlib part, which the carve doesn't read: 25,471 graphics and 2,693 compute pipeline records (stage slots: PS, VS, MS) and 21,522 native programs, 21,509 of them pipeline builds of 6,522 carved shaders (named by their `HASH` digest); `tools/shader_library.py`. |
 | [shader_inputs.md](shader_inputs.md) | Inputs that specific game shaders need to be right, as a first check for a black frame or a device-lost: the studio-shot lighting shader's 512-byte light records, eight-light loop, plane count at +0x4C (#1892 said +0x40), profile table and shadow-strength byte; the ACES LUT bakes' two tone-curve splines (reference order at +0x00, points-first at +0x70 behind the +0x118 switch), the +0x13C luminance mode and the quasi-log addressing (#1896); the sky LUT order and the +0xD0 dword that picks RGB9E5 or float outputs (#1897); the shared atmosphere constant buffer, its table slots (+0x220, +0xC60) and the layout with the two scale-height dwords no pass consumes (#3990). |
 | [sandbox.md](sandbox.md) | Placed world props through one translated VS/PS pair with a real camera, TTPF albedo and the game's sampler: 442 of 446 draws textured; fly/walk/drive window, `tools/sandbox.py --check`. |
@@ -94,4 +102,4 @@ method, scope and caveats. No game data is included.
 
 ## Other languages
 
-Community quickstarts (stable onboarding text only; English docs remain authoritative): [i18n/README.md](i18n/README.md) (`fr`, `pt-BR`, `zh-CN`, `pl-PL`, `tr`, `ru`, `ja`, `es`, `it`, `de`, `ar`).
+Community quickstarts (stable onboarding text only; English docs remain authoritative): [i18n/README.md](i18n/README.md) (`fr`, `pt-BR`, `pt-PT`, `zh-CN`, `pl-PL`, `tr`, `ru`, `ja`, `es`, `it`, `de`, `ar`).

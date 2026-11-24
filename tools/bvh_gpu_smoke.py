@@ -30,6 +30,7 @@ Nothing from the package is written outside --work. The report holds module name
 """
 import argparse
 import json
+import math
 import os
 import struct
 import subprocess
@@ -262,13 +263,16 @@ def main(argv=None):
                     help="the device's maxComputeSharedMemorySize, passed to rdna2spirv.py (default 32768)")
     ap.add_argument("--table-qword", type=lambda v: int(v, 0), default=0x2000,
                     help="the value of every root-table word (default 0x2000: past the table, inside the heap)")
-    ap.add_argument("--heap-bytes", type=int, default=1 << 20, help="initial heap image size (default 1 MiB)")
+    # 16 MiB keeps BuildKDOP (~2 MiB) and RadixCount (~8 MiB at default --table-qword 0x2000) inside the heap.
+    ap.add_argument("--heap-bytes", type=int, default=16 << 20, help="initial heap image size (default 16 MiB)")
     ap.add_argument("--timeout", type=float, default=60.0, help="seconds per dispatch")
     ap.add_argument("--no-validation", action="store_true", help="don't enable VK_LAYER_KHRONOS_validation")
     ap.add_argument("--include-rehydration", action="store_true", help="also run the TEST-376 programs")
     ap.add_argument("--checked", action="store_true", help="also run CHECKED's programs and compare their output")
     ap.add_argument("--json", help="write the per-program results here")
     a = ap.parse_args(argv)
+    if not math.isfinite(a.timeout) or a.timeout <= 0:
+        ap.error("--timeout must be finite and greater than zero")
     if a.heap_bytes % 4 or a.heap_bytes < TABLE_QWORDS * 8:
         ap.error(f"--heap-bytes must be a multiple of 4 and at least {TABLE_QWORDS * 8}")
     if not 0 <= a.table_qword < 1 << 64:

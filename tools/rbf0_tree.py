@@ -739,10 +739,10 @@ def main(argv=None):
     except SelectionError as error:
         ap.error(str(error))
     except RecursionError:
-        print(f"{path!r}: tree exceeds the export depth limit", file=sys.stderr)
+        print(f"{path}: tree exceeds the export depth limit", file=sys.stderr)
         return 1
     except OSError as error:
-        print(f"{path!r}: {error.strerror or error}", file=sys.stderr)
+        print(f"{path}: {error.strerror or error}", file=sys.stderr)
         return 1
     if not args.quiet:
         print(f"{summary['resources']} resources: {summary['ok']} ok, {summary['bad']} bad, "

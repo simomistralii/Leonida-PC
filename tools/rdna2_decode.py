@@ -141,7 +141,7 @@ _SOPP_BRANCHES = frozenset({
 
 # SOPP instructions that take no operand at all.
 _SOPP_NO_OPERAND = frozenset({
-    "s_endpgm", "s_barrier", "s_icache_inv", "s_ttracedata", "s_ttracedata_imm",
+    "s_endpgm", "s_barrier", "s_icache_inv", "s_ttracedata",
     "s_wakeup", "s_endpgm_saved", "s_code_end", "s_endpgm_ordered_ps_done",
 })
 
@@ -363,11 +363,12 @@ def _mimg_addr_count(name: str, dim: int, a16: bool) -> int:
     if name.startswith("image_atomic_"):
         return (base + 1) // 2 if a16 else base
     # Separate 32-bit address components (offset, bias, z-compare, derivatives) from a16-packable coords/lod/clamp.
-    base_name = name[:-3] if name.endswith("_cl") else name
-    has_cl = name.endswith("_cl")
-    fixed32 = 0
-    if base_name.endswith("_o") or "_o_" in base_name:
-        fixed32 += 1
+    has_o = name.endswith("_o") or "_o_" in name
+    base_name = name[:-2] if name.endswith("_o") else name
+    has_cl = base_name.endswith("_cl")
+    if has_cl:
+        base_name = base_name[:-3]
+    fixed32 = 1 if has_o else 0
     if "_b" in base_name and not base_name.startswith("image_bvh"):
         fixed32 += 1
     if "_c" in base_name and not base_name.startswith(("image_atomic", "image_get")):
@@ -984,6 +985,9 @@ def _decode_one(code: bytes, pc: int, wave32: bool, mcpu: str) -> tuple[dict | N
             bits = [(op_sel >> i) & 1 for i in range(nsrc)]
             if nbits > nsrc:
                 bits.append((op_sel >> 3) & 1)
+            if name in ("v_permlane16_b32", "v_permlanex16_b32") and not op_sel & 0xC:
+                # These two print only op_sel:[FI, BOUND_CTRL], as llvm-mc does (SHADER-74).
+                bits = bits[:2]
             mods.append(f"op_sel:[{','.join(str(b) for b in bits)}]")
         if clamp:
             mods.append("clamp")
@@ -1050,17 +1054,20 @@ def _decode_one(code: bytes, pc: int, wave32: bool, mcpu: str) -> tuple[dict | N
         name, spec = tbl[opc]
         is_atomic = "_atomic_" in name
         has_saddr = seg in (1, 2)
-        saddr_off = saddr in (0x7D, 0x7F)  # GFX10 null (125) or legacy 127 => off (64-bit vaddr)
+        saddr_off = saddr in (0x7D, 0x7F)  # GFX10 null (125) or ST-mode/legacy 127 => off
         args = []
         for fn, nr, _ in spec:
             w = _width(nr, wave32)
             if fn == "VDST":
-                if is_atomic and not glc:
+                if (is_atomic and not glc) or (lds and seg in (1, 2)):
                     continue
                 args.append(_vreg(vdst, w))
             elif fn == "ADDR":
-                aw = 2 if (seg == 0 or (seg == 2 and saddr_off)) else 1
-                args.append(_vreg(addr, aw))
+                if seg == 1 and saddr != 0x7D:
+                    args.append({"k": "special", "t": "off", "neg": False, "abs": False})
+                else:
+                    aw = 2 if (seg == 0 or (seg == 2 and saddr_off)) else 1
+                    args.append(_vreg(addr, aw))
             elif fn == "DATA":
                 args.append(_vreg(data, w))
             elif fn == "SADDR" and has_saddr:
@@ -1322,7 +1329,10 @@ def _decode_one(code: bytes, pc: int, wave32: bool, mcpu: str) -> tuple[dict | N
             tname = f"param{tgt - 32}"
         else:
             tname = f"tgt{tgt}"
-        args = [{"k": "target", "t": tname}]
+        # llvm-mc text, and so shader_ir.parse_line, calls the null export target a special operand like every other 
+        # export target is a target; rdna2spirv reads both kinds at an export.
+        args = [{"k": "special", "t": tname, "neg": False, "abs": False} if tname == "null"
+                else {"k": "target", "t": tname}]
         if compr:
             # Compressed export: en bit 0/1 enables vsrc0 (printed twice), bit 2/3 enables vsrc1 (printed twice).
             for pair in (0, 1):
@@ -1348,7 +1358,7 @@ def _decode_one(code: bytes, pc: int, wave32: bool, mcpu: str) -> tuple[dict | N
     return None, 4
 
 
-def _format_operand(a: dict) -> str:
+def _format_operand(a: dict, hex_imm: bool = False) -> str:
     k = a["k"]
     if k in ("vgpr", "sgpr"):
         p = "v" if k == "vgpr" else "s"
@@ -1364,7 +1374,7 @@ def _format_operand(a: dict) -> str:
         s = a["t"]
     elif k == "imm":
         v = a["v"]
-        s = f"0x{v:x}" if v >= 100 else str(v)
+        s = f"0x{v:x}" if hex_imm or v >= 100 else str(v)
     elif k == "fimm":
         v = a["v"]
         s = next((txt for code, txt in _INLINE_FLOAT_STR.items() if _INLINE_FLOAT[code] == v), repr(v))
@@ -1388,10 +1398,12 @@ def format_insn(ins: dict) -> str:
     op = ins["op"]
     args = ins["args"]
     mods = ins["mods"]
+    hex_imm = op == "s_ttracedata_imm"
     if op == "exp" and args:
-        head = f"{op} {_format_operand(args[0])} " + ", ".join(_format_operand(x) for x in args[1:])
+        head = f"{op} {_format_operand(args[0], hex_imm)} " + ", ".join(
+            _format_operand(x, hex_imm) for x in args[1:])
     elif args:
-        head = f"{op} " + ", ".join(_format_operand(x) for x in args)
+        head = f"{op} " + ", ".join(_format_operand(x, hex_imm) for x in args)
     else:
         head = op
     if mods:

@@ -342,8 +342,9 @@ int main() {
         {"driver returns 4 for BufferCount 2", 2, 4, 2, true},
         // The surface minimum exceeds the request (2): still expose the app's 2.
         {"minImageCount 3 for BufferCount 2", 2, 3, 3, true},
-        // Control: the app asks for more than minImageCount; native and exposed counts agree, no blit.
-        {"BufferCount 3 above minImageCount 2", 3, 3, 2, false},
+        // The app asks for more than minImageCount and the counts agree: still the ring, since Vulkan may acquire the
+        // native images out of order where DXGI cycles 0, 1, 2 (dxgi_host_answers_test).
+        {"BufferCount 3 above minImageCount 2", 3, 3, 2, true},
     };
     for (const Case& c : cases) {
         if (const int result = run_case(c.label, c.requested, c.native, c.minimum, c.offscreen)) return result;

@@ -8,6 +8,7 @@ the driver's instruction count with the original one (code growth) and its VGPRs
 code uses, and it flags scratch memory and spills: a register file that didn't fit in registers and went to memory,
 which is the expensive case (relative VGPR indexing, v_movrels/v_movreld, forces it). It prints a summary per stage and,
 with --details, one line per shader.
+Growth is unavailable when the original listing has no parsed instructions; its driver counters are still shown.
 
 Metrics are read only where the driver emits these exact RADV/ACO statistic names with a numeric value: Instructions,
 VGPRs, SGPRs, Scratch size, Spilled VGPRs, Spilled SGPRs, Subgroups per SIMD. No equivalence is claimed for other
@@ -23,6 +24,7 @@ import os
 import statistics
 import sys
 from collections import defaultdict
+from decimal import Decimal, InvalidOperation
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
 import shader_ir  # noqa: E402
@@ -80,17 +82,21 @@ def load_stats(path):
 
 def number(raw):
     """The exact int, or else the finite float, a raw value holds; None if it is missing or not such a number."""
-    if raw is None:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError, OverflowError):
         return None
-    for parse in (int, float):
+    if not math.isfinite(value):
+        return None
+    if value.is_integer():
+        # Beyond 2**53, converting the rounded float back to int can change the counter.
         try:
-            value = parse(raw)
-            if not math.isfinite(value):
-                return None
-            return int(value) if isinstance(value, float) and value.is_integer() else value
-        except (TypeError, ValueError, OverflowError):
-            pass
-    return None
+            exact = Decimal(raw)
+        except InvalidOperation:
+            return value
+        if exact == exact.to_integral_value():
+            return int(exact)
+    return value
 
 
 def shader_row(name, stage, st, src):
@@ -98,7 +104,7 @@ def shader_row(name, stage, st, src):
     r = {"name": name, "stage": stage, "orig": n_orig, "v_orig": v_orig}
     for key, stat in METRICS:
         r[key] = number(st.get(stat))
-    r["growth"] = None if r["aco"] is None else r["aco"] / max(n_orig, 1)
+    r["growth"] = r["aco"] / n_orig if n_orig and r["aco"] is not None else None
 
     spill_counts = [number(st.get(stat)) for stat in SPILLS]
     known_spills = [v for v in spill_counts if v is not None]

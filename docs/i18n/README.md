@@ -14,12 +14,13 @@ A language is added when a contributor volunteers to maintain it and keeps the s
 |---|---|---|---|
 | Français (`fr`) | [`fr/quickstart.md`](fr/quickstart.md) | `aa2988cc` | `@Urban225` |
 | Português (Brasil) (`pt-BR`) | [`pt-BR/quickstart.md`](pt-BR/quickstart.md) | `f847748c` | `@Andretuta` |
+| Português (Portugal) (`pt-PT`) | [`pt-PT/quickstart.md`](pt-PT/quickstart.md) | `867d922f` | `@enzoduarte1` |
 | 简体中文 (`zh-CN`) | [`zh-CN/quickstart.md`](zh-CN/quickstart.md) | `aa2988cc` | `@liang-kai-shui` |
 | Polski (Polish) (`pl-PL`) | [`pl-PL/quickstart.md`](pl-PL/quickstart.md) | `f847748c` | `@Dom-in, @t91a60` |
 | Türkçe (`tr`) | [`tr/quickstart.md`](tr/quickstart.md) | `561b65a` | `@emirhan-karaca` |
 | Русский (`ru`) | [`ru/quickstart.md`](ru/quickstart.md) | `aa2988cc` | `@DmitryBykov-ISPO` |
 | 日本語 (`ja`) | [`ja/quickstart.md`](ja/quickstart.md) | `003e781` | `@bingll123` |
-| Español (`es`) | [`es/quickstart.md`](es/quickstart.md) | `aa2988cc` | `@NolanCotter` |
+| Español (`es`) | [`es/quickstart.md`](es/quickstart.md) | `561b65a8` | `@NolanCotter` |
 | Deutsch (`de`) | [`de/quickstart.md`](de/quickstart.md) | `aa2988cc` | `@zGLados` |
 | Italiano (`it`) | [`it/quickstart.md`](it/quickstart.md) | `49475796` | `@MeNoSkills` |
 | العربية (`ar`) | [`ar/quickstart.md`](ar/quickstart.md) | `561b65a` | `@Mohamed-Leo` |

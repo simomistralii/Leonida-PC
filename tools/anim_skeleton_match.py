@@ -14,6 +14,7 @@ import mmap
 import os
 import re
 import sys
+import tempfile
 import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -21,6 +22,8 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 import anim_index  # noqa: E402
+from file_mode import published_mode  # noqa: E402
+from replace_retry import replace as replace_retry  # noqa: E402
 from report_paths import same_report_path  # noqa: E402
 
 SKEL_RE = re.compile(rb"SKEL_[A-Za-z0-9_]+")
@@ -112,6 +115,42 @@ def _check_output(ap, out_path: str, inputs: tuple[str, ...]) -> None:
         ap.error(f"--out parent directory does not exist: {parent}")
 
 
+def _write_json_report(path: str, text: str) -> None:
+    """Publish complete JSON, or leave the previous report intact on replace failure."""
+    destination = os.path.abspath(path)
+    parent = os.path.dirname(destination)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    try:
+        mode = os.stat(destination).st_mode
+    except FileNotFoundError:
+        mode = None
+    except OSError:
+        # Non-regular destinations (pipes/devices) keep a direct write.
+        with open(destination, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text if text.endswith("\n") else text + "\n")
+        return
+    if mode is not None:
+        # Retain the direct writer's permission check without truncating the report.
+        os.close(os.open(destination, os.O_WRONLY))
+
+    staged = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", newline="\n", delete=False,
+        dir=parent, prefix=".anim_skeleton_match-", suffix=".tmp",
+    )
+    try:
+        with staged:
+            staged.write(text if text.endswith("\n") else text + "\n")
+        if os.name != "nt":
+            os.chmod(staged.name, published_mode(destination))
+        replace_retry(staged.name, destination)
+    finally:
+        try:
+            os.unlink(staged.name)
+        except FileNotFoundError:
+            pass
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Match anim.rpf SKEL_* bone lists against packs.rpf skeletons (ASSET-231).")
     ap.add_argument("packs", help="Path to packs.rpf")
@@ -135,8 +174,7 @@ def main(argv=None):
     print(text)
     if a.out:
         try:
-            with open(a.out, "w", encoding="utf-8", newline="\n") as fh:
-                fh.write(text + "\n")
+            _write_json_report(a.out, text)
         except OSError as exc:
             ap.error(f"cannot write --out ({a.out}): {exc}")
     return 0

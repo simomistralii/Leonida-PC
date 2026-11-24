@@ -486,10 +486,10 @@ def main(argv=None) -> int:
         error(f"source not found: {a.src}")
         return 2
 
-    if a.out and os.path.isfile(a.out):
+    out = os.path.abspath(a.out or default_out)
+    if a.out and os.path.isfile(out):
         ap.error(f"{a.out} is a file, not a folder")
 
-    out = os.path.abspath(a.out or default_out)
     print(f"{len(items)} Ogg Opus file(s) under {src} -> {out}")
     if not items:
         print(f"Nothing to do: no Ogg Opus files found"

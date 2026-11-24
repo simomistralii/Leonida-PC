@@ -107,6 +107,21 @@ class Rdna2DecodeUnitTests(unittest.TestCase):
         self.assertIn("s_cbranch_scc1 -4", text)
         self.assertIn("s_branch -20", text)
 
+    def test_s_ttracedata_imm_keeps_simm16(self):
+        for word, value in ((0xBFA80000, 0x0), (0xBFA80001, 0x1),
+                            (0xBFA80063, 0x63), (0xBFA80064, 0x64),
+                            (0xBFA81234, 0x1234), (0xBFA8FFFF, 0xFFFF)):
+            with self.subTest(word=hex(word)):
+                code = words(word)
+                info = rdna2_decode.decode_bytes(code)
+                self.assertEqual(info["invalid"], 0)
+                self.assertEqual(info["insns"][0]["op"], "s_ttracedata_imm")
+                self.assertEqual(info["insns"][0]["args"],
+                                 [{"k": "imm", "v": value}])
+                text, invalid = rdna2_decode.disasm_bytes(code)
+                self.assertEqual(invalid, 0)
+                self.assertIn(f"s_ttracedata_imm 0x{value:x}", text)
+
     def test_disasm_formats_each_instruction_before_decoding_the_next(self):
         code = words(0xBF800000, 0xBF810000)  # s_nop 0; s_endpgm
         events = []
@@ -282,6 +297,57 @@ class Rdna2DecodeUnitTests(unittest.TestCase):
         out = si.run_fragment(spv)["%out_mrt0"]
         self.assertEqual(list(out), [0x3F800000, 0x40400000, 0x3F800000, 0x40400000])
 
+    def test_flat_scratch_vaddr_off_and_lds_loads(self):
+        # LLVM GFX10/GFX10.30 disassembler vectors (gfx10_flat.txt / gfx1030_new.txt):
+        # - SCRATCH (seg=1) only uses VGPR vaddr in SV mode (saddr == 0x7d); SS mode (SGPR saddr) and GFX10.30
+        #   ST mode (saddr == 0x7f) emit `off` for vaddr.
+        # - Direct-to-LDS global/scratch loads (lds=1) omit VDST.
+        for hexcode, asm in (
+            # SCRATCH SS mode (SGPR saddr -> vaddr is off)
+            ("004030dc00000101", "scratch_load_dword v1, off, s1"),
+            ("204030dc00000101", "scratch_load_dword v1, off, s1 offset:32"),
+            ("004030dc00007e01", "scratch_load_dword v1, off, exec_lo"),
+            ("004030dc00007c01", "scratch_load_dword v1, off, m0"),
+            ("004070dc00020100", "scratch_store_dword off, v2, s1"),
+            ("0c4070dc00020100", "scratch_store_dword off, v2, s1 offset:12"),
+            ("004064dc00020100", "scratch_store_byte_d16_hi off, v2, s1"),
+            # Non-zero don't-care addr bits in SS mode still decode as off.
+            ("004030dc05000101", "scratch_load_dword v1, off, s1"),
+            # SCRATCH ST mode (GFX10.30 saddr == 0x7f -> vaddr and saddr are both off)
+            ("004030dc00007f01", "scratch_load_dword v1, off, off"),
+            ("004038dc00007f01", "scratch_load_dwordx4 v[1:4], off, off"),
+            ("ff4770dc00027f00", "scratch_store_dword off, v2, off offset:2047"),
+            # SCRATCH SV mode control (saddr == 0x7d -> VGPR vaddr kept, including v0)
+            ("004030dc02007d01", "scratch_load_dword v1, v2, off"),
+            ("005030dc00007d05", "scratch_load_dword v5, v0, off dlc"),
+            ("ff4f70dc00027d00", "scratch_store_dword v0, v2, off offset:-1"),
+            # Direct-to-LDS global and scratch loads (lds=1 -> VDST omitted)
+            ("00a430dc02000400", "global_load_dword v2, s[4:5] offset:1024 lds"),
+            ("00a430dc02007d00", "global_load_dword v[2:3], off offset:1024 lds"),
+            ("00a424dc02000400", "global_load_sbyte v2, s[4:5] offset:1024 lds"),
+            ("006430dc02007d00", "scratch_load_dword v2, off offset:1024 lds"),
+            ("006430dc00000400", "scratch_load_dword off, s4 offset:1024 lds"),
+            ("006430dc00007f00", "scratch_load_dword off, off offset:1024 lds"),
+            # Non-zero don't-care vdst bits in lds mode still omit VDST.
+            ("00a430dc02000407", "global_load_dword v2, s[4:5] offset:1024 lds"),
+            # Non-LDS global load control (VDST kept)
+            ("008430dc02000401", "global_load_dword v1, v2, s[4:5] offset:1024"),
+        ):
+            with self.subTest(hexcode=hexcode, asm=asm):
+                raw = bytes.fromhex(hexcode)
+                dec = rdna2_decode.decode_bytes(raw)
+                self.assertEqual(dec["invalid"], 0)
+                (ins,) = dec["insns"]
+                expected = shader_ir.parse_line(asm)
+                for field in ("op", "args", "mods"):
+                    self.assertEqual(ins[field], expected[field])
+                # Formatted text also round-trips cleanly through shader_ir.parse_line.
+                text, bad = rdna2_decode.disasm_bytes(raw)
+                self.assertEqual(bad, 0)
+                reparsed = shader_ir.parse_line(text.strip())
+                for field in ("op", "args", "mods"):
+                    self.assertEqual(reparsed[field], expected[field])
+
     def test_parity_with_llvm_mc_on_shader_fixtures(self):
         mc = os.environ.get("LLVM_MC") or shutil.which("llvm-mc") or shutil.which("llvm-mc-18")
         if not mc:
@@ -359,6 +425,44 @@ class Rdna2DecodeUnitTests(unittest.TestCase):
                 self.assertEqual(sorted(di["mods"]), sorted(li["mods"]), f"{path}: {li['op']}")
                 checked += 1
         self.assertGreater(checked, 5000)
+
+    def test_permlane_op_sel_prints_fi_and_bound_ctrl_only(self):
+        # SHADER-74: llvm-mc prints v_permlane16_b32 / v_permlanex16_b32 as op_sel:[FI, BOUND_CTRL] (the asm in
+        # runtime/test/shaders/cs_w32_permlane_fi.asm), and nothing for FI = BC = 0. Bits 2 and 3 are not part of
+        # that pair: when set they stay in the output. Other VOP3 opcodes keep their full op_sel list.
+        def one(opc, op_sel):
+            w0 = 0xD4000000 | (opc << 16) | (op_sel << 11) | 2     # vdst = v2
+            w1 = 0x101 | (0x04 << 9) | (0x05 << 18)                 # v1, s4, s5
+            dec = rdna2_decode.decode_bytes(struct.pack("<II", w0, w1), wave32=True)
+            self.assertEqual(dec["invalid"], 0)
+            self.assertEqual(len(dec["insns"]), 1)
+            return dec["insns"][0]
+        for opc, name in ((0x377, "v_permlane16_b32"), (0x378, "v_permlanex16_b32")):
+            for op_sel, want in ((0, []), (1, ["op_sel:[1,0]"]), (2, ["op_sel:[0,1]"]), (3, ["op_sel:[1,1]"]),
+                                 (4, ["op_sel:[0,0,1,0]"]), (8, ["op_sel:[0,0,0,1]"]), (15, ["op_sel:[1,1,1,1]"])):
+                with self.subTest(op=name, op_sel=op_sel):
+                    ins = one(opc, op_sel)
+                    self.assertEqual(ins["op"], name)
+                    self.assertEqual(ins["mods"], want)
+        # v_mad_u32_u24 (0x143) has three sources: its op_sel list always has all four entries.
+        ins = one(0x143, 1)
+        self.assertEqual(ins["op"], "v_mad_u32_u24")
+        self.assertEqual(ins["mods"], ["op_sel:[1,0,0,0]"])
+
+    def test_export_null_target_is_a_special_operand_like_the_text_parser(self):
+        # `exp null off, off, off, off done vm` (ps_w64_a_discard.asm) and `exp mrt0 ...`: llvm-mc text parses the
+        # null target as a special operand and the others as targets, and the decoder must give the same kinds.
+        for tgt, want in ((9, {"k": "special", "t": "null", "neg": False, "abs": False}),
+                          (0, {"k": "target", "t": "mrt0"})):
+            with self.subTest(target=tgt):
+                w0 = 0xF8000000 | (tgt << 4) | (1 << 11) | (1 << 12)   # en = 0, done, vm
+                dec = rdna2_decode.decode_bytes(struct.pack("<II", w0, 0), wave32=False)
+                self.assertEqual(dec["invalid"], 0)
+                ins = dec["insns"][0]
+                self.assertEqual(ins["op"], "exp")
+                self.assertEqual(ins["args"][0], want)
+                self.assertEqual([a["t"] for a in ins["args"][1:]], ["off"] * 4)
+                self.assertEqual(sorted(ins["mods"]), ["done", "vm"])
 
     def test_sdwa_inline_constants_and_sgpr(self):
         # Exact encodings from runtime/test/shaders/ps_sdwa_f16_const.asm:

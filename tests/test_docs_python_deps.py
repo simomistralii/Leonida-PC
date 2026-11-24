@@ -24,7 +24,7 @@ def tracked_files():
     except (OSError, subprocess.CalledProcessError):
         found = []
         for root, dirs, files in os.walk(ROOT):
-            dirs[:] = [d for d in dirs if d not in (".git", "build", "__pycache__")]
+            dirs[:] = [d for d in dirs if d not in (".git", "build", "__pycache__", ".pytest_cache")]
             found += [os.path.relpath(os.path.join(root, f), ROOT).replace(os.sep, "/") for f in files]
         return found
 

@@ -405,7 +405,8 @@ class PortArgumentTest(unittest.TestCase):
         self.assertEqual(serve.port_number("65535"), 65535)
 
     def test_invalid_ports_are_refused_by_argparse(self):
-        for text in ("-1", "65536", "70000", "abc", ""):
+        for text in ("-1", "65536", "70000", "abc", "",
+                     "8_080", " 80", "+80", "٠", "٣٣"):
             with self.subTest(text=text):
                 with self.assertRaises(argparse.ArgumentTypeError):
                     serve.port_number(text)

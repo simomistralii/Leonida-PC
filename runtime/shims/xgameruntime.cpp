@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cctype>
+#include <cwchar>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -36,6 +37,8 @@
 
 #include "file_system.h"
 #include "shims.h"
+
+#pragma comment(lib, "advapi32.lib")   // the host registry, for every key but the console mode
 
 namespace rt::shims {
 bool xgameruntime_user_query(const GUID& class_id, REFIID interface_id, void** out, HRESULT* hr);
@@ -248,6 +251,11 @@ HRESULT STDMETHODCALLTYPE error_report(void*, HRESULT hr, const char* message) {
     if (XErrorCallback cb = g_error_callback.load()) cb(hr, message, g_error_context.load());
     return S_OK;
 }
+
+// The same function as a DLL export: xgameruntime.lib's XGameRuntimeInitialize looks up "XErrorReport" with
+// GetProcAddress next to QueryApiImpl, the InitializeApiImpl* and UninitializeApiImpl, and refuses to initialise when it
+// is missing (retail executable: the lookup at +0x55e2b7e, the null check at +0x55e2c08, then an int3 at +0x5a91c21).
+HRESULT WINAPI XErrorReport(HRESULT hr, const char* message) { return error_report(nullptr, hr, message); }
 void STDMETHODCALLTYPE error_set_callback(void*, XErrorCallback callback, void* context) {
     std::lock_guard<std::mutex> lock(g_error_mutex);
     g_error_context = context;
@@ -482,8 +490,7 @@ std::filesystem::path persistent_storage_dir() {
     return ec ? std::filesystem::path{} : dir;
 }
 
-std::string utf8_of(const std::filesystem::path& path) {
-    const std::wstring& wide = path.native();
+std::string utf8_of(const std::wstring& wide) {
     const int n = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr);
     if (n <= 0) return {};
     std::string utf8(static_cast<size_t>(n), '\0');
@@ -507,7 +514,7 @@ uint64_t folder_bytes(const std::filesystem::path& dir) {
 HRESULT STDMETHODCALLTYPE pls_get_path_size(void*, size_t* path_size) {
     if (!path_size) return E_POINTER;
     *path_size = 0;
-    const std::string path = utf8_of(persistent_storage_dir());
+    const std::string path = utf8_of(persistent_storage_dir().native());
     if (path.empty()) return HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
     *path_size = path.size() + 1;  // with the terminating NUL
     return S_OK;
@@ -516,7 +523,7 @@ HRESULT STDMETHODCALLTYPE pls_get_path_size(void*, size_t* path_size) {
 HRESULT STDMETHODCALLTYPE pls_get_path(void*, size_t path_size, char* path, size_t* path_used) {
     if (path_used) *path_used = 0;
     if (!path) return E_POINTER;
-    const std::string folder = utf8_of(persistent_storage_dir());
+    const std::string folder = utf8_of(persistent_storage_dir().native());
     if (folder.empty()) return HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
     if (path_size < folder.size() + 1) return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
     std::memcpy(path, folder.c_str(), folder.size() + 1);
@@ -623,7 +630,21 @@ HRESULT WINAPI QueryApiImpl(const GUID* class_id, REFIID interface_id, void** ou
     if (out) *out = nullptr;
     if (class_id && out) {
         HRESULT hr = S_OK;
-        if (query_served(*class_id, interface_id, out, &hr)) return hr;
+        if (query_served(*class_id, interface_id, out, &hr)) {
+            // A served class asked for an interface id it does not list (a newer IX*Impl version, say) is refused
+            // here, and the title's thunks then fail without a word: log it, as for a class that is not served.
+            if (hr == E_NOINTERFACE) {
+                char cls[40], iid[40];
+                print_guid(cls, class_id);
+                print_guid(iid, &interface_id);
+                static std::atomic<int> s_refused{0};
+                if (s_refused.fetch_add(1) < 256)   // one line per request, bounded
+                    std::fprintf(stderr,
+                                 "[rt] xgameruntime: QueryApiImpl(class %s, interface %s): class served, "
+                                 "interface not provided yet\n", cls, iid);
+            }
+            return hr;
+        }
     }
     char cls[40], iid[40];
     print_guid(cls, class_id);
@@ -679,6 +700,107 @@ uint32_t __stdcall XSystemGetDeviceType() {
     }
     return static_cast<uint32_t>(XSystemDeviceType::XboxScarlettAnaconda);
 }
+
+// ---- The console mode in the registry ----
+//
+// The title does not call XSystemGetDeviceType: the GDK code linked into it reads the REG_DWORD `ConsoleMode` under
+// HKLM\Software\Microsoft\Windows NT\CurrentVersion\OEM with RegOpenKeyW or RegOpenKeyExW and RegQueryValueExW, and
+// takes a missing key for a PC (VIctory's xsystem.rs). xcl records the same read, in the thunk of the game's
+// XCurl.dll, and the values: 0x64 Series X, 0x60 Series S, 0x68 a Series devkit, 0x40, 0x50 and 0x58 Xbox One S, X
+// and devkit (facts only; docs/related_projects_gaps.md). Left to the host the read finds no such value on a PC, so
+// the title would take itself for a PC build. These functions answer that one key from the device type above,
+// LEONIDA_DEVICE_TYPE included, and hand every other key to the host's registry unchanged.
+namespace console_registry {
+
+constexpr wchar_t kOemKey[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\OEM";
+constexpr wchar_t kConsoleMode[] = L"ConsoleMode";
+
+// ConsoleMode for an XSystemDeviceType; 0 where the key is missing: a PC, and the two types no value is known for
+// (Unknown, the original Xbox One), which therefore read as a PC too.
+uint32_t console_mode_for(uint32_t device_type) {
+    switch (static_cast<XSystemDeviceType>(device_type)) {
+    case XSystemDeviceType::XboxOneS: return 0x40;
+    case XSystemDeviceType::XboxOneX: return 0x50;
+    case XSystemDeviceType::XboxOneXDevkit: return 0x58;
+    case XSystemDeviceType::XboxScarlettLockhart: return 0x60;
+    case XSystemDeviceType::XboxScarlettAnaconda: return 0x64;
+    case XSystemDeviceType::XboxScarlettDevkit: return 0x68;
+    default: return 0;
+    }
+}
+
+// The handle of the answered key: the address of this byte. The host registry never hands out such a value (its
+// handles are small kernel handle values, its predefined keys 0x80000000 and up, sign-extended).
+const char g_oem_key = 0;
+HKEY oem_key() { return reinterpret_cast<HKEY>(const_cast<char*>(&g_oem_key)); }
+
+// HKLM plus the OEM path, in any case, with or without a leading backslash.
+bool names_oem_key(HKEY root, const wchar_t* sub) {
+    if (root != HKEY_LOCAL_MACHINE || !sub) return false;
+    while (*sub == L'\\') ++sub;
+    return _wcsicmp(sub, kOemKey) == 0;
+}
+
+// An open of the OEM key or of a path under the answered key. `handled` false: not ours, the host answers.
+LSTATUS open_ours(HKEY root, const wchar_t* sub, HKEY* out, bool& handled) {
+    handled = true;
+    if (root == oem_key()) {   // the key has no subkeys; an empty path opens the key itself again
+        if (sub && *sub) return ERROR_FILE_NOT_FOUND;
+        if (!out) return ERROR_INVALID_PARAMETER;
+        *out = oem_key();
+        return ERROR_SUCCESS;
+    }
+    if (names_oem_key(root, sub)) {
+        if (!out) return ERROR_INVALID_PARAMETER;
+        if (console_mode_for(XSystemGetDeviceType()) == 0) return ERROR_FILE_NOT_FOUND;
+        *out = oem_key();
+        return ERROR_SUCCESS;
+    }
+    handled = false;
+    return ERROR_SUCCESS;
+}
+
+// LSTATUS RegOpenKeyW(HKEY key, LPCWSTR subKey, PHKEY result)
+LSTATUS APIENTRY open_key_w(HKEY root, LPCWSTR sub, PHKEY out) {
+    bool handled = false;
+    const LSTATUS status = open_ours(root, sub, out, handled);
+    return handled ? status : RegOpenKeyW(root, sub, out);
+}
+
+// LSTATUS RegOpenKeyExW(HKEY key, LPCWSTR subKey, DWORD options, REGSAM desired, PHKEY result)
+LSTATUS APIENTRY open_key_ex_w(HKEY root, LPCWSTR sub, DWORD options, REGSAM desired, PHKEY out) {
+    bool handled = false;
+    const LSTATUS status = open_ours(root, sub, out, handled);
+    return handled ? status : RegOpenKeyExW(root, sub, options, desired, out);
+}
+
+// LSTATUS RegQueryValueExW(HKEY key, LPCWSTR valueName, LPDWORD reserved, LPDWORD type, LPBYTE data, LPDWORD size),
+// with the documented answers: the size alone without a buffer, ERROR_MORE_DATA and the size for a short buffer,
+// ERROR_INVALID_PARAMETER for a buffer without a size or a reserved word that is not null.
+LSTATUS APIENTRY query_value_ex_w(HKEY key, LPCWSTR name, LPDWORD reserved, LPDWORD type, LPBYTE data,
+                                  LPDWORD size) {
+    if (key != oem_key()) return RegQueryValueExW(key, name, reserved, type, data, size);
+    if (reserved || (data && !size)) return ERROR_INVALID_PARAMETER;
+    const uint32_t mode = console_mode_for(XSystemGetDeviceType());
+    if (!name || _wcsicmp(name, kConsoleMode) != 0 || mode == 0) return ERROR_FILE_NOT_FOUND;
+    if (type) *type = REG_DWORD;
+    if (!size) return ERROR_SUCCESS;
+    const DWORD room = *size;
+    *size = sizeof(DWORD);
+    if (!data) return ERROR_SUCCESS;
+    if (room < sizeof(DWORD)) return ERROR_MORE_DATA;
+    std::memcpy(data, &mode, sizeof(mode));
+    static std::atomic<bool> s_logged{false};
+    if (!s_logged.exchange(true))
+        std::fprintf(stderr, "[rt] registry: HKLM\\%ls value %ls read as 0x%02x\n", kOemKey, kConsoleMode,
+                     static_cast<unsigned>(mode));
+    return ERROR_SUCCESS;
+}
+
+// LSTATUS RegCloseKey(HKEY key)
+LSTATUS APIENTRY close_key(HKEY key) { return key == oem_key() ? ERROR_SUCCESS : RegCloseKey(key); }
+
+}  // namespace console_registry
 
 // HRESULT XSystemGetConsoleId(size_t consoleIdSize, char* consoleId, size_t* consoleIdUsed).
 // XSystemConsoleIdBytes is 39 (including the terminator). An offline PC has no console id, so this returns a
@@ -862,8 +984,7 @@ static std::unordered_map<uint64_t, std::string> s_active_mounts;
 // Resolves the installation path for a specific content package identifier.
 // GDK specifies that XPackageMount is only for content packages; mounting the main game returns E_ACCESSDENIED.
 // Returns HRESULT_FROM_WIN32(ERROR_NOT_FOUND) if the package identifier is not installed.
-static HRESULT resolve_package_path(const char* packageIdentifier, char* out, size_t out_cap) {
-    if (!packageIdentifier || !out || out_cap == 0) return E_INVALIDARG;
+static std::string resolve_package_path(const char* packageIdentifier, HRESULT& result) {
 
     // Check against configured process/game package identifier; mounting the game itself is denied
     char game_id[XPACKAGE_IDENTIFIER_MAX_LENGTH] = {};
@@ -871,14 +992,25 @@ static HRESULT resolve_package_path(const char* packageIdentifier, char* out, si
     const char* process_id = (n > 0 && n < sizeof(game_id)) ? game_id : kDefaultPackageIdentifier;
 
     if (std::strcmp(packageIdentifier, process_id) == 0) {
-        return E_ACCESSDENIED;
+        result = E_ACCESSDENIED;
+        return {};
     }
 
     // Check optional installed content packages mapping: "id1=path1;id2=path2"
-    char mapping[1024] = {};
-    const DWORD map_len = GetEnvironmentVariableA("LEONIDA_CONTENT_PACKAGES", mapping, sizeof(mapping));
-    if (map_len > 0 && map_len < sizeof(mapping)) {
-        char* token = mapping;
+    DWORD capacity = GetEnvironmentVariableW(L"LEONIDA_CONTENT_PACKAGES", nullptr, 0);
+    std::wstring wide_mapping;
+    DWORD map_len = 0;
+    while (capacity > 0) {
+        wide_mapping.resize(capacity);
+        map_len = GetEnvironmentVariableW(L"LEONIDA_CONTENT_PACKAGES", wide_mapping.data(), capacity);
+        if (map_len < capacity) break;
+        capacity = map_len;
+    }
+    if (map_len > 0 && map_len < capacity) {
+        // The GDK returns UTF-8 bytes even when Windows uses a legacy ANSI code page.
+        wide_mapping.resize(map_len);
+        std::string mapping = utf8_of(wide_mapping);
+        char* token = mapping.data();
         while (token && *token) {
             char* sep = std::strchr(token, ';');
             if (sep) *sep = '\0';
@@ -886,18 +1018,16 @@ static HRESULT resolve_package_path(const char* packageIdentifier, char* out, si
             if (eq) {
                 *eq = '\0';
                 if (std::strcmp(token, packageIdentifier) == 0) {
-                    const char* val = eq + 1;
-                    const size_t vlen = std::strlen(val);
-                    if (vlen + 1 > out_cap) return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
-                    std::memcpy(out, val, vlen + 1);
-                    return S_OK;
+                    result = S_OK;
+                    return eq + 1;
                 }
             }
             token = sep ? sep + 1 : nullptr;
         }
     }
 
-    return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+    result = HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+    return {};
 }
 
 // HRESULT XPackageMount(const char* packageIdentifier, XPackageMountHandle* mount)
@@ -907,14 +1037,14 @@ HRESULT __stdcall XPackageMount(const char* packageIdentifier, XPackageMountHand
     if (!packageIdentifier || !mount) return E_INVALIDARG;
     mount->handle = 0;
 
-    char buf[MAX_PATH] = {};
-    const HRESULT hr = resolve_package_path(packageIdentifier, buf, sizeof(buf));
+    HRESULT hr;
+    const std::string path = resolve_package_path(packageIdentifier, hr);
     if (FAILED(hr)) return hr;
 
     const uint64_t id = s_next_mount_id.fetch_add(1);
     {
         std::lock_guard lock(s_mount_mutex);
-        s_active_mounts[id] = buf;
+        s_active_mounts[id] = path;
     }
     mount->handle = id;
     return S_OK;
@@ -974,7 +1104,7 @@ bool __stdcall XPackageIsPackagedProcess() {
     return true;
 }
 
-// ---- XPackageImpl (asked for as IXPackageImpl3), offline ----
+// ---- XPackageImpl (asked for as IXPackageImpl3 or IXPackageImpl4), offline ----
 //
 // libHttpClient.GDK.dll asks QueryApiImpl for XPackageImpl with IXPackageImpl3's id through 30 thunks (slots 3-19,
 // 22, 24-27, 30, 32-34, 37-40), each in the argument shape of the method at that position of xgameruntime-docs'
@@ -988,7 +1118,11 @@ constexpr GUID kPackageClass = {0xaf406016, 0xe850, 0x4aa8, {0xa8, 0x8d, 0x2f, 0
 constexpr GUID kPackage1 = {0x3720de07, 0xe8e4, 0x44a3, {0xad, 0x32, 0xb3, 0x59, 0xe8, 0xad, 0xbe, 0x55}};
 constexpr GUID kPackage2 = {0xf92d8712, 0x2b27, 0x4d8a, {0xbf, 0x01, 0x11, 0xa6, 0xf8, 0xe3, 0xeb, 0x42}};
 constexpr GUID kPackage3 = {0xe2a4734b, 0x2f4a, 0x456d, {0xaa, 0x8f, 0xd0, 0x65, 0xe0, 0x4f, 0xb2, 0x09}};
-const GUID* const kPackageIids[] = {&kPackage1, &kPackage2, &kPackage3, nullptr};
+// IXPackageImpl4 : IXPackageImpl3, one method more at slot 41, XPackageGetPackageKind (tools/gdk_runtime_classes.json).
+// VIctory records the retail title asking QueryApiImpl for XPackageImpl with this id (docs/related_projects_gaps.md),
+// so without it every XPackage call the title makes was refused with E_NOINTERFACE.
+constexpr GUID kPackage4 = {0x0b9d556e, 0xab70, 0x43f4, {0xba, 0xa0, 0x99, 0x99, 0xac, 0x4c, 0xb0, 0x40}};
+const GUID* const kPackageIids[] = {&kPackage1, &kPackage2, &kPackage3, &kPackage4, nullptr};
 
 template <int Slot> HRESULT STDMETHODCALLTYPE package_not_implemented(void*) {
     static std::atomic<bool> s_logged{false};
@@ -1000,8 +1134,6 @@ HRESULT STDMETHODCALLTYPE pkg_identifier(void*, size_t size, char* buffer) {
     return XPackageGetCurrentProcessPackageIdentifier(size, buffer);
 }
 bool STDMETHODCALLTYPE pkg_is_packaged(void*) { return XPackageIsPackagedProcess(); }
-// The locales the package declares: <Resources><Resource Language="xx-YY"/> in MicrosoftGame.Config, read from
-// the game folder (LEONIDA_GAME_DIR, else --game-dir). Empty when there is no config or it declares none.
 // The package's MicrosoftGame.Config as text, from the game folder (LEONIDA_GAME_DIR, else --game-dir); empty when
 // there is no folder or no config. Wide on purpose: a game folder named outside the ANSI code page must reach the file
 // intact.
@@ -1015,19 +1147,47 @@ std::string package_config() {
     return std::string{std::istreambuf_iterator<char>(f), {}};
 }
 
+// The locales the package declares: <Resources><Resource Language="xx-YY"/> in MicrosoftGame.Config, read from
+// the game folder (LEONIDA_GAME_DIR, else --game-dir). Empty when there is no config or it declares none.
+// A <Resource> inside an XML comment is not declared (Microsoft's config template ships commented-out entries), XML
+// allows whitespace around an attribute's '=', and only an attribute named exactly Language on an element named
+// exactly Resource counts.
 std::vector<std::string> package_locales() {
     std::vector<std::string> out;
-    const std::string xml = package_config();
-    if (xml.empty()) return out;
+    const std::string raw = package_config();
+    if (raw.empty()) return out;
+    std::string xml;   // the config without its comments; an unterminated comment runs to the end of the file
+    xml.reserve(raw.size());
+    for (size_t at = 0; at < raw.size();) {
+        const size_t open = raw.find("<!--", at);
+        xml.append(raw, at, open == std::string::npos ? std::string::npos : open - at);
+        if (open == std::string::npos) break;
+        const size_t close = raw.find("-->", open + 4);
+        if (close == std::string::npos) break;
+        at = close + 3;
+    }
+    const auto space = [](char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
+    const auto skip_space = [&](size_t p) {
+        while (p < xml.size() && space(xml[p])) ++p;
+        return p;
+    };
     for (size_t at = 0; (at = xml.find("<Resource", at)) != std::string::npos; ++at) {
-        if (xml.compare(at, 10, "<Resources") == 0) continue;
-        const size_t end = xml.find('>', at);
-        const size_t key = xml.find("Language=", at);
-        if (end == std::string::npos || key == std::string::npos || key + 10 > end) continue;
-        const char quote = xml[key + 9];
-        const size_t close = xml.find(quote, key + 10);
-        if ((quote == '"' || quote == '\'') && close != std::string::npos && close < end)
-            out.push_back(xml.substr(key + 10, close - key - 10));
+        size_t p = at + 9;
+        if (p < xml.size() && !space(xml[p]) && xml[p] != '/' && xml[p] != '>') continue;   // <Resources>, ...
+        // The attributes, name = "value" or name = 'value', up to the tag's end; a malformed one ends the tag.
+        for (p = skip_space(p); p < xml.size() && xml[p] != '>' && xml[p] != '/'; p = skip_space(p)) {
+            const size_t name = p;
+            while (p < xml.size() && !space(xml[p]) && xml[p] != '=' && xml[p] != '>' && xml[p] != '/') ++p;
+            const size_t name_end = p;
+            p = skip_space(p);
+            if (p >= xml.size() || xml[p] != '=') break;
+            p = skip_space(p + 1);
+            if (p >= xml.size() || (xml[p] != '"' && xml[p] != '\'')) break;
+            const size_t close = xml.find(xml[p], p + 1);
+            if (close == std::string::npos) break;
+            if (xml.compare(name, name_end - name, "Language") == 0) out.push_back(xml.substr(p + 1, close - p - 1));
+            p = close + 1;
+        }
     }
     return out;
 }
@@ -1039,7 +1199,10 @@ std::vector<std::string> package_locales() {
 HRESULT STDMETHODCALLTYPE pkg_user_locale(void*, size_t size, char* locale) {
     if (!locale || !size) return E_INVALIDARG;
     const std::vector<std::string> declared = package_locales();
-    if (declared.empty()) return S_OK;
+    if (declared.empty()) {
+        locale[0] = '\0';
+        return S_OK;
+    }
     wchar_t wide[LOCALE_NAME_MAX_LENGTH] = {};
     char user[LOCALE_NAME_MAX_LENGTH * 4] = "";
     if (GetUserDefaultLocaleName(wide, LOCALE_NAME_MAX_LENGTH) > 0)
@@ -1116,9 +1279,11 @@ const void* const kPackageVtable[] = {
     PN(35), PN(36), PN(37), PN(38),                   // IXPackageImpl2: EnumeratePackages, RegisterPackageInstalled,
                                                       //   MountWithUiAsync, MountWithUiResult
     PN(39), PN(40),                                   // IXPackageImpl3: EnumeratePackages, RegisterPackageInstalled
+    PN(41),                                           // IXPackageImpl4: GetPackageKind
 };
 #undef PN
-static_assert(std::size(kPackageVtable) == 41, "IUnknown + IXPackageImpl's 32 + IXPackageImpl2's 4 + IXPackageImpl3's 2");
+static_assert(std::size(kPackageVtable) == 42,
+              "IUnknown + IXPackageImpl's 32 + IXPackageImpl2's 4 + IXPackageImpl3's 2 + IXPackageImpl4's 1");
 
 RuntimeObject& package_object() {
     static RuntimeObject object{kPackageVtable, &kPackageClass, kPackageIids};
@@ -1324,6 +1489,7 @@ SHIM_TABLE(xgameruntime,
     XGR(InitializeApiImplEx2),
     XGR(UninitializeApiImpl),
     XGR(QueryApiImpl),
+    XGR(XErrorReport),
     // the same runtime through gameplatformservices.dll, which XCurl.dll loads from System32 (GetApiVersionImpl above)
     {"gameplatformservices.dll", "QueryApiImpl", reinterpret_cast<void*>(&QueryApiImpl)},
     {"gameplatformservices.dll", "GetApiVersionImpl", reinterpret_cast<void*>(&GetApiVersionImpl)},
@@ -1365,4 +1531,25 @@ SHIM_TABLE(xgameruntime,
     XGR(XAsyncSchedule),
     XGR(XAsyncComplete),
     XGR(XAsyncGetResult),
+);
+
+// The registry functions the console-mode read can come through. VIctory serves RegOpenKeyW, RegOpenKeyExW,
+// RegQueryValueExW and RegCloseKey under advapi32.dll and the registry api sets; kernel32 and kernelbase export the
+// same Ex functions for code linked against them. The api-set names are the ones Windows defines for each function
+// (RegOpenKeyW is in the l2 sets); a name no module imports is never looked up.
+#define CONSOLE_REGISTRY_EX(dll)                                                                         \
+    {dll, "RegOpenKeyExW", reinterpret_cast<void*>(&console_registry::open_key_ex_w)},                   \
+    {dll, "RegQueryValueExW", reinterpret_cast<void*>(&console_registry::query_value_ex_w)},             \
+    {dll, "RegCloseKey", reinterpret_cast<void*>(&console_registry::close_key)}
+#define CONSOLE_REGISTRY_OPEN(dll) {dll, "RegOpenKeyW", reinterpret_cast<void*>(&console_registry::open_key_w)}
+
+SHIM_TABLE(console_registry,
+    CONSOLE_REGISTRY_OPEN("advapi32.dll"),
+    CONSOLE_REGISTRY_EX("advapi32.dll"),
+    CONSOLE_REGISTRY_EX("kernel32.dll"),
+    CONSOLE_REGISTRY_EX("kernelbase.dll"),
+    CONSOLE_REGISTRY_EX("api-ms-win-core-registry-l1-1-0.dll"),
+    CONSOLE_REGISTRY_EX("api-ms-win-core-registry-l1-1-1.dll"),
+    CONSOLE_REGISTRY_OPEN("api-ms-win-core-registry-l2-1-0.dll"),
+    CONSOLE_REGISTRY_OPEN("api-ms-win-core-registry-l2-2-0.dll"),
 );

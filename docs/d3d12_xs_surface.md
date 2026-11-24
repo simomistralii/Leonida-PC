@@ -64,7 +64,7 @@ and the individual stubs in
 | 1 | `D3D12ZeroMemoryX` | console | absent | console fast-zero; `memset` is equivalent |
 | 2 | `PixGetPixieEntryPoints` | console (PIX) | absent | no PIX path |
 | 3 | `D3D10CreateBlob` | console (D3D10) | absent | local `ID3D10Blob`; no D3D10 dependency needed |
-| 4 | `D3D12ConfigureVirtualMemoryX` | console | absent | VM policy; PC/Vulkan owns it |
+| 4 | `D3D12ConfigureVirtualMemoryX` | console | present (returns `S_OK`) | VM policy; PC/Vulkan owns it. Measured: one pointer argument (a zeroed 32-byte block, dword +4 set to a count); the title only tests the result for failure |
 | 5 | `D3D12CreateDevice` | standard | **absent** | Leonida exports only the Xbox entry point; see §2.3 |
 | 6 | `D3D12CreateRootSignatureDeserializer` | standard | present | forwarded |
 | 7 | `D3D12CreateVersionedRootSignatureDeserializer` | standard | absent | forward if imported |
@@ -522,7 +522,8 @@ collected in [d3d12_vulkan.md §4.5](d3d12_vulkan.md):
   token), `GetFrameStatisticsX` (4). Back buffers are committed resources with `ALLOW_DISPLAY`; DXGI is used
   only for `IDXGIDevice1`→`GetAdapter`→`EnumOutputs`. No DXGI swapchain.
 
-Vtable slots, struct layouts and enum values are still **unmeasured**.
+Vtable slots and struct layouts are **not** unmeasured any more: public, licensed code and Microsoft's public
+reference give most of them. Enum values are still mostly **unmeasured**.
 
 §8.2 question 6 ("DXGI, `PresentX`, or both") is **partly answered**: public GDKX code presents through
 `PresentX` and frame events only. That the game does the same is a **hypothesis**; the game is not observed.
@@ -534,6 +535,83 @@ The `DXGIX*` free functions are a separate question. If the game imports them fr
 Leonida's loader will report them as unimplemented; a Vulkan present-array implementation would
 need a swapchain registry, which does not exist yet. SCARAB's no-op behavior is not acceptable for
 Leonida because it would silently present nothing.
+
+### 7.1 Public sources for the presentation and device ABI
+
+Microsoft's public GDK graphics reference does not document the console interfaces. The
+[graphics index](https://docs.xbox.com/_llms/en/apis/gdk-apis/graphics-api-reference.txt) lists 528 pages,
+8 of them under `d3d12_xs` (six enums, `D3D10CreateBlob`, `DXGI_ADAPTER_DESC2`); the `ID3D12CommandQueue`
+page lists the PC methods only, and there is no `PresentX`, `SetFrameIntervalX` or `D3D12XboxCreateDevice`
+page, while the `D3D12_ROOT_SIGNATURE_FLAGS` pages return 404. The slots and layouts below therefore come from public code
+that is not Microsoft documentation: XCL and the Microsoft samples measure other titles' runtimes, ebiten and
+Mesa are public code compiled against the GDK headers, and docs.xbox.com is Microsoft's reference.
+
+| Item | Public source and value | Verdict on this repository's provisional value |
+|---|---|---|
+| Queue `PresentX` slot | `ivall/xcl` (GPL-2.0-only; facts only) dispatches `PresentX(planeCount, planes, params)` at queue slot **30** in the older runtime layout (XDefiant, Minecraft, Fortnite) and slot **32** in a newer one (Unicorn Overlord), with the same SDK version but two methods inserted before `Signal` ([`present.rs`](https://github.com/ivall/xcl/blob/95bda116cfc1b118156901984052ff5698dbf4cc/crates/xcl/src/hle/d3d12x/present.rs), [`real.rs`](https://github.com/ivall/xcl/blob/95bda116cfc1b118156901984052ff5698dbf4cc/crates/xcl/src/hle/d3d12x/real.rs), [`HANDOFF.md`](https://github.com/ivall/xcl/blob/95bda116cfc1b118156901984052ff5698dbf4cc/HANDOFF.md)). | **Confirms a slot, not one number.** The version moves it; trace the game's runtime, do not hard-code either value. |
+| Queue `SuspendX` / `ResumeX` slots | No public slot in XCL or the samples. The signatures are `SuspendX(UINT flags)` and `ResumeX()` from the Apache-2.0 ebiten C++ binding ([`api_microsoftgdk_windows.go`](https://github.com/hajimehoshi/ebiten/blob/d438df689b19544c82543ad522b36be86a5a60b7/internal/graphicsdriver/directx/api_microsoftgdk_windows.go)); the samples call `SuspendX(0)` and `ResumeX()`. | **Leaves provisional.** |
+| `D3D12XBOX_PRESENT_PLANE_PARAMETERS` | 0x48 bytes on x64: `Token` u64 @0x00, `ResourceCount` u32 @0x08, `ppResources` @0x10, `pSrcViewRects` @0x18, `pDestPlacementBase` @0x20 (four floats), `ColorSpace` int32 @0x28, `ScaleFilter` int32 @0x2C, `ExtendedDescCount` u32 @0x30, `pExtendedDescs` @0x38, `Flags` u32 @0x40. ebiten's Go mirror of the GDK struct ([`d3d12_windows.go`](https://github.com/hajimehoshi/ebiten/blob/d438df689b19544c82543ad522b36be86a5a60b7/internal/graphicsdriver/directx/d3d12_windows.go)); XCL independently reads token @0, count @8 and resource list @0x10 ([`present.rs`](https://github.com/ivall/xcl/blob/95bda116cfc1b118156901984052ff5698dbf4cc/crates/xcl/src/hle/d3d12x/present.rs)). | **Confirms** the field order, types and size in `xbox_present_types.h` and `xbox_present.h`. `ScaleFilter` and `Flags` values stay ours. |
+| `D3D12XBOX_PRESENT_PARAMETERS` | 0x20 bytes on x64: `ImmediateThresholdPercent` float @0x00, `ViewCount` u32 @0x04, `ExtendedDescCount` u32 @0x08, `pExtendedDescs` @0x10, `Flags` u32 @0x18. Mesa's MIT Xbox WGL backend sets `Flags = D3D12XBOX_PRESENT_FLAG_IMMEDIATE` for an immediate present ([`d3d12_wgl_framebuffer_xbox.cpp`](https://github.com/openbsd/xenocara/blob/f3893fcf57cec33c2bd4275edd8ca6d865e3adf2/lib/mesa/src/gallium/winsys/d3d12/wgl/d3d12_wgl_framebuffer_xbox.cpp)); ebiten has the field order. The flag's numeric value is not public. | **Corrects** "at least this field": the repository's one-float struct is the first 4 bytes of a 0x20-byte object. Safe as a pointer prefix; never size a copy by it. |
+| Device frame calls | Slots **78** `SetFrameIntervalX`, **79** `ScheduleFrameEventX`, **80** `WaitFrameEventX`, **81** `GetFrameStatisticsX` (0-based, `QueryInterface` = 0). XCL's [`frame.rs`](https://github.com/ivall/xcl/blob/95bda116cfc1b118156901984052ff5698dbf4cc/crates/xcl/src/hle/d3d12x/frame.rs) numbers the calls and documents the arguments; ebiten's `ID3D12Device` vtable has `SetFrameIntervalX`/`ScheduleFrameEventX`/`WaitFrameEventX` at 78/79/80 and leaves 81 unnamed ([`d3d12_windows.go`](https://github.com/hajimehoshi/ebiten/blob/d438df689b19544c82543ad522b36be86a5a60b7/internal/graphicsdriver/directx/d3d12_windows.go)). | **Confirms** all four slots, two independent public sources. |
+| `D3D12XBOX_FRAME_STATISTICS` | The MIT FramePacing sample names `Type`, `Interval`, `Event`, `Render`/`Present`/`Display` with `PlaneIndex`, and `Display.PercentScanned`; it treats `S_FALSE` or a count below the request as "not available yet" ([`FramePacing.cpp`](https://github.com/microsoft/Xbox-GDK-Samples/blob/b1e77b6ac10f95b07296025fda171ca2ddc42dbe/Samples/Graphics/FramePacing/FramePacing.cpp)). XCL's implementation writes `Type` at +0, origin at +0x10 and flip at +0x18, so its record is at least 0x20 bytes ([`frame.rs`](https://github.com/ivall/xcl/blob/95bda116cfc1b118156901984052ff5698dbf4cc/crates/xcl/src/hle/d3d12x/frame.rs)). | **Partly confirms** the field meanings and the two timestamp offsets; the full record layout and the union members stay unmeasured. |
+| Token and timeout | `D3D12XBOX_FRAME_PIPELINE_TOKEN` is a 64-bit integer with 0 as `..._NULL` (ebiten). Microsoft's Game Streaming page says `WaitFrameEventX` returns the token at frame start and `PresentX` sends it with the frame to the client ([Learn](https://learn.microsoft.com/en-us/gaming/gdk/docs/features/common/game-streaming/game-streaming-latency-compensation-deep-dive)). XCL's implementation issues 48-bit nonzero tokens (mask `0xFFFF_FFFF_FFFF`), i.e. it leaves the top 16 bits unused, returns `S_FALSE` on a finite timeout, writes the token on timeout only with flag 2, and returns `E_INVALIDARG` for an unscheduled event; `ScheduleFrameEventX` returns `S_FALSE` or `0x10000000` when it starts the clock. | **Confirms** the 64-bit storage and the `0` null. **Contradicts** this layer's `HRESULT_FROM_WIN32(WAIT_TIMEOUT)` on timeout (XCL: `S_FALSE`) and `ERROR_INVALID_STATE` for an unscheduled event (XCL: `E_INVALIDARG`); both are recorded here, not changed in this PR. The 48-bit range is XCL's implementation choice, not a documented mask. |
+| `D3D12XBOX_CREATE_DEVICE_PARAMETERS` | Public field names and (for ebiten's version) x64 offsets: `Version` @0, `ProcessDebugFlags` @4, `GraphicsCommandQueueRingSizeBytes` @8, `pOffchipTessellationBuffer` @0x10, `GraphicsScratchMemorySizeBytes` @0x18, `ComputeScratchMemorySizeBytes` @0x1C, `DisableGeometryShaderAllocations` @0x20, `DisableTessellationShaderAllocations` @0x24, `DisableDXR` @0x28, `DisableAutomaticDPBBBreakBatchEvents` @0x2C, `pDXRStackBuffer` @0x30, `DXRStackBufferOverrideSizeBytes` @0x38, `CreateDeviceFlags` @0x3C, `AutoHDRPaperWhiteLevelNits` @0x40, `DisableAutomaticCommandSegmentChaining` @0x44 ([`d3d12_windows.go`](https://github.com/hajimehoshi/ebiten/blob/d438df689b19544c82543ad522b36be86a5a60b7/internal/graphicsdriver/directx/d3d12_windows.go)). The MIT samples add `AmplificationShaderIndirectArgsBufferSize` and `AmplificationShaderPayloadBufferSize` by name ([`SimpleDeviceAndSwapChain.cpp`](https://github.com/microsoft/Xbox-GDK-Samples/blob/b1e77b6ac10f95b07296025fda171ca2ddc42dbe/Samples/IntroGraphics/SimpleDeviceAndSwapChain/SimpleDeviceAndSwapChain.cpp)). | **Partly confirms.** Seventeen named fields cover the first 18 words (word 3 is the x64 alignment pad at 0x0C); the samples name two more fields without a public layout. A 24-word (96-byte) block still has at least four words with no public name or meaning. |
+| Root-signature flags `0x03000000` | Not documented: the [graphics index](https://docs.xbox.com/_llms/en/apis/gdk-apis/graphics-api-reference.txt) has no `D3D12_ROOT_SIGNATURE_FLAGS` entry, and both URL forms under `docs.xbox.com/reference/graphics/` (`d3d12` and `d3d12_xs`) return 404. | **Leaves provisional.** Keep masking the byte on a copy; no public bit meaning. |
+| `CheckFeatureSupport(D3D12_OPTIONS)` with 0x40 bytes | Microsoft publishes the 15-field PC structure, 0x3C bytes, with no extra member ([`D3D12_FEATURE_DATA_D3D12_OPTIONS`](https://docs.xbox.com/reference/graphics/d3d12/structs/d3d12_feature_data_d3d12_options_public.md)); its `CheckFeatureSupport` page says a size mismatch is `E_INVALIDARG` ([`CheckFeatureSupport`](https://docs.xbox.com/reference/graphics/d3d12/interfaces/id3d12device/methods/id3d12device_checkfeaturesupport_public.md)). XCL measured XDefiant asking 0x40 and retries with 0x3C, zeroing the tail ([`HANDOFF.md`](https://github.com/ivall/xcl/blob/95bda116cfc1b118156901984052ff5698dbf4cc/HANDOFF.md), [`real.rs`](https://github.com/ivall/xcl/blob/95bda116cfc1b118156901984052ff5698dbf4cc/crates/xcl/src/hle/d3d12x/real.rs)). | **Confirms the 0x40 request size; leaves the extra 4 bytes unknown.** The measurement fixes the size, not the field. No public source names them; `MaxGPUVirtualAddressBitsPerProcess` is a member of the separate `D3D12_FEATURE_DATA_GPU_VIRTUAL_ADDRESS_SUPPORT`, not a published member of `D3D12_OPTIONS`. The repository's accept-and-zero-tail behaviour matches the observed failure and is safe. |
+
+The call shapes are the samples' (and XCL's) shapes: `SetFrameIntervalX(output, interval_us, period, flags)`,
+`ScheduleFrameEventX(type, offset_us, ancillary, flags)`,
+`WaitFrameEventX(type, timeout_ms, ancillary, flags, &token)`,
+`GetFrameStatisticsX(token, type_mask, &count, stats)`, and `PresentX(plane_count, planes, params)`. Type 0 is
+the frame origin (the samples use only it); XCL also uses 1 and 2 for later points in the frame. The
+`D3D12XBOX_SCHEDULE_FRAME_OBJECT_LIST` / `D3D12XBOX_WAIT_FRAME_OBJECT_LIST` ancillary block is
+`{ u32 count; HANDLE* objects @0x08; i32* signaled @0x10 }` per XCL.
+
+The meanings the public samples give the create-device words: `Version` is the SDK version (`D3D12_SDK_VERSION`
+in `SimpleDeviceAndSwapChain`), `GraphicsCommandQueueRingSizeBytes` is the command-queue ring,
+`GraphicsScratchMemorySizeBytes` and `ComputeScratchMemorySizeBytes` are shader scratch memory,
+`D3D12XBOX_DEFAULT_SIZE_BYTES` asks for the runtime's default, the `Disable*` BOOLs save title memory when the
+stage is unused, and `CreateDeviceFlags` is `D3D12XBOX_CREATE_DEVICE_FLAG_NONE` in the sample. XCL logs word 0
+as the SDK version. ebiten also gives the `D3D12XBOX_PROCESS_DEBUG_FLAG_*` values (`DEBUG` 1, `INSTRUMENTED`
+0x00100000, `NULL_GPU` 0x00400000, `ENABLE_COMMON_STATE_PROMOTION` 0x01000000, `ENHANCED_VALIDATION`
+0x02000000); these are process debug flags, not `CreateDeviceFlags` bits. The `0x03000000` root-signature bit
+is separate and has no public meaning.
+
+The provisional layouts in the split `xbox_present_types.h` on the PresentX-capture branch (not yet on main) are
+the same as `xbox_present.h`: the plane struct agrees byte for byte with the 0x48 layout above, the
+present-parameter struct is the 4-byte prefix of the 0x20 console object, and `uint64_t Token` is the confirmed
+width. Its colour-space values are the documented DXGI numbers; `ScaleFilter` and the plane flags are still ours.
+The 60/30/120 Hz periods (`16667`/`33333`/`8333` us) are the public ones; this layer does not carry 24/40/50 Hz.
+
+Still unknown after this search: the queue slots of `SuspendX`/`ResumeX`; which of the two queue layouts the
+game's runtime uses; the values of `ScaleFilter` and the plane flags; the full `D3D12XBOX_FRAME_STATISTICS`
+layout (the samples name `Type`, `Interval`, `Event`, `Render`/`Present`/`Display.PlaneIndex` and
+`Display.PercentScanned`, but no public byte layout); the four extra `D3D12_OPTIONS` bytes; the last words of
+the create-device block; the `0x03000000` meaning; and the console's behaviour for a null, repeated or
+out-of-order token.
+
+### 7.2 What the public samples give Bink, XAudio2 and FidelityFX
+
+- **FidelityFX.** The MIT `Kits/AMDTK` GDK backend includes `<xmem.h>`, calls
+  `XMemGetWorkingSetStatistics(XMEM_WORKING_SET_TITLE, ...)` for its memory report, and on Scarlett creates
+  resources with `CreateCommittedResourceX` and a `D3D12XBOX_RESOURCE_DESC` carrying DCC options
+  ([`ffx_gdk.cpp`](https://github.com/microsoft/Xbox-GDK-Samples/blob/b1e77b6ac10f95b07296025fda171ca2ddc42dbe/Kits/AMDTK/fidelityfx/src/backends/gdk/ffx_gdk.cpp)).
+  Its frame-interpolation swapchain calls the title's `PresentX` callback with `framePipelineTokenOriginal`
+  and `framePipelineTokenToSubmit`; the FSR3 sample can pass `D3D12XBOX_FRAME_PIPELINE_TOKEN_NULL` for the
+  real frame ([`ffx_gdk.h`](https://github.com/microsoft/Xbox-GDK-Samples/blob/b1e77b6ac10f95b07296025fda171ca2ddc42dbe/Kits/AMDTK/fidelityfx/include/FidelityFX/host/backends/gdk/ffx_gdk.h),
+  [`DeviceResources.cpp`](https://github.com/microsoft/Xbox-GDK-Samples/blob/b1e77b6ac10f95b07296025fda171ca2ddc42dbe/Samples/Graphics/AMDFidelityFX_FSR3FrameInterpolation/DeviceResources.cpp)).
+  This matches the three `xmem` imports of the shipped `amd_fidelityfx_upscaler_xbox.dll`; only the
+  allocation/capability part transfers, because that DLL is an upscaler and the public sample is the
+  frame-interpolation swapchain.
+- **XAudio2.** `SimplePlaySound` calls `XAudio2Create(&pXAudio2, 0)` in `InitializeXAudio`, after the device
+  resources are made, and sets `XAUDIO2_DEBUG_CONFIGURATION` only in debug. XMA2 playback needs the compressed
+  audio in APU memory: `ApuAlloc(&m_xmaMemory, nullptr, bytes, SHAPE_XMA_INPUT_BUFFER_ALIGNMENT)`, filled with
+  `memcpy`, and freed with `ApuFree`
+  ([`SimplePlaySound.cpp`](https://github.com/microsoft/Xbox-GDK-Samples/blob/b1e77b6ac10f95b07296025fda171ca2ddc42dbe/Samples/Audio/SimplePlaySound/SimplePlaySound.cpp)).
+  That is the console-specific part a title using XMA reaches; the sample does not show a slot or an ABI addition
+  beyond it.
+- **Bink.** No Bink use exists in the public GDK samples (the tree has none), so there is nothing to borrow;
+  the repository's existing `Bink2Scarlett.dll` path stands.
 
 ## 8. Memory, heaps, compression and tiling
 
@@ -562,9 +640,12 @@ None of these has a numeric value in SCARAB, and none has a layout. The tiling/D
 therefore **described, not answered**: the names tell Leonida what to look for in the game's
 resource descriptions, and the copy/state names tell it which compression transitions the game
 may perform, but the actual swizzle and DCC metadata format still has to come from Leonida's own
-`tools/amd_swizzle.py` / `tools/tile_probe.py` work or from the console `xg_xs.dll` functions
-`XGComputeOptimalSwizzleMode`, `XGEncodeDCC`, `XGDecodeDCC` (SCARAB names them; it does not call
-them).
+`tools/amd_swizzle.py` (the mode's equation, read from the public AMD header and evaluated to
+detile with), `tools/tile_probe.py` (the block-endpoint feature and smoothness score measured on
+a blob) and `tools/swizzle_search.py` (the brute-force search over every bit ordering with the
+right x/y split inside a tile, scored with `tile_probe`), or from the console `xg_xs.dll`
+functions `XGComputeOptimalSwizzleMode`, `XGEncodeDCC`, `XGDecodeDCC` (SCARAB names them; it does
+not call them).
 
 Two names are worth adding to the trace filter because they affect correctness, not just
 performance: `D3D12CONS_RESOURCE_STATE_PRESERVE_*` (a barrier that preserves compressed data) and
@@ -577,19 +658,19 @@ Mapping to [d3d12_vulkan.md §8.2](d3d12_vulkan.md). "Answered" means a fact Leo
 against; "described" means names or constraints but no layout; "still unknown" means no usable
 evidence.
 
-| Leonida unknown | Status after SCARAB | What is actually new |
+| Leonida unknown | Status after SCARAB (and §7.1) | What is actually new |
 |---|---|---|
-| #1 device entry point and 24-word params | **described** | The separate console device export exists at ordinal 13 and is named `D3D12ConsCreateDevice` internally / `D3D12XboxCreateDevice` publicly; the params struct is named `D3D12CONS_CREATE_DEVICE_PARAMETERS`. Layout and field meanings are still unknown. |
-| #2 device/heap/queue/command-list slots | **still unknown** | SCARAB has no console slot map. Its appended-after-GCL6 model conflicts with the SDK's GCL8/GCL9 methods (§5.1). Do not use it as a slot source. |
+| #1 device entry point and 24-word params | **described** | The separate console device export exists at ordinal 13 and is named `D3D12ConsCreateDevice` internally / `D3D12XboxCreateDevice` publicly; the params struct is named `D3D12CONS_CREATE_DEVICE_PARAMETERS`. Public sources name 17 fields and their x64 offsets, plus two more field names; a 24-word block still has at least four words unaccounted (§7.1). |
+| #2 device/heap/queue/command-list slots | **partly measured** | SCARAB has no console slot map. Its appended-after-GCL6 model conflicts with the SDK's GCL8/GCL9 methods (§5.1). Public §7.1 gives the presentation slots (device 78-81, queue 30/32); the heap and command-list slot map is still unknown. Do not use SCARAB as a slot source. |
 | #3 root signature → `s0..s31` | **still unknown** | Only flag names (`D3D12CONS_ROOT_SIGNATURE_FLAG_FORCE_MEMORY_BASED_ABI`, `_RAYTRACING`); no mapping. Leonida's own register-based/spill facts already go further. |
 | #4 descriptor bytes and increments | **still unknown** | No measured increment. `D3D12CONS_DESCRIPTOR_HEAP_TYPE_SAMPLER_UNBOUNDED` is a new name, not a size. |
 | #5 VA range / arena capacity | **still unknown** | — |
-| #6 DXGI vs `PresentX` | **described** | `PresentX` is a queue method; ≤2 planes, ≤8 views, four flag names. Public samples give the call sequence and argument counts (no DXGI swapchain; frame events + `PresentX`), see §7. No slot or layout; game itself not observed. |
+| #6 DXGI vs `PresentX` | **partly answered** | `PresentX` is a queue method; public code gives its queue slot (30 in the older runtime layout, 32 in the newer) and the x64 plane/present layouts (§7.1). Public samples give the call sequence and argument counts (no DXGI swapchain; frame events + `PresentX`), see §7. The game itself is not observed. |
 | #7 standard AS vs BVH builder | **still unknown** | New names: `D3D12ConsRehydrateRaytracingAccelerationStructure`, `D3D12CONS_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_DEHYDRATE`, `DispatchRaysX`, `DispatchRaysDimensionsX`. No layouts. |
 | #8 XDXR struct layouts | **still unknown** | Nothing from SCARAB. Measured since from `XboxBvhBuilder.dll` itself, see [xdxr.md](xdxr.md). |
 | #9 tiled data layout / DCC | **described** | Flag, copy and state names; no values, no swizzle. |
 | #10 binning/DCC/VRS/WMMA usage | **described** | `D3D12CONS_PIPELINE_STATE_FLAG_DISABLE_AUTO_DPBB`, `_DISABLE_RB_PLUS`, `RSSetShadingRateX`; usage still unknown. |
-| #11 `CheckFeatureSupport` answers | **still unknown** | — |
+| #11 `CheckFeatureSupport` answers | **partly measured** | A console title asks `D3D12_OPTIONS` with 0x40 bytes where the PC struct is 0x3C (XCL/XDefiant); the extra 4 bytes are unnamed. The layer answers the PC fields and zeroes the tail (§7.1). |
 | #12 async compute / copy queues | **described** | `CreateCommandQueueX` creates a shader-based queue, which the UMD says only supports `D3D12_COMMAND_LIST_TYPE_COMPUTE`; `SuspendX`/`ResumeX` exist. No params. |
 | #18 heap aliasing / reserved | **still unknown** | — |
 | console IIDs | **10 exported; 4 not exported** | The DMA list IID is proven and the other nine console GUIDs are reported. SCARAB's provenance reports that the four command-list IIDs are not runtime exports, so they have no ordinal; this package has no D3D12 DLL to read. They stay unresolved until a title trace or another artifact supplies them. |
@@ -638,9 +719,7 @@ These are stated plainly because a future reader will otherwise trust the wrong 
 9. **The Wine results are not reproducible here.** "All 7 DLLs load", "the whole console graphics
    stack runs on Linux", and the DMA round-trip are **Reported**. This page did not open
    `d3d12_xs.dll` and did not run Wine. Nothing in this doc depends on them.
-10. **`docs/dll-surface.md` is stale.** It says the console `d3d12_xs.dll` is "not obtainable"
-    (line 83), while `d3d12_xs-findings.md` documents the acquired binary. Use the findings doc.
-11. **The package's D3D12 DLL exports do not contain the four command-list IIDs with 1.0.2.1.**
+10. **The package's D3D12 DLL exports do not contain the four command-list IIDs with 1.0.2.1.**
     The package has 16 DLLs and no D3D12 runtime DLL, and `gameos.xvd` is encrypted; SCARAB's
     provenance says the runtime does not export these four IIDs. There is no export ordinal to
     read in this package or in the vendor DLL. A `QueryInterface` trace from the running title is
@@ -662,6 +741,10 @@ work cannot be relicensed as "or later" for the SCARAB-derived part. This page c
 code**. It records interface names, ordinal numbers and 16-byte GUIDs, which are ABI facts, with
 the source file and line cited. The 28 standard GUIDs are also facts from the Windows SDK; the 10
 console GUIDs are reported from the vendor runtime and are attributed to SCARAB.
+
+The public sources in §7.1 are used as facts only: XCL is GPL-2.0-only (no code copied), ebiten is Apache-2.0,
+the Mesa WGL file is MIT, and the Microsoft samples are MIT. Only names, numbers, field offsets and slot indices
+are taken from them; no code or prose is copied.
 
 If any code is later adapted from SCARAB, it must carry the SCARAB copyright and
 `GPL-3.0-only` notice, and the file must say exactly which SCARAB file it came from. The checker

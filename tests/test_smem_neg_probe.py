@@ -118,6 +118,69 @@ class OracleLifecycleTest(unittest.TestCase):
         self.assertTrue(fake.closed)
         self.assertIn("DIFFERS", out)
 
+    def test_hw_accepts_tuple_oracle_results(self):
+        flat = self._expected_flat()
+
+        class FakeOracle:
+            device = "fake-gpu"
+            arch = "gfx1036"
+            closed = False
+
+            def run(self, kernels):
+                return (tuple(flat),)
+
+            def close(self):
+                self.closed = True
+
+        fake = FakeOracle()
+        rc, out = self._run_hw(fake)
+        self.assertEqual(rc, 0)
+        self.assertTrue(fake.closed)
+        self.assertNotIn("DIFFERS", out)
+
+    def test_hw_closes_on_malformed_oracle_results(self):
+        flat = self._expected_flat()
+
+        class FakeOracle:
+            device = "fake-gpu"
+            arch = "gfx1036"
+
+            def __init__(self, responses):
+                self.responses = responses
+                self.closed = False
+
+            def run(self, kernels):
+                return self.responses[kernels[0].wave]
+
+            def close(self):
+                self.closed = True
+
+        bad_cases = [
+            ("empty_results", [], "expected 1"),
+            ("none_results", None, "NoneType"),
+            ("str_results", "bad", "str"),
+            ("extra_results", [list(flat), list(flat)], "got 2"),
+            ("none_kernel_result", [None], "NoneType"),
+            ("int_kernel_result", [123], "int"),
+            ("short_words", [[0] * 4], f"expected {len(flat)} words, got 4"),
+            ("overlong_zeros", [[0] * (len(flat) + 1)], f"expected {len(flat)} words, got {len(flat) + 1}"),
+            ("overlong_matching", [list(flat) + [0]], f"expected {len(flat)} words, got {len(flat) + 1}"),
+            ("non_int_word", [[None] * len(flat)], "NoneType"),
+            ("bool_word", [[True] * len(flat)], "bool"),
+        ]
+        for label, bad_ret, hint in bad_cases:
+            for fail_wave in (32, 64):
+                with self.subTest(case=label, wave=fail_wave):
+                    responses = {32: [list(flat)], 64: [list(flat)]}
+                    responses[fail_wave] = bad_ret
+                    fake = FakeOracle(responses)
+                    rc, out = self._run_hw(fake)
+                    self.assertEqual(rc, 2)
+                    self.assertTrue(fake.closed)
+                    self.assertIn(f"wave{fail_wave}:", out)
+                    self.assertIn(hint, out)
+                    self.assertNotIn("device:", out)
+
     def test_hw_closes_on_kernel_rejection(self):
         class FakeOracle:
             device = "fake-gpu"

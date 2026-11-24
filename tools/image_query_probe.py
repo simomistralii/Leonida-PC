@@ -34,10 +34,16 @@ import argparse
 import json
 import math
 import os
+import stat
 import struct
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+from file_mode import published_mode  # noqa: E402
+from replace_retry import replace as replace_retry  # noqa: E402
 
 TYPE_2D, TYPE_2D_ARRAY = 9, 10                      # SQ_RSRC_IMG_* in T# WORD3 [31:28]
 DIMS = {TYPE_2D: "SQ_RSRC_IMG_2D", TYPE_2D_ARRAY: "SQ_RSRC_IMG_2D_ARRAY"}
@@ -273,6 +279,49 @@ def _import_oracle():
     return asm, runner
 
 
+def write_report(path, report):
+    """Stage the JSON report in a sibling temp file and swap it in, so a write or replace failure keeps any
+    previous report intact and preserves its permission bits."""
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    destination = os.path.realpath(path)
+    dest_parent = os.path.dirname(destination) or "."
+    if dest_parent != parent:
+        os.makedirs(dest_parent, exist_ok=True)
+    try:
+        mode = os.stat(destination).st_mode
+    except FileNotFoundError:
+        mode = None
+    if mode is not None and not stat.S_ISREG(mode):
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(report, f, indent=1)
+        return
+    if mode is not None:
+        # Keep the direct writer's permission check without truncating the previous report.
+        os.close(os.open(destination, os.O_WRONLY))
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", newline="\n", delete=False,
+            dir=dest_parent, prefix=".image_query_probe-", suffix=".tmp",
+        ) as f:
+            tmp = f.name
+            json.dump(report, f, indent=1)
+        if os.name != "nt":
+            os.chmod(tmp, published_mode(destination))
+        replace_retry(tmp, destination)
+    except BaseException:
+        if tmp is not None:
+            try:
+                if os.path.lexists(tmp):
+                    os.chmod(tmp, 0o600)
+                    os.unlink(tmp)
+            except OSError:
+                pass
+        raise
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--waves", default="32,64")
@@ -306,9 +355,7 @@ def main(argv=None):
     print(f"{total - bad} of {total} results follow the rules, {bad} do not")
     if a.json:
         try:
-            os.makedirs(os.path.dirname(os.path.abspath(a.json)), exist_ok=True)
-            with open(a.json, "w", encoding="utf-8", newline="\n") as f:
-                json.dump(report, f, indent=1)
+            write_report(a.json, report)
         except OSError as exc:
             print(f"cannot write {a.json}: {exc.strerror or exc}", file=sys.stderr)
             return 2  # not 1: that would read as a result off the rules; the summary above has the result

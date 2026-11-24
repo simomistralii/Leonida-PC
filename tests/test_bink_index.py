@@ -217,6 +217,28 @@ class TestScanAndWrite(unittest.TestCase):
         self.assertEqual(doc["streams"][0]["width"], 320)
         self.assertNotIn("decodes", doc["streams"][0])
 
+    def test_json_write_failure_preserves_previous_report(self):
+        previous = '{"previous": true}'
+        path = os.path.join(self.dir, "keep.json")
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(previous)
+        with mock.patch.object(bink, "replace_retry", side_effect=OSError(13, "Permission denied")):
+            with self.assertRaises(OSError):
+                bink.write_json(path, self.dir, [], {"streams": 0}, probe=False)
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), previous)
+
+    def test_csv_write_failure_preserves_previous_report(self):
+        previous = "source,offset\nkeep,0\n"
+        path = os.path.join(self.dir, "keep.csv")
+        with open(path, "w", encoding="utf-8", newline="") as fh:
+            fh.write(previous)
+        with mock.patch.object(bink, "replace_retry", side_effect=OSError(13, "Permission denied")):
+            with self.assertRaises(OSError):
+                bink.write_csv(path, [], probe=False)
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), previous)
+
 
 class TestCommandLine(unittest.TestCase):
     def setUp(self):
@@ -408,7 +430,7 @@ class TestCommandLine(unittest.TestCase):
         err = io.StringIO()
         with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(bink.main([path, "--out", out]), 2)
-        self.assertIn("not a Bink 2 stream or an RPF archive", err.getvalue())
+        self.assertIn("not a Bink 2 stream (KB2) or an RPF archive", err.getvalue())
         self.assertNotIn("Traceback", err.getvalue())
         self.assertFalse(os.path.exists(out))
 

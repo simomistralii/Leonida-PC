@@ -36,6 +36,7 @@ As a module:
 
 As a CLI:
     python3 -I tools/spirv_opt.py input.spvasm -o output.spvasm
+Usage: `python -I tools/spirv_opt.py --help` lists the options.
 """
 import argparse
 import sys
@@ -519,6 +520,24 @@ def _optimize_function(body_lines: list[str], const_ids: set[str], const_true: s
 
         # 2. Build CFG + dominator tree and run dominator-tree preorder optimization pass.
         blocks, _succs, all_preds, rpo, idom, dom_children = _build_cfg_and_dom(insts)
+        def_block: dict[str, int] = {}
+        for blk_i, b_insts in enumerate(blocks):
+            for inst_i in b_insts:
+                def_id = insts[inst_i][0]
+                if def_id is not None:
+                    def_block[def_id] = blk_i
+
+        def strictly_dominates(a: int, b: int) -> bool:
+            if a == b or b not in idom:
+                return False
+            cur = idom[b]
+            while cur != a:
+                nxt = idom.get(cur)
+                if nxt is None or nxt == cur:
+                    return False
+                cur = nxt
+            return True
+
         alias: dict[str, str] = {}
 
         def resolve(tok: str) -> str:
@@ -565,16 +584,19 @@ def _optimize_function(body_lines: list[str], const_ids: set[str], const_true: s
                         args = new_args
                         changed = True
 
-                # Trivial OpPhi simplification (only in reachable blocks so dominance is guaranteed).
+                # Trivial OpPhi simplification (only when the sole non-self value strictly dominates this block).
                 if op == "OpPhi" and reachable and res is not None and res not in decorated_ids and len(args) >= 3:
                     vals = [args[k] for k in range(1, len(args), 2)]
                     non_self = {v for v in vals if v != res}
                     if len(non_self) == 1:
-                        alias[res] = next(iter(non_self))
-                        dead_idx.add(idx)
-                        deleted_ids.add(res)
-                        changed = True
-                        continue
+                        cand = next(iter(non_self))
+                        cand_blk = def_block.get(cand)
+                        if cand_blk is None or strictly_dominates(cand_blk, b):
+                            alias[res] = cand
+                            dead_idx.add(idx)
+                            deleted_ids.add(res)
+                            changed = True
+                            continue
 
                 # Algebraic / copy / constant-fold / round-trip bitcast simplifications
                 if res is not None and res not in decorated_ids:
@@ -1023,6 +1045,13 @@ def optimize(spvasm: str, max_passes: int = 4) -> str:
                 if lhs.startswith("%"):
                     glsl_sets.add(lhs)
                 continue
+            stripped = raw.lstrip()
+            op_tok = stripped.split(None, 1)[0] if stripped else ""
+            if op_tok in ("OpDecorateString", "OpDecorateStringGOOGLE"):
+                toks = stripped.split(None, 2)
+                if len(toks) >= 2 and toks[1].startswith("%"):
+                    decorated_ids.add(toks[1])
+                continue
             parsed = _parse_line(raw)
             if parsed is None:
                 continue
@@ -1032,6 +1061,15 @@ def optimize(spvasm: str, max_passes: int = 4) -> str:
                 continue
             if op == "OpDecorate" and args:
                 decorated_ids.add(args[0])
+            elif op == "OpDecorateId" and args:
+                decorated_ids.add(args[0])
+                for tok in args[2:]:
+                    if tok.startswith("%"):
+                        decorated_ids.add(tok)
+            elif op == "OpGroupDecorate" and len(args) >= 2:
+                for tok in args[1:]:
+                    if tok.startswith("%"):
+                        decorated_ids.add(tok)
             elif op == "OpTypeInt" and res and len(args) >= 2:
                 try:
                     w, s = int(args[0]), int(args[1])
@@ -1115,11 +1153,29 @@ def optimize(spvasm: str, max_passes: int = 4) -> str:
         raw = lines[i]
         if all_deleted:
             stripped = raw.lstrip()
-            if stripped.startswith(("OpDecorate ", "OpName ")):
+            op_tok = stripped.split(None, 1)[0] if stripped else ""
+            if op_tok in ("OpDecorate", "OpName", "OpDecorateId", "OpDecorateString",
+                          "OpDecorateStringGOOGLE"):
                 toks = stripped.split(None, 2)
                 if len(toks) >= 2 and toks[1] in all_deleted:
                     i += 1
                     continue
+            elif op_tok == "OpGroupDecorate":
+                semi = raw.find(";")
+                code = raw[:semi] if semi >= 0 else raw
+                comment = raw[semi:] if semi >= 0 else ""
+                indent = raw[:len(raw) - len(stripped)]
+                toks = code.split()
+                if len(toks) >= 3:
+                    kept = [t for t in toks[2:] if t not in all_deleted]
+                    if not kept:
+                        i += 1
+                        continue
+                    if len(kept) != len(toks) - 2:
+                        suffix = (" " + comment) if comment else ""
+                        out.append(f"{indent}{toks[0]} {toks[1]} {' '.join(kept)}{suffix}")
+                        i += 1
+                        continue
         out.append(raw)
         i += 1
     return "\n".join(out) + ("\n" if spvasm.endswith("\n") else "")
@@ -1131,6 +1187,8 @@ def main(argv=None) -> int:
     ap.add_argument("-o", "--out", required=True, help="output .spvasm file")
     ap.add_argument("--passes", type=int, default=4, help="max optimization passes (default: 4)")
     args = ap.parse_args(argv)
+    if args.passes < 1:
+        ap.error("--passes must be at least 1")
     with open(args.src, encoding="utf-8") as f:
         text = f.read()
     opt = optimize(text, max_passes=args.passes)

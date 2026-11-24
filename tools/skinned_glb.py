@@ -209,7 +209,7 @@ def _finite_matrix(m) -> bool:
 def _load_json(path: str) -> dict:
     # An interrupted export leaves an empty or cut-off model.json: report it like any other bad input (BUILD-1031).
     try:
-        with open(path, encoding="utf-8") as handle:
+        with open(path, encoding="utf-8-sig") as handle:
             value = json.load(handle)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SkinError(f"{path}: invalid JSON: {exc}") from exc
@@ -578,6 +578,18 @@ class PaletteResolver:
         return found
 
 
+def own_parent_name(record, own_skeleton) -> str | None:
+    """The name of a drawable-local bone's own_skeleton parent, by name or by index."""
+    if not isinstance(record, dict):
+        return None
+    parent_name = record.get("parent_name")
+    if parent_name is None:
+        parent = record.get("parent")
+        if isinstance(parent, int) and 0 <= parent < len(own_skeleton):
+            parent_name = own_skeleton[parent].get("name")
+    return parent_name if isinstance(parent_name, str) and parent_name else None
+
+
 # --------------------------------------------------------------------- weights
 def normalise_weights(j0: bytes, j1: bytes, w0: bytes, w1: bytes, count: int,
                       local_bones: int, local_to_joint: list[int],
@@ -829,6 +841,33 @@ def build_skinned_glb(skeleton_path: str, component_paths: list[str], *,
             raise SkinError(f"{model_dir}: model has no skinned mesh with skin_influences")
         resolver = PaletteResolver(model, joints.ped_by_name)
 
+        def attach(name: str, chain: tuple = ()) -> int:
+            """Add a drawable-local bone after the own_skeleton ancestors it names.
+
+            A palette can list a child before its parent, and that parent can be an
+            unweighted own_skeleton bone no palette entry names; attaching the ancestors
+            first keeps the explicit link instead of falling back to infer_ped_parent.
+            """
+            existing = joints.find(name)
+            if existing is not None:
+                return existing
+            record = resolver.own_by_name.get(name)
+            parent_name = own_parent_name(record, resolver.own_skeleton)
+            parent_index = joints.find(parent_name) if parent_name else None
+            if parent_index is None and parent_name and parent_name not in chain:
+                if parent_name in resolver.own_by_name:
+                    parent_index = attach(parent_name, chain + (name,))
+            if parent_index is None:
+                parent_index = infer_ped_parent(name, joints.ped_by_name, joints._by_name)
+                if parent_index is None:
+                    parent_index = joints.root
+            bind = None
+            if isinstance(record, dict) and _finite_matrix(record.get("bind_matrix")):
+                bind = bind_to_gltf(record["bind_matrix"])
+            if bind is None:
+                bind = list(joints.binds[parent_index])
+            return joints.add(name, bind, parent_index)
+
         component_joint_start = joints.count
         component_record_start = len(records)
         for mesh, source_primitive in pairs:
@@ -839,26 +878,7 @@ def build_skinned_glb(skeleton_path: str, component_paths: list[str], *,
             local_to_joint = []
             for value in palette:
                 name, _source = resolver.resolve(value)
-                ped_index = joints.find(name)
-                if ped_index is not None:
-                    local_to_joint.append(ped_index)
-                    continue
-                record = resolver.own_by_name.get(name)
-                parent_name = record.get("parent_name") if isinstance(record, dict) else None
-                if parent_name is None and isinstance(record, dict):
-                    parent = record.get("parent")
-                    if isinstance(parent, int) and 0 <= parent < len(resolver.own_skeleton):
-                        parent_name = resolver.own_skeleton[parent].get("name")
-                parent_index = joints.find(parent_name) if isinstance(parent_name, str) else None
-                if parent_index is None:
-                    inferred = infer_ped_parent(name, joints.ped_by_name, joints._by_name)
-                    parent_index = inferred if inferred is not None else joints.root
-                bind = None
-                if isinstance(record, dict) and _finite_matrix(record.get("bind_matrix")):
-                    bind = bind_to_gltf(record["bind_matrix"])
-                if bind is None:
-                    bind = list(joints.binds[parent_index])
-                local_to_joint.append(joints.add(name, bind, parent_index))
+                local_to_joint.append(attach(name))
 
             attributes, index_pair = _component_geometry(gltf, glb_bin, source_primitive)
             position = attributes["POSITION"][1]

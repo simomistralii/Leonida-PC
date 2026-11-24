@@ -137,6 +137,20 @@ class BootTraceTests(unittest.TestCase):
         self.assertIs(trace["exceptions"][1]["cpp"], True)
         self.assertEqual(trace["exit"], 0)
 
+    def test_unimplemented_calls_rank_by_frequency_and_preserve_first_caller(self):
+        names = ("x.dll!Foo", "y.dll!Bar", "y.dll!Bar", "y.dll!Bar")
+        self.write(self.startup, [
+            {"kind": "unimplemented_call", "import": name, "caller": f"synthetic+{i}"}
+            for i, name in enumerate(names)
+        ])
+        trace = bt.parse_startup(self.startup, limit=1)
+        self.assertEqual(trace["unimplemented_call_counts"], {"x.dll!Foo": 1, "y.dll!Bar": 3})
+        self.assertEqual(trace["unimplemented_by_dll"], {"x.dll": 1, "y.dll": 1})
+        report = bt.format_text(bt.summarize(trace, None), 1)
+        self.assertIn("unimplemented: 2 unique, 4 calls", report)
+        self.assertIn("y.dll!Bar from synthetic+1 (3 calls)", report)
+        self.assertNotIn("x.dll!Foo from", report)
+
     def test_exception_limit_keeps_final_observation(self):
         early = [
             {"kind": "exception", "code": "0xe06d7363", "at": f"synthetic.exe+0x{0x1100 + i:x}", "cpp": True}
@@ -264,6 +278,57 @@ class BootTraceTests(unittest.TestCase):
         )
         self.assertEqual(trace["refused"], [{"seq": 6, "method": "MapTiles"}])
         self.assertEqual(trace["last_seq"], 9)
+        self.assertEqual(trace["sequence_break_count"], 0)
+        self.assertEqual(trace["sequence_breaks"], [])
+
+    def test_repeated_method_failures_are_counted_beyond_the_sample_limit(self):
+        self.write_lines(self.d3d12, [
+            "[d3d12-trace] #1 CreatePipelineState ok",
+            "[d3d12-trace] #2 CreatePipelineState failed",
+            "[d3d12-trace] #3 CreatePipelineState failed",
+            "[d3d12-trace] #4 ExecuteCommandLists partial",
+        ])
+        trace = bt.parse_d3d12(self.d3d12, limit=1)
+        self.assertEqual(trace["method_outcomes"], {
+            "CreatePipelineState": {"ok": 1, "failed": 2},
+            "ExecuteCommandLists": {"partial": 1},
+        })
+        self.assertEqual(len(trace["failed"]), 1)
+        self.assertIn("CreatePipelineState: failed 2", bt.format_text({"startup": None, "d3d12": trace}, 1))
+
+    def test_sequence_breaks_count_boundaries_and_limit_examples(self):
+        self.write_lines(self.d3d12, [
+            "[d3d12-trace] #4 Foo called",
+            "[rt] ordinary diagnostic",
+            "[d3d12-trace] #5 Foo called",
+            "[d3d12-trace] #12 Foo called",
+            "[d3d12-trace] #1 Foo called",
+            "[d3d12-trace] #1 Foo failed",
+            "[d3d12-trace] #2 Foo called",
+        ])
+        examples = [
+            {"expected": 1, "observed": 4},
+            {"expected": 6, "observed": 12},
+            {"expected": 13, "observed": 1},
+            {"expected": 2, "observed": 1},
+        ]
+        for limit in (2, 4):
+            with self.subTest(limit=limit):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(bt.main(["--d3d12", self.d3d12, "--json", "--limit", str(limit)]), 0)
+                summary = json.loads(output.getvalue())
+                trace = summary["d3d12"]
+                self.assertEqual(trace["sequence_break_count"], 4)
+                self.assertEqual(trace["sequence_breaks"], examples[:limit])
+                self.assertEqual(trace["calls"], 6)
+                self.assertEqual(trace["outcomes"], {"called": 5, "failed": 1})
+                self.assertEqual(trace["last_seq"], 2)
+                self.assertEqual(trace["ignored_lines"], 1)
+                text = bt.format_text(summary, limit)
+                self.assertIn("sequence breaks: 4", text)
+                self.assertIn("expected #6, observed #12", text)
+                self.assertEqual(text.count("observed #"), limit)
 
     def test_powershell_error_record_prefix_keeps_the_first_call(self):
         self.write_lines(
@@ -288,6 +353,7 @@ class BootTraceTests(unittest.TestCase):
         self.assertIn("#5 SetMarker/BeginEvent with unknown metadata", text)
         self.assertIn("ID3D12CommandQueue::ExecuteCommandLists", text)
         self.assertIn("[rt] diagnostics are not summarized", text)
+        self.assertNotIn("sequence breaks", text)
 
     def test_partial_submissions_are_named_in_text_and_json(self):
         method = "ID3D12CommandQueue::ExecuteCommandLists"
@@ -300,8 +366,8 @@ class BootTraceTests(unittest.TestCase):
         self.assertEqual(trace["first"][method], {"seq": 1, "outcome": "ok"})
         self.assertEqual(trace["outcomes"]["partial"], 2)
         text = bt.format_text(bt.summarize(None, trace), 1)
-        self.assertIn(f"  partial: #2 {method}", text)
-        self.assertNotIn(f"#3 {method}", text)
+        self.assertIn(f"  partial: #2 {method}", text.splitlines())
+        self.assertNotIn(f"  partial: #3 {method}", text.splitlines())
 
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
@@ -321,6 +387,38 @@ class BootTraceTests(unittest.TestCase):
         data = json.loads(out.getvalue())
         self.assertEqual(data["startup"]["pid"], 123)
         self.assertEqual(data["d3d12"]["calls"], 9)
+
+    def test_counts_only_json_omits_raw_trace_fields(self):
+        self.write(self.startup, [
+            {"kind": "exception", "code": "private-code", "address": "private-address",
+             "stack": ["private-stack"]},
+            {"kind": "file_open_failed", "path": "private-file", "caller": "private-caller"},
+            {"kind": "error", "what": "private-message"},
+            {"kind": "private-kind"},
+        ])
+        self.write_lines(self.d3d12, [
+            "[d3d12-trace] #1 private-method failed",
+            "[d3d12-trace] #2 private-method private-outcome",
+        ])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(bt.main([self.startup, "--d3d12", self.d3d12, "--counts-only"]), 0)
+        text = out.getvalue()
+        self.assertNotIn("private-", text)
+        self.assertNotIn("boot.jsonl", text)
+        self.assertNotIn("d3d12.log", text)
+        data = json.loads(text)
+        self.assertEqual(data["startup"]["exception_count"], 1)
+        self.assertEqual(data["startup"]["events"], 4)
+        self.assertEqual(data["d3d12"]["outcomes"], {"failed": 1, "other": 1})
+        self.assertEqual(data["d3d12"]["calls"], 2)
+
+    def test_counts_only_redacts_missing_input_paths_from_stderr(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(bt.main([self.startup, "--counts-only"]), 2)
+        self.assertIn("startup trace unavailable", err.getvalue())
+        self.assertNotIn("boot.jsonl", err.getvalue())
 
     def test_missing_and_empty_files_are_errors(self):
         err = io.StringIO()
@@ -355,6 +453,49 @@ class BootTraceTests(unittest.TestCase):
         self.assertEqual(out.getvalue(), "")
         self.assertIn(self.startup, err.getvalue())
         self.assertIn(self.d3d12, err.getvalue())
+
+    def test_last_recorded_d3d12_call_can_repeat_an_earlier_method(self):
+        self.write_lines(self.d3d12, [
+            "[d3d12-trace] #1 CreateCommandAllocator ok",
+            "[d3d12-trace] #2 CreateCommittedResource failed",
+            "[d3d12-trace] #3 CreateCommandAllocator ok",
+            "[rt] a runtime diagnostic after the last call",
+            "[d3d12-trace] #4",
+        ])
+        trace = bt.parse_d3d12(self.d3d12, limit=1)
+        self.assertEqual(trace["ignored_lines"], 2)
+        self.assertEqual(trace["first"]["CreateCommandAllocator"], {"seq": 1, "outcome": "ok"})
+        self.assertEqual(trace["failed"], [{"seq": 2, "method": "CreateCommittedResource"}])
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(bt.main(["--d3d12", self.d3d12, "--limit", "1", "--json"]), 0)
+        parsed = json.loads(output.getvalue())["d3d12"]
+        self.assertEqual(parsed["last_seq"], 3)
+        self.assertEqual(parsed["last_call"], {"seq": 3, "method": "CreateCommandAllocator", "outcome": "ok"})
+        text = bt.format_text(bt.summarize(None, trace), 1)
+        self.assertIn("  last recorded call: #3 CreateCommandAllocator ok", text.splitlines())
+
+    def test_unterminated_d3d12_outcome_must_be_complete(self):
+        first = b"[d3d12-trace] #1 CreateCommandAllocator ok\n"
+        second = b"[d3d12-trace] #2 CreateCommittedResource "
+        for ending, seq, ignored, outcomes in (
+            (b"fai", 1, 1, {"ok": 1}),
+            (b"failed", 2, 0, {"ok": 1, "failed": 1}),
+            (b"ignored", 2, 0, {"ok": 1, "ignored": 1}),
+            (b"future-result\n", 2, 0, {"ok": 1, "future-result": 1}),
+        ):
+            with self.subTest(ending=ending):
+                with open(self.d3d12, "wb") as fh:
+                    fh.write(first + second + ending)
+                trace = bt.parse_d3d12(self.d3d12)
+                self.assertEqual(trace["last_call"]["seq"], seq)
+                self.assertEqual(trace["last_call"]["outcome"], next(reversed(outcomes)))
+                self.assertEqual(trace["last_seq"], seq)
+                self.assertEqual(trace["calls"], seq)
+                self.assertEqual(trace["outcomes"], outcomes)
+                self.assertEqual(trace["ignored_lines"], ignored)
+                self.assertEqual(trace["sequence_break_count"], 0)
 
     def test_d3d12_log_without_trace_lines_is_an_error(self):
         self.write_lines(self.d3d12, ["[rt] one", "[rt] two"])

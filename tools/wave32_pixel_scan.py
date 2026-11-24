@@ -14,10 +14,12 @@ that is uniform anyway, a branch that skips a block whose lanes are all off) tha
 Families (an instruction counts once, in the first that matches):
 
 - lane_id: `v_mbcnt_lo/hi_u32_b32`, whatever the mask operand (with -1 it is the lane number).
-- mask_word: the instructions the translator answers from the whole wave's mask (rdna2spirv.Gen.wave_mask) when a
-  source holds a lane mask: `s_bcnt0/1_i32_*`, `s_ff0/1_i32_*`, `s_bitcmp0/1_*`, `s_cmp_*` with a lane-mask operand.
-  A lane mask is EXEC, or VCC / an SGPR that tools/lane_masks.py finds written as a mask on every path (the
-  translator's holds_lane_mask); the same instructions on data are not counted.
+- mask_word: the instructions the translator answers from the whole wave's mask (rdna2spirv.Gen.wave_mask /
+  lane_mask_word) when a source holds a lane mask: `s_bcnt0/1_i32_*`, `s_ff0/1_i32_*`, `s_flbit_i32_b32`,
+  `s_flbit_i32`, `s_bitcmp0/1_*`, `s_cmp_*`, `s_cmpk_*` with a lane-mask operand, plus `s_movrels_b32/b64` when
+  any SGPR holds a live lane mask. A lane mask is EXEC, or VCC / an SGPR that tools/lane_masks.py (wave64=False)
+  finds written as a mask on every path (the translator's holds_lane_mask); the same instructions on data are not
+  counted.
 - lane_select: `v_readlane_b32`, `v_writelane_b32`, `v_readfirstlane_b32`, except the two the translator lowers
   without a subgroup op: a `v_readlane` that fetches a parked lane mask back, and a `v_readfirstlane` of a mask held
   in a VGPR (lane_masks.py's state).
@@ -26,8 +28,9 @@ Families (an instruction counts once, in the first that matches):
 - dpp_row: a DPP instruction with a row control (`row_shl/shr/ror/mirror/half_mirror/share/xmask`) or `dpp8`.
 - vote: a whole-wave branch on EXEC or VCC (`s_cbranch_execz/execnz/vccz/vccnz`, which rdna2spirv.branch_condition
   always answers with a subgroup vote), or an SCC reader (`s_cbranch_scc0/1`,
-  `s_cselect`, `s_cmov`, `s_addc`, `s_subb`) whose SCC, in the same basic block, last came from a lane-mask SOP:
-  a bitwise, saveexec or wrexec op that writes EXEC or reads a lane mask (the translator's scc_from_mask vote).
+  `s_cselect`, `s_cmov`, `s_addc`, `s_subb`, or an explicit `scc`/`src_scc` operand) whose SCC, in the same basic
+  block, last came from a lane-mask vote: any saveexec/wrexec op, a bitwise SOP writing `exec`/`exec_lo`/`vcc`/`vcc_lo`
+  or reading a lane mask (`scc_logic`), or `s_wqm_*` of a lane mask.
   An SCC carried across a block boundary is not followed, so this row is a lower bound.
 - quad (reported apart, not in `crossing`): `s_wqm_*`, DPP `quad_perm`, and `ds_swizzle_b32` in QUAD_PERM mode
   (offset bit 15 set). A quad is four consecutive lanes, so these give the same result at either width.
@@ -45,6 +48,7 @@ Wave size and stage are found as in wave64_graphics_scan.py: the FSSM header's w
 blocks are split as rdna2spirv.translate does (at branch targets and after branches) for the lane-mask analysis.
 
 Standard library only. Nothing from the game is printed or written: counts only.
+Usage: `python -I tools/wave32_pixel_scan.py --help` lists the options.
 """
 import argparse
 import json
@@ -64,7 +68,10 @@ FAMILIES = ("lane_id", "mask_word", "lane_select", "permute", "dpp_row", "vote",
 CROSSING = FAMILIES[:-1]
 
 LANE_ID = {"v_mbcnt_lo_u32_b32", "v_mbcnt_hi_u32_b32"}
-MASK_WORD_PREFIX = ("s_bcnt0_i32_", "s_bcnt1_i32_", "s_ff0_i32_", "s_ff1_i32_", "s_bitcmp0_", "s_bitcmp1_", "s_cmp_")
+MASK_WORD_PREFIX = ("s_bcnt0_i32_", "s_bcnt1_i32_", "s_ff0_i32_", "s_ff1_i32_", "s_bitcmp0_", "s_bitcmp1_", "s_cmp_",
+                    "s_cmpk_")
+MASK_WORD_EXACT = {"s_flbit_i32_b32", "s_flbit_i32"}
+MOVRELS_OPS = {"s_movrels_b32", "s_movrels_b64"}
 LANE_SELECT = {"v_readlane_b32", "v_writelane_b32", "v_readfirstlane_b32"}
 PERMUTE = {"v_permlane16_b32", "v_permlanex16_b32", "ds_permute_b32", "ds_bpermute_b32"}
 DPP_ROW = re.compile(r"^(row_(shl|shr|ror|share|xmask):|row_mirror$|row_half_mirror$|dpp8:)")
@@ -73,9 +80,15 @@ SCC_READERS = ("s_cbranch_scc0", "s_cbranch_scc1", "s_cselect_", "s_cmov_", "s_c
 SCC_WRITERS = ("s_and_", "s_or_", "s_xor_", "s_andn1_", "s_andn2_", "s_orn1_", "s_orn2_", "s_nand_", "s_nor_",
                "s_xnor_", "s_not_", "s_wqm_", "s_quadmask_", "s_bcnt", "s_cmp_", "s_cmpk_", "s_bitcmp", "s_add_",
                "s_addk_", "s_sub_", "s_addc_", "s_subb_", "s_lshl", "s_lshr", "s_ashr", "s_bfe_", "s_min_", "s_max_",
-               "s_abs_", "s_absdiff_", "s_ff0_", "s_ff1_", "s_flbit_", "s_bitset", "s_brev_", "s_bfm_")
+               "s_abs_", "s_absdiff_")
 MASK_SOP = ("s_and_", "s_or_", "s_xor_", "s_andn1_", "s_andn2_", "s_orn1_", "s_orn2_", "s_nand_", "s_nor_",
             "s_xnor_", "s_not_")
+
+
+def reads_scc(ins, op):
+    return op.startswith(SCC_READERS) or any(
+        x.get("k") == "special" and x.get("t") in ("scc", "src_scc") for x in ins["args"]
+    )
 
 
 def blocks_of(insns):
@@ -149,11 +162,13 @@ def family_of(ins, masks, either):
     op = rdna2spirv.base_op(ins["op"])
     if op in LANE_ID:
         return "lane_id"
-    if op.startswith(MASK_WORD_PREFIX):
-        # s_cmp_* s0, s1 and s_bitcmp* s0, bit read their first operands; s_bcnt / s_ff write sD from sS.
+    if op.startswith(MASK_WORD_PREFIX) or op in MASK_WORD_EXACT:
+        # s_cmp_* s0, s1 reads both operands; s_cmpk_* and s_bitcmp* read operand 0; s_bcnt / s_ff / s_flbit read operand 1.
         a = ins["args"]
-        srcs = a[:2] if op.startswith("s_cmp_") else a[:1] if op.startswith("s_bitcmp") else a[1:2]
+        srcs = a[:2] if op.startswith("s_cmp_") else a[:1] if op.startswith(("s_cmpk_", "s_bitcmp")) else a[1:2]
         return "mask_word" if any(holds_lane_mask(masks, either, x) for x in srcs) else None
+    if op in MOVRELS_OPS:
+        return "mask_word" if any(isinstance(k, int) and 0 <= k < rdna2spirv.Gen.SGPRS for k in masks) else None
     if op in LANE_SELECT:
         a = ins["args"]
         # Not a subgroup op as translated: a lane mask fetched back from the VGPR lane it was parked in, and a
@@ -180,7 +195,7 @@ def family_of(ins, masks, either):
 def scan_shader(insns):
     """Per-family occurrence counts for one wave32 program (a Counter, empty when nothing matches)."""
     blocks, succ = blocks_of(insns)
-    masks_at, _, either_at = lane_masks.analyse(blocks, succ, include_either=True)
+    masks_at, _, either_at = lane_masks.analyse(blocks, succ, include_either=True, wave64=False)
     hits = Counter()
     for blk in blocks:
         scc_from_mask = False                       # the last SCC writer in this block was a lane-mask SOP
@@ -190,13 +205,20 @@ def scan_shader(insns):
             fam = family_of(ins, masks, either)
             if fam:
                 hits[fam] += 1
-            elif op in MASK_BRANCHES or (op.startswith(SCC_READERS) and scc_from_mask):
+            elif op in MASK_BRANCHES or (reads_scc(ins, op) and scc_from_mask):
                 hits["vote"] += 1
             if op.startswith(SCC_WRITERS):
                 a = ins["args"]
-                writes_exec = bool(a) and a[0]["k"] == "special" and a[0].get("t", "").startswith("exec")
-                scc_from_mask = (op.startswith(MASK_SOP) or "_saveexec_" in op or "_wrexec_" in op) and \
-                    (writes_exec or any(holds_lane_mask(masks, either, x) for x in a[1:3]))
+                if "_saveexec_" in op or "_wrexec_" in op:
+                    scc_from_mask = True
+                elif op.startswith("s_wqm_"):
+                    scc_from_mask = len(a) > 1 and holds_lane_mask(masks, either, a[1])
+                elif op.startswith(MASK_SOP):
+                    writes_mask_dst = (bool(a) and a[0]["k"] == "special"
+                                       and a[0].get("t") in ("exec", "exec_lo", "vcc", "vcc_lo"))
+                    scc_from_mask = writes_mask_dst or any(holds_lane_mask(masks, either, x) for x in a[1:3])
+                else:
+                    scc_from_mask = False
     return hits
 
 

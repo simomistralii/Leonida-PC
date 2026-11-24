@@ -95,6 +95,7 @@ MAX_ANIM_BLOCKS = 256
 MAX_TRACK_ENTRIES = 4096
 MAX_PROP_ENTRIES = 256
 SCAN_CHUNK_BYTES = 32 * 1024 * 1024
+PROGRESS_BYTES = 2 * 1024 * 1024 * 1024
 
 CSV_COLUMNS = [
     "bank_offset",
@@ -1721,7 +1722,7 @@ def scan_rpf(path, *, start=0, limit=None, max_banks=None, deep=True, collect_re
                 adat_ranges.append((earlier["offset"], earlier["end"]))
 
         pos = start
-        next_prog = start + 2 * 1024 * 1024 * 1024
+        next_prog = start + PROGRESS_BYTES
         while pos < scan_end:
             f.seek(pos)
             buf = f.read(min(SCAN_CHUNK_BYTES + 16, scan_end - pos))
@@ -1833,7 +1834,7 @@ def scan_rpf(path, *, start=0, limit=None, max_banks=None, deep=True, collect_re
                 break
             if progress and pos >= next_prog:
                 progress(pos, scan_end, summary)
-                next_prog += 2 * 1024 * 1024 * 1024
+                next_prog += PROGRESS_BYTES
 
     _finish_summary(summary, t0)
     return records, summary
@@ -2031,7 +2032,7 @@ def main(argv=None):
     ap.add_argument("--curves", action="store_true",
                     help="also decode every clip's keyframes and count the outcome (slower; counts only)")
     ap.add_argument("--summary-only", action="store_true", help="do not store per-clip records in memory/JSON")
-    ap.add_argument("--quiet", action="store_true", help="suppress progress output")
+    ap.add_argument("--quiet", action="store_true", help="suppress progress on stderr; stdout contains the JSON summary")
     args = ap.parse_args(argv)
 
     if not os.path.exists(args.source):
@@ -2067,7 +2068,7 @@ def main(argv=None):
                 print(
                     f"[{min(pos, end) / max(1, end):6.1%}] banks={s['adat_banks']} "
                     f"rsc8={s['rsc8_in_adat']} valid={s['rsc8_valid']} outside={s['rsc8_outside_adat']}",
-                    flush=True,
+                    file=sys.stderr, flush=True,
                 )
         try:
             records, summary = scan_single_file(

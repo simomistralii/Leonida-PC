@@ -189,6 +189,15 @@ mode 1/32 descriptors have a known element size (4 mode 1, 11 mode 32); all fift
 other 19 mode 1 records formerly counted as unknown-format 2D entries are two-slice 2D arrays
 (`depth = 2`, DXGI 28/71/83/98; see `docs/textures_arrays.md`).
 
+Where one descriptor's mode is still in doubt, `tools/tex_mode_probe.py <textures index.json>
+<carve dir> [--fmt BC1] [--n 12]` scores every 4 KiB and 64 KiB addrlib colour pattern of the
+element size, crossed with both placements of the top mip (at the data offset, or at the end of
+the chain, since GFX10 stores mips smallest first), by the smoothness of the decoded BC1/BC2/BC3
+average colours. It prints the best and second-best pattern with the placement and the linear
+(untiled) score per texture, then a tally of the winners and how many textures no candidate fit.
+It needs numpy, like `tests/test_tex_mode_probe.py`, which covers it on synthetic blobs with no
+game files.
+
 ### The layout is the AMD mip tail
 
 The compact profile is the Gfx10 mip chain: standalone mips are padded to whole blocks and
@@ -1051,7 +1060,7 @@ All 1,315 system streams are RAGE `pgDictionary<grcTexture>` pages containing de
 
 ## Reproduce
 
-The normal `make_game.py` assets stage now fills missing and partial BCPack DDS entries in the same pool manifests used for model texture lookup. It uses strict decoding by default and discovers an optional local reconstruction profile at `<work>/bcpack-calibration.json`. The single-entry exporter accepts the same profile through `--calibration`. Build instructions, the JSON schema and the game-independent test are in the [calibrated export guide](../tools/bcpack_calibration/README.md).
+The normal `make_game.py` assets stage now fills missing and partial BCPack DDS entries in the same pool manifests used for model texture lookup. It uses strict decoding by default and discovers an optional local reconstruction profile at `<work>/bcpack-calibration.json`. The pass stamp in each pool manifest hashes the decoder modules (`ttpf_assets.DECODER_SOURCES`) and the profile, so a pool is done again after either changes. The single-entry exporter accepts the same profile through `--calibration`. Build instructions, the JSON schema and the game-independent test are in the [calibrated export guide](../tools/bcpack_calibration/README.md).
 
 `tools/ttpf_mips.py` is the read-only measurement and decode tool (with `tools/bcpack.py`
 enabled in strict confirmed-history mode by default), and `tools/bcpack_history_calib.py`
@@ -1066,6 +1075,7 @@ python -I tools/ttpf_mips.py check <pool.ttpf> <index> [--allow-provisional] [--
 python -I tools/ttpf_mips.py export <pool.ttpf> <index> <out.dds> [--allow-provisional] [--history <path>]
 python -I tests/test_bcpack.py
 python -I tests/test_bcpack_history_calib.py
+python -I tests/test_bcpack_tool.py
 python -I tests/test_tex_headers.py
 python -I tests/test_ttpf_mips.py
 ```

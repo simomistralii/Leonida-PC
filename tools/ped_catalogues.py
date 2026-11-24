@@ -1077,6 +1077,11 @@ def iter_catalogues_in_file(path: str, *, max_inflate: int = MAX_INFLATE) -> Ite
                 yield cat
 
 
+def _row_file_name(row: dict) -> str:
+    name = row.get("file")
+    return name if isinstance(name, str) and name else f"{row['offset']:012x}.bin"
+
+
 def iter_catalogues_in_dir(path: str, *, max_inflate: int = MAX_INFLATE) -> Iterator[CatalogueContainer]:
     """Yield all `0x8dcb4cf5` catalogues in a carved directory (joining contiguous streams when `index.json` exists)."""
     manifest = os.path.join(path, "index.json")
@@ -1088,13 +1093,13 @@ def iter_catalogues_in_dir(path: str, *, max_inflate: int = MAX_INFLATE) -> Iter
             doc = None
         if isinstance(doc, dict) and isinstance(doc.get("files"), list):
             rows = sorted(
-                (r for r in doc["files"] if isinstance(r, dict) and isinstance(r.get("offset"), int)),
+                (r for r in doc["files"] if isinstance(r, dict) and type(r.get("offset")) is int and r["offset"] >= 0),
                 key=lambda r: r["offset"],
             )
             i = 0
             while i < len(rows):
                 row = rows[i]
-                fname = row.get("file") or f"{row['offset']:012x}.bin"
+                fname = _row_file_name(row)
                 fpath = os.path.join(path, fname)
                 if not os.path.isfile(fpath) or os.path.getsize(fpath) > max_inflate:
                     i += 1
@@ -1114,12 +1119,12 @@ def iter_catalogues_in_dir(path: str, *, max_inflate: int = MAX_INFLATE) -> Iter
                 streams = 1
                 while status == "truncated" and j + 1 < len(rows) and streams <= MAX_CONTINUATIONS:
                     stored = rows[j].get("stored")
-                    if not isinstance(stored, int):
+                    if type(stored) is not int or stored < 0:
                         break
                     next_off = (rows[j]["offset"] + stored + 15) & ~15
                     if rows[j + 1]["offset"] != next_off:
                         break
-                    nname = rows[j + 1].get("file") or f"{rows[j + 1]['offset']:012x}.bin"
+                    nname = _row_file_name(rows[j + 1])
                     npath = os.path.join(path, nname)
                     if not os.path.isfile(npath):
                         break

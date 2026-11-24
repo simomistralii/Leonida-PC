@@ -1,3 +1,4 @@
+; regen_fixtures: this source has a translator fixture in tests/semantic/fixtures/disasm
 ; A pixel shader's color export has its own lane mask: EXEC at that export. This program exports mrt0 from every
 ; lane with `done` and no `vm`, waits for the export, and only then turns every lane off. Measured on RDNA2
 ; (gfx1036, ps_oracle.py of #3061): every pixel is written with the exported words. A path without a `vm` export

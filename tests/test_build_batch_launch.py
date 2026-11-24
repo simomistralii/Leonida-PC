@@ -19,7 +19,10 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ("build_runtime.ps1", "build_llvm_mc.ps1")
-LAUNCH = re.compile(r"^\$p = Start-Process cmd\.exe -ArgumentList (.+?) -NoNewWindow -PassThru\s*$", re.M)
+# build_llvm_mc.ps1 keeps the one-line form; build_runtime.ps1 writes `-FilePath cmd.exe` and ends the line with a
+# backtick, continuing with -WindowStyle and the log redirects. Both pass the same -ArgumentList expression.
+LAUNCH = re.compile(r"^\$p = Start-Process (?:-FilePath )?cmd\.exe -ArgumentList (.+?)"
+                    r" (?:-NoNewWindow )?-PassThru(?: `)?\s*$", re.M)
 FOLDERS = ("plain", "a & b", "a&b", "x^y", "sp (x)", "東京 & co")
 
 

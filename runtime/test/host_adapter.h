@@ -69,9 +69,9 @@ inline IDXGIAdapter1* named(IDXGIFactory1* factory, const std::string& needle) {
 
 // The adapter for one pass of a test's `for (const bool warp : {false, true})` loop, with a reference the caller
 // releases (null: the default adapter), and the name the test prints for it. False when the pass has no adapter: no
-// WARP on this PC, or LEONIDA_HOST_ADAPTER=warp on the hardware pass.
-inline bool reference(IDXGIFactory4* factory, const vktest::Device& vk, bool warp, IDXGIAdapter** adapter,
-                      std::string& name) {
+// WARP on this PC, or LEONIDA_HOST_ADAPTER=warp on the hardware pass. `luid` is the layer's adapter (null: unknown),
+// for a test whose layer device is the standalone one (ID3D12Device::GetAdapterLuid) rather than a vktest::Device.
+inline bool reference(IDXGIFactory4* factory, const LUID* luid, bool warp, IDXGIAdapter** adapter, std::string& name) {
     *adapter = nullptr;
     if (warp) {
         name = "WARP";
@@ -91,15 +91,8 @@ inline bool reference(IDXGIFactory4* factory, const vktest::Device& vk, bool war
         std::fprintf(stderr, "LEONIDA_HOST_ADAPTER=%s: no such adapter, or no D3D12 device on it\n", needle.c_str());
         std::exit(1);
     }
-    VkPhysicalDeviceIDProperties id{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
-    VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &id};
-    if (vk.physical)
-        vk.instance_fn<PFN_vkGetPhysicalDeviceProperties2>("vkGetPhysicalDeviceProperties2")(vk.physical, &properties);
-    LUID luid{};
-    static_assert(sizeof(luid) == sizeof(id.deviceLUID));
-    std::memcpy(&luid, id.deviceLUID, sizeof(luid));
     // With a null device pointer D3D12CreateDevice only says whether the adapter would give one.
-    if (id.deviceLUIDValid && SUCCEEDED(factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(adapter))) &&
+    if (luid && SUCCEEDED(factory->EnumAdapterByLuid(*luid, IID_PPV_ARGS(adapter))) &&
         SUCCEEDED(D3D12CreateDevice(*adapter, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device), nullptr))) {
         name = description(*adapter);
         return true;
@@ -108,6 +101,19 @@ inline bool reference(IDXGIFactory4* factory, const vktest::Device& vk, bool war
     *adapter = nullptr;
     name = "the default adapter";
     return true;
+}
+
+// The same, with the layer's adapter read from its Vulkan device (VkPhysicalDeviceIDProperties::deviceLUID).
+inline bool reference(IDXGIFactory4* factory, const vktest::Device& vk, bool warp, IDXGIAdapter** adapter,
+                      std::string& name) {
+    VkPhysicalDeviceIDProperties id{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
+    VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &id};
+    if (vk.physical)
+        vk.instance_fn<PFN_vkGetPhysicalDeviceProperties2>("vkGetPhysicalDeviceProperties2")(vk.physical, &properties);
+    LUID luid{};
+    static_assert(sizeof(luid) == sizeof(id.deviceLUID));
+    std::memcpy(&luid, id.deviceLUID, sizeof(luid));
+    return reference(factory, id.deviceLUIDValid ? &luid : nullptr, warp, adapter, name);
 }
 
 }  // namespace hostadapter

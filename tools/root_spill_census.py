@@ -132,6 +132,12 @@ def main(argv=None):
         for other in (a.index, a.carve):
             if other and same_report_path(other, a.json):
                 ap.error("--json must not overwrite an input index")
+    if not os.path.exists(a.index):
+        print(f"ERROR: cannot read {a.index}: no such file", file=sys.stderr)
+        return 2
+    if a.carve and not os.path.exists(a.carve):
+        print(f"ERROR: cannot read {a.carve}: no such file", file=sys.stderr)
+        return 2
     with open(a.index, encoding="utf-8-sig") as f:  # an index saved with a UTF-8 BOM is still JSON
         index = json.load(f)
     if not isinstance(index, dict):

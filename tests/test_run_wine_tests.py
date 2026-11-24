@@ -13,6 +13,7 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import time
@@ -448,20 +449,25 @@ class DriveMapTest(unittest.TestCase):
         # The "Wine" here is the Python interpreter, so the program reads the drive through its dosdevices link, which
         # is where Wine resolves D:/win/root/... too.
         probe = self.root / "probe.py"
-        target = self.link / "win" / "root" / "runtime" / "build" / "generated" / "cs.spv"
-        probe.write_text(f"import sys\nsys.exit(0 if open({str(target)!r}).read() == 'spirv' else 1)\n", encoding="utf-8")
         listing = self.root / "ctest.json"
-        listing.write_text(json.dumps({"tests": [ctest_entry("compiled_in_path", [WINDOWS_ROOT + "/probe.py"])]}),
-                           encoding="utf-8")
-        argv = ["run_wine_tests.py", "--tests", str(listing), "--windows-root", WINDOWS_ROOT,
-                "--root", str(self.root), "--wine", sys.executable.replace(os.sep, "/")]
-        out = io.StringIO()
-        with mock.patch.dict(os.environ, {"WINEPREFIX": str(self.prefix)}), mock.patch.object(sys, "argv", argv), \
-                contextlib.redirect_stdout(out):
-            code = rwt.main()
-        self.assertEqual(code, 0, out.getvalue())
-        self.assertIn("[PASS] compiled_in_path", out.getvalue())
-        self.assertFalse(os.path.lexists(self.link))
+        for windows_root, checkout in ((WINDOWS_ROOT, self.link / "win" / "root"), ("D:/", self.link)):
+            with self.subTest(windows_root=windows_root):
+                target = checkout / "runtime" / "build" / "generated" / "cs.spv"
+                probe.write_text(f"import sys\nsys.exit(0 if open({str(target)!r}).read() == 'spirv' else 1)\n",
+                                 encoding="utf-8", newline="\n")
+                command = [windows_root.rstrip("/") + "/probe.py"]
+                listing.write_text(json.dumps({"tests": [ctest_entry("compiled_in_path", command)]}),
+                                   encoding="utf-8", newline="\n")
+                argv = ["run_wine_tests.py", "--tests", str(listing), "--windows-root", windows_root,
+                        "--root", str(self.root), "--wine", sys.executable.replace(os.sep, "/"),
+                        "--require", "compiled_in_path"]
+                out = io.StringIO()
+                with mock.patch.dict(os.environ, {"WINEPREFIX": str(self.prefix)}), \
+                        mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(out):
+                    code = rwt.main()
+                self.assertEqual(code, 0, out.getvalue())
+                self.assertIn("[PASS] compiled_in_path", out.getvalue())
+                self.assertFalse(os.path.lexists(self.link))
 
 
 class MainTest(unittest.TestCase):
@@ -488,10 +494,13 @@ class MainTest(unittest.TestCase):
     def command(self, name):
         return [WINDOWS_ROOT + "/artifact/" + name]
 
-    def run_main(self, entries, *extra, stderr=False, root=None):
+    def run_main(self, entries, *extra, stderr=False, root=None, wine=sys.executable):
         listing = self.list_tests(entries)
         argv = ["run_wine_tests.py", "--tests", listing, "--windows-root", WINDOWS_ROOT,
-                "--root", str(self.root if root is None else root), "--wine", sys.executable.replace(os.sep, "/"), *extra]
+                "--root", str(self.root if root is None else root)]
+        if wine is not None:
+            argv += ["--wine", wine.replace(os.sep, "/")]
+        argv += extra
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = rwt.main()
@@ -502,15 +511,39 @@ class MainTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("1 passed, 0 failed, 0 skipped under Wine (1 tests)", out)
 
+    def test_child_sees_eof_even_when_the_runner_has_input(self):
+        (self.artifact / "stdin.py").write_text(
+            "import sys\nassert sys.stdin.read() == ''\n", encoding="utf-8", newline="\n")
+        listing = self.list_tests([ctest_entry("stdin", self.command("stdin.py"))])
+        proc = subprocess.run(
+            [sys.executable, "-I", str(SCRIPTS / "run_wine_tests.py"), "--tests", listing,
+             "--windows-root", WINDOWS_ROOT, "--root", str(self.root),
+             "--wine", f'"{sys.executable.replace(os.sep, "/")}"', "--require", "stdin"],
+            input="input meant for the caller\n", capture_output=True, text=True, timeout=10)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("[PASS] stdin", proc.stdout)
+
     def test_relative_root_launches_the_artifact_from_its_working_directory(self):
         (self.artifact / "check_cwd.py").write_text(
-            "from pathlib import Path\nassert Path.cwd() == Path(__file__).resolve().parent\n",
+            "from pathlib import Path\nassert Path.cwd().resolve() == Path(__file__).resolve().parent\n",
             encoding="utf-8", newline="\n")
         entry = ctest_entry("ok", self.command("check_cwd.py"))
         with contextlib.chdir(self.root):
             code, out, _ = self.run_main([entry], "--require", "ok", root=".")
         self.assertEqual(code, 0, out)
         self.assertIn("[PASS] ok", out)
+
+    @unittest.skipUnless(os.name == "posix", "uses a symlink as a Wine executable")
+    def test_relative_wine_command_is_resolved_before_changing_directories(self):
+        (self.root / "local wine").symlink_to(sys.executable)
+        command = "'./local wine' -B"
+        entry = ctest_entry("ok", self.command("ok.py"))
+        with contextlib.chdir(self.root):
+            for wine, env in ((command, "missing-wine"), (None, command)):
+                with self.subTest(wine=wine), mock.patch.dict(os.environ, {"WINE": env}):
+                    code, out, _ = self.run_main([entry], "--require", "ok", wine=wine)
+                    self.assertEqual(code, 0, out)
+                    self.assertIn("[PASS] ok", out)
 
     def test_a_required_test_that_fails_exits_one(self):
         code, out, _ = self.run_main([ctest_entry("bad", self.command("bad.py"))], "--require", "bad")
@@ -547,6 +580,15 @@ class MainTest(unittest.TestCase):
         self.assertIn("### Windows tests under Wine 11", text)
         self.assertIn("| `ok` | pass | yes |", text)
         self.assertIn("| `bad` | fail |  |", text)
+
+    def test_the_summary_names_a_required_test_that_is_not_listed(self):
+        summary = self.root / "summary.md"
+        code, _, _ = self.run_main([ctest_entry("ok", self.command("ok.py"))], "--summary", str(summary),
+                                   "--require", "ok", "--require", "absent", "--require", "absent")
+        self.assertEqual(code, 1)
+        text = summary.read_text(encoding="utf-8")
+        self.assertIn("| `ok` | pass | yes |", text)
+        self.assertEqual(text.count("| `absent` | missing: not listed by the Windows build | yes |"), 1)
 
     def test_a_summary_in_a_missing_folder_creates_it(self):
         summary = self.root / "missing" / "sub" / "summary.md"

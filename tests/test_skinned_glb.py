@@ -250,6 +250,56 @@ class SkinnedGlbTest(unittest.TestCase):
         self.assertEqual(stats["source_weight_sum_min"], 255)
         self.assertEqual(stats["source_weight_sum_max"], 255)
 
+    def test_local_child_listed_before_its_parent_keeps_the_own_skeleton_link(self):
+        skeleton = _skeleton_dir(self.root)
+        component = _component(self.root)
+        model = _read_model(component)
+        model["drawable"]["skeleton"] = [
+            {"name": "HelperParent", "parent_name": "SKEL_Spine",
+             "bind_matrix": _matrix((0.0, 0.0, 2.0))},
+            {"name": "HelperChild", "parent_name": "HelperParent",
+             "bind_matrix": _matrix((0.0, 0.0, 3.0))},
+        ]
+        model["drawable"]["models"][0]["bone_palette"] = [
+            skinned_glb.joaat32("HelperChild"),
+            skinned_glb.joaat32("HelperParent"),
+        ]
+        _write_json(os.path.join(component, "model.json"), model)
+
+        payload, stats = skinned_glb.build_skinned_glb(skeleton, [component])
+        gltf, _binary = skinned_glb.read_glb(self._write(payload))
+        self.assertEqual(stats["component_joints"], 2)
+        by_name = {node.get("name"): index for index, node in enumerate(gltf["nodes"])}
+        parent, child = by_name["HelperParent"], by_name["HelperChild"]
+        self.assertIn(child, gltf["nodes"][parent].get("children", []))
+        self.assertIn(parent, gltf["nodes"][by_name["SKEL_Spine"]].get("children", []))
+
+    def test_local_child_under_a_parent_the_palette_never_lists(self):
+        skeleton = _skeleton_dir(self.root)
+        component = _component(self.root)
+        model = _read_model(component)
+        model["drawable"]["skeleton"] = [
+            {"name": "HelperParent", "parent_name": "SKEL_Spine",
+             "bind_matrix": _matrix((0.0, 0.0, 2.0))},
+            {"name": "HelperMiddle", "parent": 0, "bind_matrix": _matrix((0.0, 0.0, 3.0))},
+            {"name": "HelperChild", "parent": 1, "bind_matrix": _matrix((0.0, 0.0, 4.0))},
+        ]
+        model["drawable"]["models"][0]["bone_palette"] = [
+            skinned_glb.joaat32("HelperChild"),
+            skinned_glb.joaat32("GM_TEST_L_UpperArm01_O"),
+        ]
+        _write_json(os.path.join(component, "model.json"), model)
+
+        payload, stats = skinned_glb.build_skinned_glb(skeleton, [component])
+        gltf, _binary = skinned_glb.read_glb(self._write(payload))
+        self.assertEqual(stats["component_joints"], 4)
+        by_name = {node.get("name"): index for index, node in enumerate(gltf["nodes"])}
+        parent, middle, child = (by_name["HelperParent"], by_name["HelperMiddle"],
+                                 by_name["HelperChild"])
+        self.assertIn(middle, gltf["nodes"][parent].get("children", []))
+        self.assertIn(child, gltf["nodes"][middle].get("children", []))
+        self.assertIn(parent, gltf["nodes"][by_name["SKEL_Spine"]].get("children", []))
+
     def test_normalized_byte_uvs_have_aligned_output_rows(self) -> None:
         from anim_glb import pack_glb
 

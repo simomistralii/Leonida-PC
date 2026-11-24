@@ -485,7 +485,8 @@ struct WriteImmediate {
     std::uint32_t mode;
 };
 
-// D3D12_SUBRESOURCE_RANGE_UINT64 of a dependent resource: [begin, end) in bytes of one subresource.
+// D3D12_SUBRESOURCE_RANGE_UINT64 of a dependent resource: [begin, end) in bytes of one subresource
+// (end == UINT64_MAX is the D3D12 sentinel meaning through the end of the subresource).
 struct DependentRange {
     ResourceId resource;
     std::uint32_t subresource;
@@ -761,12 +762,13 @@ public:
     }
 
     // ClearDepthStencilView; the cleared planes must be in depth_write state at execution.
-    // D3D12 requires depth in [0, 1] and at least one clear flag.
+    // A D32_FLOAT target keeps the depth exactly as given, outside [0, 1] and NaN included (measured on WARP,
+    // d3d12_clear_test); a D16 target quantizes it at replay. Flags that name no plane close the list and clear nothing.
     bool clear_depth_stencil(const TargetView& target, std::uint32_t flags, float depth, std::uint8_t stencil,
                              std::span<const Rect> rects = {}) {
         if (!valid(target)) return false;
-        if (!flags || (flags & ~(clear_depth | clear_stencil))) return false;
-        if ((flags & clear_depth) && !(depth >= 0.0f && depth <= 1.0f)) return false;
+        if (flags & ~(clear_depth | clear_stencil)) return false;
+        if (!flags) return !closed_;
         return append(ClearDepthStencil{target, flags, depth, stencil, {rects.begin(), rects.end()}});
     }
 
@@ -786,16 +788,15 @@ public:
         return append(write);
     }
 
-    // AtomicCopyBufferUINT/UINT64, with the rules of the D3D12 debug layer's ATOMICCOPYBUFFER_* messages (IDs
-    // 1027-1040 in d3d12sdklayers.h): both offsets aligned to the copy's size and at least one dependency, each on a
-    // named resource. A copy of a value onto itself (vkCmdCopyBuffer forbids the overlap) is refused too.
+    // AtomicCopyBufferUINT/UINT64: both offsets aligned to the copy's size and each dependency on a named resource with
+    // a non-empty, non-inverted range (zero dependencies is accepted by the Windows 11 WARP and RTX 5090 D3D12
+    // runtimes). A copy of a value onto itself (vkCmdCopyBuffer forbids the overlap) is refused too.
     bool atomic_copy(const AtomicCopyBuffer& copy) {
         if ((copy.bytes != 4 && copy.bytes != 8) || !copy.dst || !copy.src) return false;
         if (copy.dst == copy.src && copy.dst_offset == copy.src_offset) return false;
         if (copy.dst_offset % copy.bytes || copy.src_offset % copy.bytes) return false;
-        if (copy.dependencies.empty()) return false;
         for (const auto& d : copy.dependencies)
-            if (!d.resource) return false;
+            if (!d.resource || d.begin >= d.end) return false;
         return append(copy);
     }
 

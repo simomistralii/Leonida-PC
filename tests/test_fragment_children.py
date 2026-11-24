@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 import zlib
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOL = os.path.join(ROOT, "tools", "fragment_children.py")
@@ -245,6 +246,18 @@ class TestCommandLine(unittest.TestCase):
                     self.assertIn("no-such-folder", result.stderr)
                     self.assertNotIn("a.rpf:", result.stdout)   # the scan did not start
                     self.assertFalse(os.path.exists(os.path.dirname(out)))
+
+    def test_json_write_failure_preserves_previous_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = '{"previous": true}'
+            path = os.path.join(tmp, "totals.json")
+            with open(path, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(previous)
+            with mock.patch.object(fc, "replace_retry", side_effect=OSError(13, "Permission denied")):
+                with self.assertRaises(OSError):
+                    fc.write_json_report(path, {"fragments": 0})
+            with open(path, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), previous)
 
 
 if __name__ == "__main__":

@@ -26,12 +26,14 @@ import os
 import re
 import struct
 import sys
+import tempfile
 import time
 import zlib
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
+from file_mode import published_mode  # noqa: E402
 from zero_span import gap_split  # noqa: E402
 
 # zlib stream start, or Bink 2 video ('KB2' + revision letter). Kept in step with rpf9_carve.py.
@@ -447,16 +449,34 @@ def summarise(rows, span, zero, unread):
 
 def write_output(path, rows, summary):
     """Write CSV or JSON from the file extension."""
-    if os.path.splitext(path)[1].lower() == ".json":
-        with open(path, "w", encoding="utf-8", newline="\n") as f:
-            json.dump({"summary": summary, "files": rows}, f, indent=1)
-        return
-    with open(path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.writer(f, lineterminator="\n")
-        writer.writerow(COLUMNS)
-        for row in rows:
-            writer.writerow([f"0x{row['offset']:x}" if i == 0 else ("" if row[c] is None else row[c])
-                             for i, c in enumerate(COLUMNS)])
+    parent = os.path.dirname(os.path.abspath(path))
+    tmp = None
+    try:
+        if os.path.splitext(path)[1].lower() == ".json":
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="\n", dir=parent,
+                                             prefix=".restofworld_index-", suffix=".tmp", delete=False) as f:
+                tmp = f.name
+                json.dump({"summary": summary, "files": rows}, f, indent=1)
+        else:
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", dir=parent,
+                                             prefix=".restofworld_index-", suffix=".tmp", delete=False) as f:
+                tmp = f.name
+                writer = csv.writer(f, lineterminator="\n")
+                writer.writerow(COLUMNS)
+                for row in rows:
+                    writer.writerow([f"0x{row['offset']:x}" if i == 0 else ("" if row[c] is None else row[c])
+                                     for i, c in enumerate(COLUMNS)])
+        os.chmod(tmp, published_mode(path))
+        os.replace(tmp, path)
+    except BaseException:
+        if tmp is not None:
+            try:
+                if os.path.lexists(tmp):
+                    os.chmod(tmp, 0o600)
+                    os.remove(tmp)
+            except OSError:
+                pass
+        raise
 
 
 def offset(text):

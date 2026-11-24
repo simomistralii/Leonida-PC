@@ -17,6 +17,7 @@ Format measured on the Xbox Series 1.0.2.1 common.rpf (offset 0x650000, 43,791 B
 Only header fields, aggregate counts, bucket distributions and hashed queries are
 printed or written; preset and effect names stay on the local machine. Standard
 library only.
+Usage: `python -I tools/gamedata_sps1.py --help` lists the options.
 """
 from __future__ import annotations
 

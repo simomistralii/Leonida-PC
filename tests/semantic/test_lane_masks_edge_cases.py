@@ -33,6 +33,22 @@ def run_cs(name, asm, nlanes=4):
 
 
 class LaneMasksEndToEndTests(unittest.TestCase):
+    def test_v_mov_of_a_mask_keeps_inactive_lanes(self):
+        """A plain v_mov_b32 of a mask SGPR is an ordinary VALU write: the lane that is off in EXEC keeps its VGPR."""
+        _, got = run_cs("cs_vmov_mask_inactive", [
+            "v_cmp_lt_u32_e64 s6, v0, 2",
+            "v_mov_b32_e32 v2, 0xdeadbeef",
+            "s_mov_b32 exec_lo, 7",
+            "v_mov_b32_e32 v2, s6",
+            "s_mov_b32 exec_lo, 0xf",
+            "v_lshlrev_b32_e32 v3, 2, v0",
+            "global_store_dword v3, v2, s[0:1]",
+            "s_endpgm",
+        ])
+        # Lane 3 was off while v2 was written. The active lanes read s6 as data, which needs #293's mask
+        # materialization, so only the inactive lane is asserted.
+        self.assertEqual(got[3], 0xdeadbeef)
+
     def test_dpp_bitwise_respects_row_mask_on_mask_operands(self):
         """v_or_b32_dpp must not enter mask_writes and bypass dpp_guard (row_mask:0x0 keeps old v2)."""
         _, got = run_cs("cs_dpp_mask", [

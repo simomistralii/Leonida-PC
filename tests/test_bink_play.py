@@ -37,6 +37,14 @@ class PickTest(unittest.TestCase):
         hit, _ = bink_play.pick(NAMES, "stinger\\intro_a.BK2")
         self.assertEqual(hit[1], 4096)
 
+    def test_ambiguous_exact_path_excludes_partial_matches(self):
+        first = NAMES[0]
+        duplicate = (first[0].lower(), 16384, *first[2:])
+        partial = ("Alt/" + first[0], 20480, *first[2:])
+        hit, candidates = bink_play.pick([first, partial, duplicate], r"Stinger\INTRO_A.bk2")
+        self.assertIsNone(hit)
+        self.assertEqual(candidates, [first, duplicate])
+
     def test_a_unique_part_of_the_name_is_enough(self):
         hit, _ = bink_play.pick(NAMES, "news")
         self.assertEqual(hit[0], "TV/News_01.bk2")

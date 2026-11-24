@@ -30,6 +30,7 @@ It cannot see: a branch that accepts an instruction and then rejects some operan
 emitted code is right. "handled" means "has a rule", not "is correct". A broad prefix such as ds_ marks every
 ds_* instruction handled-family even where a sub-dispatch then refuses it; the exact names found inside the
 sub-dispatch still count as handled-exact, so read handled-family as an upper bound.
+Usage: `python -I tools/isa_coverage.py --help` lists the options.
 """
 import argparse
 import ast

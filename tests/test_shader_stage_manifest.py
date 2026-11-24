@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -210,6 +211,30 @@ class CallerIntegrationTests(unittest.TestCase):
                 self.assertIn(idx, r.stderr)
                 self.assertIn(expected_msg, r.stderr)
                 self.assertNotIn("Traceback", r.stderr)
+
+    def test_make_game_treats_decoder_recursion_limit_as_an_unusable_index(self):
+        with open(os.path.join(self.dir, "index.json"), "w", encoding="utf-8", newline="\n") as f:
+            f.write("[]")
+        # Decoders can use different stack limits across Python versions.
+        with patch("shader_stage_manifest.json.load", side_effect=RecursionError("decoder depth limit")):
+            self.assertIsNone(make_game.unpacked_shader_stems(self.dir))
+
+    def test_shader_commands_name_the_index_when_an_integer_exceeds_the_decoder_limit(self):
+        src = os.path.join(self.dir, "empty")
+        os.makedirs(src)
+        index = os.path.join(self.dir, "integer.json")
+        with open(index, "w", encoding="utf-8", newline="\n") as f:
+            f.write('[{"ignored":' + "1" * 641 + "}]")
+        for script, flag in ((FSSM_UNPACK, "--carve-index"), (SHADER_DISASM, "--unpack-index")):
+            with self.subTest(flag=flag):
+                result = subprocess.run(
+                    [sys.executable, "-I", "-X", "int_max_str_digits=640", script, src, flag, index],
+                    capture_output=True, text=True, timeout=15,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(index, result.stderr)
+                self.assertIn("invalid JSON", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
 
     def test_shader_disasm_unpack_index_rejects_traversal_and_malformed_json(self):
         fssm_dir = os.path.join(self.dir, "fssm")

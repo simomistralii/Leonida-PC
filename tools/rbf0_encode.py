@@ -25,7 +25,7 @@ Usage:
         resource encodes to different bytes or was refused: only a run where every resource is exact exits 0.
     python -I rbf0_encode.py <rbf0_tree.json> <new_out_dir>
         Write each resource of an rbf0_tree.py JSON report (possibly edited) as <offset>.rbf. The directory must be
-        new or empty.
+        new or empty. Exit 1 if any resource is refused; valid resources are still written.
 
 Everything written is game data: keep it in your work folder, out of git, issues and pull requests.
 """
@@ -316,7 +316,7 @@ def main(argv=None):
     print(f"{written} resource(s) written, {len(refused)} refused")
     for offset, why in refused:
         print(f"  0x{offset:x}: {why}" if isinstance(offset, int) else f"  {offset}: {why}")
-    return 0
+    return 1 if refused else 0
 
 
 if __name__ == "__main__":

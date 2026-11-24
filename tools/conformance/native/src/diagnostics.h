@@ -22,3 +22,9 @@ bool Win32Succeeded(BOOL result, const char* file, int line, const char* call,
 // tool itself does not implement). message states what went wrong and may name a path.
 void ReportFailure(const char* file, int line, const char* call, const std::string& message,
                    const char* what_to_check);
+
+// UTF-8 text of an argument or of path.native(), for messages. path.string() converts to
+// the ANSI code page and throws for a character that page does not have, so printing a
+// valid path could end the run. An unpaired surrogate, which a Windows file name may hold,
+// becomes U+FFFD here.
+std::string TextFromWide(const std::wstring& wide);

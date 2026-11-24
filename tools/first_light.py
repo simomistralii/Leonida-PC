@@ -145,8 +145,7 @@ def ensure_carve(game: str, work: str) -> str:
 
 
 def choose(index_path: str, vs: str, ps: str) -> list[dict]:
-    with open(index_path, encoding="utf-8") as f:
-        entries = json.load(f)
+    entries = load_json(index_path, "carve index", list, entry_keys=("stage", "name", "file"))
     by_stage_and_name = {(entry["stage"], entry["name"]): entry for entry in entries}
     requested = (("vs", vs), ("ps", ps))
     missing = [f"{stage} {name}" for stage, name in requested if (stage, name) not in by_stage_and_name]
@@ -239,9 +238,12 @@ def read_obj(
                 if len(p) < 4:
                     raise SystemExit(f"{path}: short vertex line: {line.strip()!r}")
                 try:
-                    positions.append(tuple(float(x) for x in p[1:4]))
+                    position = tuple(float(x) for x in p[1:4])
                 except ValueError:
                     raise SystemExit(f"{path}: invalid vertex coordinates: {line.strip()!r}") from None
+                if not all(math.isfinite(value) for value in position):
+                    raise SystemExit(f"{path}: non-finite vertex coordinates: {line.strip()!r}")
+                positions.append(position)
             elif p[0] == "vt":
                 if len(p) < 3:
                     raise SystemExit(f"{path}: short texture-coordinate line: {line.strip()!r}")
@@ -897,7 +899,7 @@ def main(argv=None) -> int:
         description="Draw an exported model with translated game shaders. Display its UVs or supply a texture with --dds."
     )
     ap.add_argument("--game", help="the package folder")
-    ap.add_argument("--obj", help="an OBJ exported by rpf9dump models")
+    ap.add_argument("--obj", help="an OBJ exported by rpf9dump models, with finite vertex positions and UVs")
     ap.add_argument(
         "--work",
         default=os.path.expanduser("~/leonida-work"),
@@ -957,7 +959,13 @@ def main(argv=None) -> int:
         help="list VS/PS names in the carve index and exit",
     )
     a = ap.parse_args(argv)
+    if a.width < 1 or a.height < 1:
+        ap.error("--width and --height must be at least 1")
+    if a.min_coverage is not None and not 0.0 <= a.min_coverage <= 1.0:
+        ap.error("--min-coverage must be between 0 and 1")
     if a.camera:
+        if not math.isfinite(a.yaw):
+            ap.error("--yaw must be finite")
         if a.vs not in (None, CAMERA_VS):
             ap.error(f"--camera writes the constant layout of {CAMERA_VS} only")
         if a.no_fit or a.keep_z:

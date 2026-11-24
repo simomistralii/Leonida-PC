@@ -92,6 +92,24 @@ class CliBadJsonTests(unittest.TestCase):
         path = self.bad_index('[{"stage": "vs", "name": "x"}, {"stage": "ps"}]')
         self.assert_one_clean_line(self.list_cli(), path)
 
+    def choose_cli(self):
+        # --obj/--no-fit are not needed to reach choose(); the carve index already exists so no carve runs
+        return self.run_cli("--game", self.game, "--work", self.work, "--no-fit")
+
+    def test_choose_reports_an_index_that_is_not_an_array(self):
+        path = self.bad_index("[1]")
+        self.assert_one_clean_line(self.choose_cli(), path)
+        path = self.bad_index("{}")
+        self.assert_one_clean_line(self.choose_cli(), path)
+
+    def test_choose_reports_an_index_entry_without_its_name(self):
+        path = self.bad_index('[{"stage": "vs", "file": "a.dxbc"}]')
+        self.assert_one_clean_line(self.choose_cli(), path)
+
+    def test_choose_reports_a_truncated_index(self):
+        path = self.bad_index('[{"name": "x", ')
+        self.assert_one_clean_line(self.choose_cli(), path)
+
     def test_list_prints_the_candidates_from_a_hand_written_index(self):
         self.bad_index(
             '[{"stage": "vs", "name": "a"}, {"stage": "ps", "name": "b"}, {"stage": "cs", "name": "c"}]'

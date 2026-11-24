@@ -331,6 +331,23 @@ class CliTest(unittest.TestCase):
             self.assertEqual(names, {WN.joaat_hex(name): [name]
                                      for name in ("A&B", "Cell&Prop", "Cell&Prop.rpf")})
 
+    def test_xml_names_require_matching_end_tags_in_fragments(self):
+        fragment = (
+            b"<name>WrongElement</other><Name>WrongCase</name>"
+            b"<a:name>WrongPrefix</b:name><name>Unclosed"
+            b"<name>GoodOne</name ><a:Name>GoodTwo</a:Name\r\n>"
+            b"<locationName>GoodThree</locationName>"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            xml = os.path.join(tmp, "fragment.xml")
+            with open(xml, "wb") as handle:
+                handle.write(fragment)
+            dictionary = WN.NameDictionary()
+            self.assertEqual(dictionary.add_xml(xml), 3)
+            names = dictionary.to_json()["names"]
+        self.assertEqual(sorted(name for group in names.values() for name in group),
+                         ["GoodOne", "GoodThree", "GoodTwo"])
+
     def test_resolve_rejects_a_malformed_dictionary(self):
         with tempfile.TemporaryDirectory() as tmp:
             dictionary = os.path.join(tmp, "names.json")
@@ -463,6 +480,26 @@ class CliTest(unittest.TestCase):
         self.assertEqual(report["parent_resolved"], 2)
         self.assertEqual(report["parent_links"], 1)
         self.assertEqual(report["parent_links_resolved"], 1)
+
+    def test_resolve_links_parents_across_map_reports_in_either_order(self):
+        dictionary = WN.NameDictionary()
+        dictionary.add("synthetic_parent")
+        parent = WN.joaat("synthetic_parent")
+        with tempfile.TemporaryDirectory() as tmp:
+            names, children, parents = (os.path.join(tmp, f"{p}.json")
+                                        for p in ("names", "children", "parents"))
+            for path, data in ((names, dictionary.to_json()),
+                               (children, [{"name": 1, "parent": parent}, {"name": 2, "parent": parent}]),
+                               (parents, {"maps": [{"name": parent}]})):
+                with open(path, "w", encoding="utf-8", newline="\n") as f:
+                    json.dump(data, f)
+            for first, second in ((children, parents), (parents, children)):
+                with self.subTest(first=first), contextlib.redirect_stdout(io.StringIO()) as out:
+                    self.assertEqual(WN.main(["resolve", "--dict", names, "--maps", first, "--maps", second]), 0)
+                    stats = json.loads(out.getvalue())["maps"]
+                    self.assertEqual(stats["rows"], 3)
+                    self.assertEqual(stats["parent_links"], 2)
+                    self.assertEqual(stats["parent_links_resolved"], 2)
 
     def test_build_and_resolve(self):
         with tempfile.TemporaryDirectory() as tmp:

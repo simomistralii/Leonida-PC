@@ -35,7 +35,21 @@ _Thrd_result __stdcall _Cnd_timedwait_for_unchecked(_Cnd_t cond, _Mtx_t mtx, uns
         deadline.tv_nsec -= 1000000000L;
     }
     // A spurious or early return is allowed ("unchecked"): the STL's callers check the clock themselves.
-    return static_cast<_Thrd_result>(_Cnd_timedwait(cond, mtx, &deadline));
+    LARGE_INTEGER frequency{}, start{}, end{};
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&start);
+    const int result = _Cnd_timedwait(cond, mtx, &deadline);
+    // msvcp140 waits the whole milliseconds left before the deadline, then answers success when the deadline is
+    // still a fraction of a millisecond away. condition_variable::wait_for without a predicate takes that success
+    // for a notification, so an unnotified 200 ms wait came back as woken after 199 ms (crt_timed_wait_test, Runtime
+    // windows job). The STL's own member answers a wait that ran out as timed out: so does this one, for a wait
+    // that lasted its timeout to within that rounding.
+    if (result == 0 && ms != 0 && frequency.QuadPart > 0) {
+        QueryPerformanceCounter(&end);
+        const long long elapsed_ms = (end.QuadPart - start.QuadPart) * 1000 / frequency.QuadPart;
+        if (elapsed_ms + 2 >= static_cast<long long>(ms)) return _Thrd_result::_Timedout;
+    }
+    return static_cast<_Thrd_result>(result);
 }
 
 // Not declared by the 14.4x headers, but defined by the same member: keep a caller of the older name off it too.

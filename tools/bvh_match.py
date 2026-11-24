@@ -42,13 +42,17 @@ tools/bvh_rehydrate.py takes: the transform is recorded in it rather than applie
 import argparse
 import json
 import os
+import stat
 import struct
 import sys
+import tempfile
 from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bvh_geometry_check as C  # noqa: E402
 import bvh_rehydrate as R  # noqa: E402
+from file_mode import published_mode  # noqa: E402
+from replace_retry import replace as replace_retry  # noqa: E402
 from report_paths import same_report_path  # noqa: E402
 
 INSTANCE_TRANSFORM_OFFSET = 0x50
@@ -282,6 +286,39 @@ def describe(candidate, names):
     return "%sstream 0x%-10x model %d geometry %s%s" % (label, item["Offset"], candidate["model"], used, note)
 
 
+def write_json_report(path, report):
+    """Publish a complete regular file, or write directly to a non-regular destination."""
+    destination = os.path.realpath(path)
+    parent = os.path.dirname(destination) or "."
+    try:
+        mode = os.stat(destination).st_mode
+    except FileNotFoundError:
+        mode = None
+    if mode is not None and not stat.S_ISREG(mode):
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(report, f, indent=1)
+        return
+    if mode is not None:
+        # Retain the direct writer's permission check without truncating the report.
+        os.close(os.open(destination, os.O_WRONLY))
+
+    staged = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", newline="\n", delete=False,
+        dir=parent, prefix=".bvh_match-", suffix=".tmp",
+    )
+    try:
+        with staged:
+            json.dump(report, staged, indent=1)
+        if os.name != "nt":
+            os.chmod(staged.name, published_mode(destination))
+        replace_retry(staged.name, destination)
+    finally:
+        try:
+            os.unlink(staged.name)
+        except FileNotFoundError:
+            pass
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Find the drawable geometry a dehydrated BLAS was built from.")
     ap.add_argument("dehydrated")
@@ -304,6 +341,9 @@ def main(argv=None):
     ap.add_argument("--json", help="write the report here")
     a = ap.parse_args(argv)
     if a.json:
+        if os.path.isdir(a.json):
+            print("error: --json is a directory: %s" % a.json, file=sys.stderr)
+            return 2
         # The report is written last, after the inputs have been read, so an aliased input would silently
         # be replaced by it. Refuse the alias before any input is opened, as the other report tools do.
         for what, other in (("the dehydrated input", a.dehydrated), ("the manifest", a.manifest),
@@ -393,14 +433,14 @@ def main(argv=None):
     if a.json:
         match = consistent[0][3] if consistent else None
         try:
-            with open(a.json, "w", encoding="utf-8", newline="\n") as f:
-                json.dump({"signature": signature, "consistent": bool(consistent), "scored": len(results),
-                           "matched": None if match is None else {
-                               "offset": match["item"]["Offset"], "model": match["model"],
-                               "geometry": [match["kept"][k][2] for k in match["used"]],
-                               "triangles": [match["kept"][k][3] for k in match["used"]],
-                               "name": match["item"]["Name"] if a.names else None}},
-                          f, indent=1)
+            write_json_report(a.json, {
+                "signature": signature, "consistent": bool(consistent), "scored": len(results),
+                "matched": None if match is None else {
+                    "offset": match["item"]["Offset"], "model": match["model"],
+                    "geometry": [match["kept"][k][2] for k in match["used"]],
+                    "triangles": [match["kept"][k][3] for k in match["used"]],
+                    "name": match["item"]["Name"] if a.names else None},
+            })
         except OSError as e:
             print("error: cannot write %s: %s" % (a.json, e.strerror or e), file=sys.stderr)
             return 2

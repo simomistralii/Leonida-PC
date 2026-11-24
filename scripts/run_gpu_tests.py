@@ -34,6 +34,7 @@ from check import (CMPX_CLASS_WORDS, CVT_F32_SAT_CASES, CVT_PK_U8_WORDS, PK_MUL_
                    TEXTURE_MIP_TEST, GATHER_LOD_TEST, MIP_TEST_PASSES, TEXTURE_CONSTANTS, USER_SGPRS_ENV, USER_SGPRS_WORDS, Skip, mesh_v5_test, not_found_message,
                    pick_build_dir, start_failure, table_fetch_test, texture_gradient_a16_test, texture_mip_test)
 from check import SIGNED_MIP_TEST, UINT_MIP_TEST
+from check import cbv_modulate_test
 from check import HEAP_INIT_EXPECTED, heap_init_env   # cs_heap_init: vk_compute_test's VKC_HEAP_INIT
 from check import judged_words, words_match   # dump words not judged on some devices (cs_signed_zero_nan)
 from check import TEXOFF_ARGS, texoff_problem   # ps_texoff's expected words and arguments live in check.py
@@ -129,7 +130,25 @@ def assemble_to_s(llvm_mc: str, asm_path: str, s_path: str, name: str) -> None:
         f.write("\n".join(lines) + "\n")
 
 
-def spirv_as(asm_text: str, out_spv: str) -> None:
+def resolve_assembler(choice: str) -> str:
+    """Resolve --assembler choice ('auto', 'spirv-as', or 'python') to a concrete assembler name."""
+    if choice in ("spirv-as", "python"):
+        return choice
+    if choice == "auto":
+        return "spirv-as" if shutil.which("spirv-as") else "python"
+    raise ValueError(f"unknown assembler: {choice!r}")
+
+
+def spirv_as(asm_text: str, out_spv: str, assembler: str = "spirv-as") -> None:
+    if assembler == "python":
+        import spirv_asm
+        try:
+            spv_bytes = spirv_asm.assemble(asm_text, target_env="vulkan1.2")
+        except spirv_asm.SpirvAsmError as exc:
+            raise RuntimeError(f"spirv_asm failed for {out_spv}:\n{exc}") from None
+        with open(out_spv, "wb") as f:
+            f.write(spv_bytes)
+        return
     p = subprocess.run(["spirv-as", "--target-env", "vulkan1.2", "-o", out_spv, "-"],
                        input=asm_text, capture_output=True, text=True)
     if p.returncode != 0:
@@ -286,10 +305,15 @@ def run_cmd(cmd: list[str], env: dict | None = None, gpu: bool = True, *,
 
 
 def bary_fallback() -> bool:
-    """LEONIDA_BARY_FALLBACK=1: pixel shaders that read raw barycentrics are translated with --bary-fallback and drawn
-    through their pass-through geometry shader (tools/bary_fallback_gs.py), so they run on a device without
-    VK_KHR_fragment_shader_barycentric (NVIDIA Pascal, for one)."""
-    return (os.environ.get("LEONIDA_BARY_FALLBACK") or "").strip().lower() in ("1", "true", "yes", "on")
+    """LEONIDA_BARY_FALLBACK=1 (or 0): translate raw barycentrics to an ordinary vec3 input and draw it through
+    tools/bary_fallback_gs.py. Unset, it is on where tools/vk_subgroup_info.py reports a driver with a known
+    BaryCoordKHR bug: Mesa ANV (SHADER-925) and AMD's Windows driver on gfx90c iGPUs (#5933)."""
+    v = (os.environ.get("LEONIDA_BARY_FALLBACK") or "").strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return _device_barycentric_fallback() is True
 
 
 def f16_interp_fallback() -> bool:
@@ -305,6 +329,7 @@ def f16_interp_fallback() -> bool:
 
 
 _PER_VERTEX = []
+_BARYCENTRIC_FALLBACK = []
 
 
 def _device_per_vertex():
@@ -319,6 +344,21 @@ def _device_per_vertex():
             pass
         _PER_VERTEX.append(answer)
     return _PER_VERTEX[0]
+
+
+def _device_barycentric_fallback():
+    """barycentric_fallback from tools/vk_subgroup_info.py (Mesa ANV, SHADER-925; AMD Windows on gfx90c, #5933),
+    cached per suite."""
+    if not _BARYCENTRIC_FALLBACK:
+        answer = None
+        try:
+            r = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "vk_subgroup_info.py")],
+                               capture_output=True, text=True, timeout=60)
+            answer = json.loads(r.stdout.strip().splitlines()[-1]).get("barycentric_fallback")
+        except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+            pass
+        _BARYCENTRIC_FALLBACK.append(answer)
+    return _BARYCENTRIC_FALLBACK[0]
 
 
 def w64_emulated() -> bool:
@@ -617,7 +657,8 @@ OTHER_HARNESS = {"ps_m15": "d3d12_translated_draw_test", "vs_m15": "d3d12_transl
                  "ps_m3_post": "d3d12_m3_frame_test", "ps_m3_query": "d3d12_m3_frame_test",
                  "cs_m4_fill": "d3d12_m4_compute_test", "cs_m4_indirect": "d3d12_m4_compute_test",
                  "cs_buf_typed": "d3d12_buffer_uav_test", "cs_buf_counter": "d3d12_buffer_uav_test",
-                 "ps_live_width": "w64_graphics.py"}
+                 "ps_live_width": "w64_graphics.py",
+                 "ps_heap_index": "d3d12_heap_index_test"}
 
 
 # Shaders a selected test draws with, built even when the filter leaves them out (#192).
@@ -629,7 +670,7 @@ DRAWN_WITH = {GATHER_LOD_TEST: "vs_ids.asm", "ps_flat": "vs_ids.asm", "ps_persp_
               "ps_interp_f16_high": "vs_f16_pack.asm", "ms_f16_pack": "ps_interp_f16_high.asm",
               "ps_interp_f32_mods": "vs_interp_consts.asm", "ps_interp_mov_mods": "vs_interp_consts.asm",
               SIGNED_MIP_TEST: "vs_ids.asm", UINT_MIP_TEST: "vs_ids.asm",
-              "vs_base_ids": "ps_flat.asm"}
+              "vs_base_ids": "ps_flat.asm", "ps_cbv_modulate": "vs_ids.asm"}
 DRAWN_WITH.update({name: "vs_ids.asm" for name in GET_LOD_TESTS})
 
 
@@ -699,12 +740,26 @@ def main() -> int:
     ap.add_argument("--work", default=None)
     ap.add_argument("--filter", default="")
     ap.add_argument("--require-pass", action="store_true", help="exit 1 if no GPU test passes")
+    ap.add_argument("--assembler", choices=("auto", "spirv-as", "python"), default="auto",
+                    help="SPIR-V assembler: auto (use spirv-as if on PATH, else tools/spirv_asm.py), "
+                         "spirv-as, or python")
+    ap.add_argument("--no-validate", action="store_true",
+                    help="skip spirv-val during translation (automatic when --assembler resolves to python "
+                         "and spirv-val is not on PATH)")
+    ap.add_argument("--disasm-dir", default=None,
+                    help="folder of pre-disassembled <name>.s listings (e.g. tests/semantic/fixtures/disasm); "
+                         "skips llvm-mc and runs only fixtures present there")
     a = ap.parse_args()
     # Some test programs run with their working directory in <work>/spirv (vk_texture_test), so a relative path
     # given here would point somewhere else for them.
     a.build = os.path.abspath(a.build)
     if a.work:
         a.work = os.path.abspath(a.work)
+    if a.disasm_dir is not None:
+        a.disasm_dir = os.path.abspath(a.disasm_dir)
+        if not os.path.isdir(a.disasm_dir):
+            print(f"error: --disasm-dir is not a directory: {a.disasm_dir}", file=sys.stderr)
+            return 2
 
     ext = ".exe" if os.name == "nt" else ""
     required = tuple(t + ext for t in TEST_PROGRAMS)
@@ -761,10 +816,24 @@ W64_GRAPHICS_ONLY = _w64_graphics_only()
 
 
 def run_suite(a, work: str) -> int:
+    assembler = resolve_assembler(getattr(a, "assembler", "auto"))
+    explicit_no_validate = bool(getattr(a, "no_validate", False))
+    no_validate = explicit_no_validate or (assembler == "python" and shutil.which("spirv-val") is None)
+    disasm_src = getattr(a, "disasm_dir", None)
+
     asm_files = sorted({f for f in os.listdir(SHADER_DIR) if f.endswith(".asm")} | {n + ".asm" for n in CLIP_CASES})
     # The wave64 pixel fixtures of runtime/test/shaders/w64_graphics.py (tiers A-C, #1541) are checked by that
     # runner, not here: they need a 64-wide fragment subgroup or the halves-aware lowering it drives.
     asm_files = [f for f in asm_files if f[:-4] not in W64_GRAPHICS_ONLY]
+    if disasm_src is not None:
+        available = {os.path.splitext(f)[0] for f in os.listdir(disasm_src) if f.endswith(".s")}
+        asm_files = [
+            f for f in asm_files
+            if all(os.path.splitext(p)[0] in available for p in with_draw_shaders([f]))
+        ]
+        if not asm_files:
+            print(f"error: --disasm-dir {disasm_src!r} matched no GPU test cases", file=sys.stderr)
+            return 2
     if a.filter:
         asm_files = [f for f in asm_files if a.filter in f]
         if not asm_files:
@@ -813,7 +882,14 @@ def run_suite(a, work: str) -> int:
                 f.write(compute_header(os.path.join(SHADER_DIR, fname)))
         fname = shader_source(name) + ".asm"
         disasm_path = os.path.join(disasm_dir, f"{name}.s")
-        assemble_to_s(a.llvm_mc, os.path.join(SHADER_DIR, fname), disasm_path, name)
+        if disasm_src is not None:
+            try:
+                shutil.copyfile(os.path.join(disasm_src, f"{name}.s"), disasm_path)
+            except shutil.SameFileError:
+                # A replay can use the work folder's existing listings as its source.
+                pass
+        else:
+            assemble_to_s(a.llvm_mc, os.path.join(SHADER_DIR, fname), disasm_path, name)
         disasm_files.append(disasm_path)
         # A failed translation must not run an old binary left in a reused --work directory.
         Path(spirv_dir, f"{name}.spv").unlink(missing_ok=True)
@@ -823,6 +899,12 @@ def run_suite(a, work: str) -> int:
         for path in disasm_files:
             shutil.copyfile(path, os.path.join(selected_disasm, os.path.basename(path)))
         cmd = [sys.executable, "-I", TRANSLATOR, selected_disasm, "--out", spirv_dir]
+        if assembler == "python":
+            cmd += ["--assembler", "python"]
+        if no_validate:
+            if not explicit_no_validate:
+                print("note: spirv-val not found on PATH; translating with --no-validate", flush=True)
+            cmd.append("--no-validate")
         if w64_emulated():   # wave64 compute/mesh exact on any subgroup size
             cmd.append("--wave64-emulate")
         if bary_fallback():   # raw barycentrics from an interpolated input, fed by a pass-through GS
@@ -856,9 +938,9 @@ def run_suite(a, work: str) -> int:
     vs_tri = os.path.join(spirv_dir, "vs_tri.spv")
     fs_passthru = os.path.join(spirv_dir, "fs_passthru.spv")
     fs_loc1 = os.path.join(spirv_dir, "fs_loc1.spv")
-    spirv_as(VS_TRI_SPVASM, vs_tri)
-    spirv_as(make_fs_passthru(0), fs_passthru)
-    spirv_as(make_fs_passthru(1), fs_loc1)
+    spirv_as(VS_TRI_SPVASM, vs_tri, assembler=assembler)
+    spirv_as(make_fs_passthru(0), fs_passthru, assembler=assembler)
+    spirv_as(make_fs_passthru(1), fs_loc1, assembler=assembler)
 
     index = {}
     idx_path = os.path.join(spirv_dir, "index.json")
@@ -977,7 +1059,6 @@ def run_suite(a, work: str) -> int:
             # d16_xyz / d16_xy typed-buffer loads and d16_xyz stores (cs_fmt_d16_xyz.asm header)
             problem = fmt_d16_xyz_test(a.build, spirv_dir, cs_env)
             results.append((name, not problem, problem or "80/80 dumped words exact"))
-            results.append((name, not problem, problem or "128/128 dumped words exact"))
         elif name in ("cs_global_neg_offset", "cs_global_mem_ext"):
             # Negative global_load/global_store offsets (cs_global_neg_offset.asm): 40 groups give a 0x2800-byte
             # heap holding both the right addresses and the 4096-lower ones. One thread, no wave64 requirement.
@@ -1009,6 +1090,21 @@ def run_suite(a, work: str) -> int:
             else:
                 ok, detail = judge_cs_dump(rc, msg, [0, 0x40040000], wave64=False, partial=False, emulated=False,
                                            hexwords=True)
+                results.append((name, ok, detail))
+        elif name == "cs_div_fmas_f64":
+            # One-rounding binary64 FMA: strict where the translator emitted OpFmaKHR on doubles (shaderFmaFloat64,
+            # --fma khr); under the default GLSL Fma the split result (0) is allowed, as cs_fma_fused allows it.
+            rc, msg = run_cmd([vk_compute, spv, "1", "dump"], env=cs_env)
+            if rc == UNSUPPORTED:      # no shaderFloat64, or (--fma khr) no shaderFmaFloat64
+                results.append((name, None, unsupported_skip(msg)))
+            else:
+                words = (dump_words(msg) or [])[:2] if rc == 0 else []
+                strict = "shaderFmaFloat64" in ((index.get(name) or {}).get("features") or ())
+                fused, split = [0, 0x3c300000], [0, 0]
+                ok = rc == 0 and (words == fused or (not strict and words == split))
+                detail = " ".join(hex(x) for x in words) if words else msg
+                if ok and words == split:
+                    detail += " (split: the driver rounds GLSL Fma on doubles twice; --fma khr fixes it)"
                 results.append((name, ok, detail))
         elif name == "cs_cvt_f32_sat":
             # #300's saturating float -> int conversions: one dispatch per input word in s4 (VKC_SGPRS).
@@ -1061,9 +1157,9 @@ def run_suite(a, work: str) -> int:
                       "cs_w64x_branch", "cs_w64x_ballot", "cs_w64x_wg128_branches", "cs_w64x_lds_raw",
                       "cs_w64x_lds_war", "cs_w64x_partial", "cs_w64x_sbarrier", "cs_w64x_load_ballot_load",
                       "cs_w64x_mask_reuse", "cs_w64x_mask_reuse2", "cs_w64x_chain_barrier", "cs_barrier_divergent",
-                      "cs_bpermute32", "cs_w64x_partial_scmp", "cs_w32_partial_scmp", "cs_barrier_early_end",
-                      "cs_barrier_loop", "cs_w64x_andn2_exec", "cs_w64x_saveexec_b64", "cs_lds_b64_cmpst", "cs_w32_andn2_exec",
-                      "cs_mask_vgpr_exec"):
+                      "cs_bpermute32", "cs_w64x_partial_scmp", "cs_w32_partial_scmp", "cs_w32_partial_permute", "cs_barrier_early_end",
+                      "cs_barrier_loop", "cs_w64x_andn2_exec", "cs_w64x_saveexec_b64", "cs_lds_b64_cmpst", "cs_lds_xchg64_ext", "cs_lds_atomics_ext", "cs_w32_andn2_exec",
+                      "cs_mask_vgpr_exec", "cs_w32_exec_computed", "cs_w64_exec_computed"):
             cs_dump_wants = {
                 "cs_store": [0x400080FF, 0xE00003FF, 0x3C004000, 0xEEEEEEEE, 0x40003C00, 0xBC003800, 0x40FF8000, 0x3FF00000],
                 # base + soffset + imm (cs_smem_soffset_imm.asm); out[4..7] are seeds the shader leaves alone
@@ -1097,6 +1193,12 @@ def run_suite(a, work: str) -> int:
                 # ds_cmpst_b32 and the b64 2-address forms (cs_lds_b64_cmpst.asm header)
                 "cs_lds_b64_cmpst": [0x11110001, 0x22220002, 0x33330003, 0x44440004,
                                      0xCCCC000C, 0x44440004, 0xBBBB000B, 0x3579BADC],
+                # ds_wrxchg*_rtn_b64, ds_or_rtn_b64, ds_min_f32, ds_max_rtn_f32 (cs_lds_xchg64_ext.asm header)
+                "cs_lds_xchg64_ext": [0x11110003, 0x33333333, 0xF00FF000, 0x04030201,
+                                    0x40302010, 0x70500705, 0x3FC00000, 0x80000000],
+                # ds_mskor, ds_and/xor_b64, ds_add_rtn_f32, ds_inc/dec/rsub_u32 (cs_lds_atomics_ext.asm header)
+                "cs_lds_atomics_ext": [0xF0F11234, 0xAB34CD78, 0x12345678, 0xF0F00F0F,
+                                       0xA5A55A5A, 0x00AA00AA, 0x7FB00000, 0xFE090700],
                 # constant EXEC masks (cs_exec_const.asm): each lane takes its own bit of the constant
                 "cs_exec_const": [16, 8, 2, 16, 0, 16],
                 # constant lane masks: lane L takes bit L (cs_w32_mask_imm.asm / cs_w64_mask_imm.asm headers)
@@ -1140,7 +1242,13 @@ def run_suite(a, work: str) -> int:
                 "cs_w64x_partial": [40, 40, 528, 0, 0, 532, 539, 524820],
                 "cs_w64x_partial_scmp": [0, 1, 0, 1, 1, 1, 1, 0],     # s_cmp mask, -1 in a partial wave
                 "cs_w32_partial_scmp": [0, 1, 1, 0, 1, 1, 1, 1],      # the same in a 20-thread wave32
+                # ds_permute_b32 in a 20-thread wave32: a never-launched source lane sends nothing (.asm header)
+                "cs_w32_partial_permute": [0, 29, 127, 0, 1, 0, 134, 113],
                 "cs_w32_andn2_exec": [1, 8, 16, 2064, 2068, 3, 20, 1544],   # s_andn2_saveexec/wrexec_b32 (.asm header)
+                # SHADER-1264: a computed value written to exec_lo / exec_hi gives each lane its own bit
+                # (cs_w32_exec_computed.asm / cs_w64_exec_computed.asm headers)
+                "cs_w32_exec_computed": [259, 1028, 3088, 7682, 512, 4100, 0, 3],
+                "cs_w64_exec_computed": [291, 1028, 11264, 771, 8192, 4132, 0, 3],
                 "cs_w32_sincos": [1, 1, 1, 1, 1, 1],                  # SHADER-88 (cs_w32_sincos.asm): angles in turns
                 # SHADER-74: v_permlane16/x16 FI / BOUND_CTRL with the source lane off in EXEC (cs_w32_permlane_fi.asm)
                 "cs_w32_permlane_fi": [1000, 0, 4, 1, 1000, 0, 52, 49],
@@ -1175,10 +1283,11 @@ def run_suite(a, work: str) -> int:
                                   "cs_w32_permute", "cs_barrier_divergent", "cs_barrier_early_end", "cs_barrier_loop",
                                   "cs_w32_lds_u8_d16", "cs_w32_int_ext", "cs_w32_salu64", "cs_w32_misc_ext", "cs_w32_new_ops",
                                   "cs_w32_lds_subdword", "cs_w32_lds_wide",
-                                  "cs_bpermute32", "cs_w32_partial_scmp", "cs_w32_permlane_fi", "cs_w32_sincos", "cs_w32_buffer_sub16", "cs_w32_buffer_store_sub", "cs_w32_fcmpswap",
-                                  "cs_lds_b64_cmpst", "cs_exec_const", "cs_w32_mask_imm", "cs_mask_vgpr_exec",
+                                  "cs_bpermute32", "cs_w32_partial_scmp", "cs_w32_partial_permute", "cs_w32_permlane_fi", "cs_w32_sincos", "cs_w32_buffer_sub16", "cs_w32_buffer_store_sub", "cs_w32_fcmpswap",
+                                  "cs_lds_b64_cmpst", "cs_lds_xchg64_ext", "cs_lds_atomics_ext", "cs_exec_const", "cs_w32_mask_imm", "cs_mask_vgpr_exec",
                                   "cs_dpp", "cs_dpp_row", "cs_dpp_mask", "cs_dpp8",
-                                  "cs_dpp_ops", "cs_dpp_bound", "cs_dpp_bank", "cs_dpp_fi", "cs_w32_andn2_exec") and not emulated and not partial
+                                  "cs_dpp_ops", "cs_dpp_bound", "cs_dpp_bank", "cs_dpp_fi", "cs_w32_andn2_exec",
+                                  "cs_w32_exec_computed") and not emulated and not partial
             if partial and not emulated:
                 cs_env = dict(os.environ, VKC_SUBGROUP_SIZE="64")
             if name in WAVE32_LANE_DUMPS:   # 32 lanes even without index.json, as check.py requests (#774)
@@ -1202,7 +1311,7 @@ def run_suite(a, work: str) -> int:
                 ok, detail = judge_cs_dump(rc, msg, want, wave64=wave64, partial=partial, emulated=emulated,
                                            hexwords=name in ("cs_store", "cs_smem_soffset_imm", "cs_w32_lds_u8_d16",
                                                              "cs_w32_lds_subdword", "cs_w32_lds_wide",
-                                                             "cs_lds_b64_cmpst", "cs_signed_zero_nan"))
+                                                             "cs_lds_b64_cmpst", "cs_lds_xchg64_ext", "cs_lds_atomics_ext", "cs_signed_zero_nan"))
                 if ok and None in want:
                     unjudged = ", ".join(str(i) for i, w in enumerate(want) if w is None)
                     detail += f" (words {unjudged} not judged on this device: UNJUDGED_WORDS in check.py)"
@@ -1210,13 +1319,17 @@ def run_suite(a, work: str) -> int:
         elif name == "cs_imgstore":
             rc, msg = run_cmd([vk_store, spv])
             results.append((name, *helper_result(rc, msg)))
-        elif name in ("cs_imgload", "cs_imgload_d16", "cs_sample_lz_int_d16"):
-            rc, msg = run_cmd([vk_store, spv, "load" if name == "cs_imgload" else "load-d16"])
+        elif name in ("cs_imgload", "cs_imgload_tfe", "cs_imgload_d16", "cs_imgload_d16_tfe", "cs_sample_lz_int_d16"):
+            rc, msg = run_cmd([vk_store, spv, "load" if name in ("cs_imgload", "cs_imgload_tfe") else "load-d16"])
             results.append((name, *helper_result(rc, msg)))
         elif name in MIP_TEST_PASSES:
             problem = texture_mip_test(a.build, spirv_dir, name)
             ok = None if isinstance(problem, Skip) else not problem
             results.append((name, ok, problem or "two passes, 4096 RGBA32F pixels each exact; wrong mip and UV rejected"))
+        elif name == "ps_cbv_modulate":
+            problem = cbv_modulate_test(a.build, spirv_dir)
+            results.append((name, None if isinstance(problem, Skip) else not problem,
+                            problem or "4096 pixels matched for each of two buffer descriptors"))
         elif name == "ps_table_fetch":
             problem = table_fetch_test(a.build, spirv_dir)
             results.append((name, None if isinstance(problem, Skip) else not problem,

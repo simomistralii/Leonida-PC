@@ -42,12 +42,16 @@ import json
 import os
 import re
 import sys
+import tempfile
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 import bink_index  # noqa: E402
+from report_paths import os_error_text  # noqa: E402
 import gamedata_index  # noqa: E402
+from file_mode import published_mode  # noqa: E402
+from replace_retry import replace as replace_retry  # noqa: E402
 import gamedata_xml  # noqa: E402
 
 LIST_ENTRY = re.compile(r"<filename>\s*\$\(common\)/movies/([^<]+?\.bk2)\s*</filename>", re.I)
@@ -341,14 +345,61 @@ def name_streams(names, streams, pins=None, max_skip=MAX_SKIP):
 
 
 def write(out, rows, unmatched, summary):
-    if out.lower().endswith(".json"):
-        with open(out, "w", encoding="utf-8", newline="\n") as fh:
-            json.dump({"summary": summary, "streams": rows, "unmatched_list_entries": unmatched}, fh, indent=1)
+    """Publish a complete report, or leave the previous file intact on replace failure."""
+    destination = os.path.abspath(out)
+    parent = os.path.dirname(destination) or "."
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    try:
+        mode = os.stat(destination).st_mode
+    except FileNotFoundError:
+        mode = None
+    except OSError:
+        # Non-regular destinations (pipes/devices) keep a direct write.
+        _write_report_body(destination, rows, unmatched, summary)
+        return
+    if mode is not None:
+        # Retain the direct writer's permission check without truncating the report.
+        os.close(os.open(destination, os.O_WRONLY))
+
+    staged = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", newline="\n", delete=False,
+        dir=parent, prefix=".bink_names-", suffix=".tmp",
+    )
+    try:
+        with staged:
+            _write_report_body(staged, rows, unmatched, summary, json_out=out.lower().endswith(".json"))
+        if os.name != "nt":
+            os.chmod(staged.name, published_mode(destination))
+        replace_retry(staged.name, destination)
+    finally:
+        try:
+            os.unlink(staged.name)
+        except FileNotFoundError:
+            pass
+
+
+def _write_report_body(fh_or_path, rows, unmatched, summary, json_out=None):
+    if isinstance(fh_or_path, str):
+        path = fh_or_path
+        if json_out is None:
+            json_out = path.lower().endswith(".json")
+        if json_out:
+            with open(path, "w", encoding="utf-8", newline="\n") as fh:
+                json.dump({"summary": summary, "streams": rows, "unmatched_list_entries": unmatched}, fh, indent=1)
+        else:
+            with open(path, "w", encoding="utf-8", newline="") as fh:
+                w = csv.DictWriter(fh, fieldnames=FIELDS, lineterminator="\n")
+                w.writeheader()
+                w.writerows(rows)
+        return
+    fh = fh_or_path
+    if json_out:
+        json.dump({"summary": summary, "streams": rows, "unmatched_list_entries": unmatched}, fh, indent=1)
     else:
-        with open(out, "w", encoding="utf-8", newline="") as fh:
-            w = csv.DictWriter(fh, fieldnames=FIELDS, lineterminator="\n")
-            w.writeheader()
-            w.writerows(rows)
+        w = csv.DictWriter(fh, fieldnames=FIELDS, lineterminator="\n")
+        w.writeheader()
+        w.writerows(rows)
 
 
 def main(argv=None):
@@ -361,7 +412,8 @@ def main(argv=None):
     ap.add_argument("--max-skip", type=int, default=MAX_SKIP,
                     help="most list entries skipped before, between or after stream matches "
                          "(an empty source leaves all entries unmatched)")
-    ap.add_argument("--out", help="names.csv or names.json; default is a summary only")
+    ap.add_argument("--out", help="names.csv or names.json; index.json in a source or mount directory is reserved "
+                                  "for the carve manifest (default: a summary only)")
     a = ap.parse_args(argv)
     if a.max_skip < 0:
         ap.error("--max-skip must be 0 or more")
@@ -375,12 +427,27 @@ def main(argv=None):
     if a.out and os.path.isdir(a.out):
         ap.error(f"--out is a folder, not a report file: {a.out}")
     if a.out:
+        def unlistable(error):
+            # os.walk skips a folder it cannot list unless onerror stops it. An --out inside that folder could then
+            # be an input this check never saw, so refuse it. Any other unlistable folder is left to the scan,
+            # which stops on it with exit 1 whether or not the report already exists.
+            locked = error.filename or folder
+            out_key = os.path.normcase(os.path.realpath(a.out))
+            locked_key = os.path.normcase(os.path.realpath(locked))
+            try:
+                inside = os.path.commonpath([out_key, locked_key]) == locked_key
+            except ValueError:  # different drives on Windows
+                inside = False
+            if inside:
+                ap.error(f"--out cannot be checked against the inputs: cannot list {locked}: "
+                         f"{error.strerror or error}")
+
         for folder in [p for p in [a.source, *a.mount] if os.path.isdir(p)]:
             manifest = os.path.join(folder, "index.json")
-            if os.path.isfile(manifest) and bink_index.same_output_path(a.out, manifest):
-                ap.error(f"--out would overwrite the carve manifest: {a.out}")
+            if bink_index.same_output_path(a.out, manifest):
+                ap.error(f"--out is reserved for the carve manifest: {a.out}")
             if os.path.isfile(a.out):
-                for root, _dirs, names in os.walk(folder):
+                for root, _dirs, names in os.walk(folder, onerror=unlistable):
                     for name in names:
                         if name.lower().endswith((".json", ".csv")):
                             continue
@@ -390,12 +457,12 @@ def main(argv=None):
     try:
         names = read_mount_lists(a.mount)
     except (OSError, ValueError) as error:
-        print(f"bink_names: error: {error}", file=sys.stderr)
+        print(f"bink_names: error: {os_error_text(error)}", file=sys.stderr)
         return 1
     try:
         streams = load_streams(a.source, skip_report=a.out if a.out and os.path.isfile(a.out) else None)
     except (OSError, csv.Error, ValueError) as error:
-        print(f"bink_names: error: {a.source}: {error}", file=sys.stderr)
+        print(f"bink_names: error: {a.source}: {os_error_text(error)}", file=sys.stderr)
         return 1
     try:
         pins = load_pins(a.pins)

@@ -93,6 +93,27 @@ class TestRetag(unittest.TestCase):
         self.assertEqual(read_tags(new), (T.VENDOR, ["TITLE=" + "x" * 3000]))
         self.assertEqual(T.retag(new, T.tags_packet([("TITLE", "x" * 3000)])), new)
 
+    def test_retag_rejects_bad_crc_on_header_tags_and_audio_pages(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "bank", "00000001.ogg")
+            make_ogg(path, packets=3)
+            original = Path(path).read_bytes()
+        for page_index, (start, end) in enumerate(T.pages(original)):
+            for corrupt_at in (start + 22, end - 1):
+                with self.subTest(page=page_index, corrupt_at=corrupt_at):
+                    damaged = bytearray(original)
+                    damaged[corrupt_at] ^= 1
+                    with self.assertRaisesRegex(ValueError, "checksum"):
+                        T.retag(bytes(damaged), T.tags_packet([("TITLE", "new")]))
+
+    def test_retag_rejects_truncated_audio_tail(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "bank", "00000001.ogg")
+            make_ogg(path, packets=3)
+            original = Path(path).read_bytes()
+        with self.assertRaisesRegex(ValueError, "end of the file"):
+            T.retag(original[:-1], T.tags_packet([]))
+
     def test_rejects_what_it_cannot_rewrite(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "b", "0ABCDEF1.ogg")
@@ -150,6 +171,20 @@ class TestFolder(unittest.TestCase):
         with open(path, "rb") as f:
             self.assertTrue(f.read() == original, "tagging changed a file whose tags page includes audio")
         self.assertEqual(stats["skipped: the OpusTags page contains another packet"], 1)
+
+    def test_corrupt_stream_is_skipped_unchanged_in_normal_and_dry_run(self):
+        path = Path(self.opus) / "story" / "bank_01" / "0ABCDEF1.ogg"
+        damaged = bytearray(path.read_bytes())
+        start, _ = list(T.pages(damaged))[1]
+        damaged[start + 22] ^= 1
+        path.write_bytes(damaged)
+        names, ambiguous = T.load_names(self.names, "story")
+        for dry_run in (True, False):
+            with self.subTest(dry_run=dry_run):
+                stats = T.tag_folder(self.opus, names, dry_run=dry_run, ambiguous=ambiguous)
+                self.assertEqual(stats.get("skipped: Ogg checksum mismatch"), 1)
+                self.assertEqual(stats.get("tagged"), 1)  # the other named stream still works
+                self.assertEqual(path.read_bytes(), damaged)
 
     def test_names_and_dialogue(self):
         names, ambiguous = T.load_names(self.names, "story")
@@ -332,6 +367,19 @@ class TestFolder(unittest.TestCase):
         self.assertIn("ambiguous name", r.stdout)
         self.assertIn("1", r.stdout.split("ambiguous name")[1].split()[0])
 
+    def test_cli_checks_the_names_header_even_without_rows(self):
+        path = Path(self.names)
+        for header, code in (("", 2), ("wave,text_en", 2), ("bank,stream_id,name", 0)):
+            with self.subTest(header=header):
+                path.write_text(header + "\n" if header else "", encoding="utf-8")
+                r = subprocess.run([sys.executable, "-I", TOOL, self.opus, "--names", self.names],
+                                   capture_output=True, text=True)
+                self.assertEqual(r.returncode, code, r.stderr)
+                if code:
+                    self.assertIn("missing columns in names CSV header: bank, stream_id, name", r.stderr)
+                else:
+                    self.assertEqual(r.stderr, "")
+
     def test_cli_names_row_cut_short_is_one_error_line(self):
         with open(self.names, "a", encoding="utf-8", newline="") as fh:
             fh.write("story,bank_01\n")          # an interrupted write: stream_id and later columns missing
@@ -353,6 +401,18 @@ class TestFolder(unittest.TestCase):
         self.assertEqual(len(r.stderr.strip().splitlines()), 1)
         self.assertIn("line 5", r.stderr)
         self.assertEqual(self.tags("story", "bank_02", "1FFFFFFF.ogg"), [])     # nothing was tagged
+
+    def test_cli_dialogue_row_missing_wave_is_one_error_line(self):
+        with open(self.dialogue, "w", encoding="utf-8", newline="") as fh:
+            fh.write("label,wave,text_en\n")
+            fh.write("ONLY_LABEL\n")
+        r = subprocess.run([sys.executable, "-I", TOOL, self.opus, "--names", self.names,
+                            "--dialogue", self.dialogue], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertEqual(len(r.stderr.strip().splitlines()), 1)
+        self.assertIn("line 2", r.stderr)
+        self.assertEqual(self.tags("story", "bank_02", "1FFFFFFF.ogg"), [])
 
 
 if __name__ == "__main__":

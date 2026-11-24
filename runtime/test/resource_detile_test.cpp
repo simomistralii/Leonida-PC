@@ -131,6 +131,36 @@ int main() {
         // Undersized source:
         std::vector<std::byte> small_til(100);
         CHECK(!detile_surface_64k(small_til, lin, 128, 128, 4));
+        // linear_surface_size rejects unsupported element sizes consistently with tiled_surface_size_64k:
+        CHECK(linear_surface_size(100, 100, 0) == 0);
+        CHECK(linear_surface_size(100, 100, 3) == 0);
+        CHECK(linear_surface_size(100, 100, 5) == 0);
+        CHECK(linear_surface_size(100, 100, 12) == 0);
+        // uint32_t ceiling-division wraparound must not wrap blocks_w / tiles_x to 0:
+        CHECK(linear_surface_size(0xFFFFFFFDu, 1, 8, 4) == std::size_t{0x40000000u} * 8u);
+        CHECK(tiled_surface_size_64k(0xFFFFFFFDu, 1, 8, 4) == std::size_t{0x00800000u} * tile_size_in_bytes);
+        CHECK(tiled_surface_size_64k(0xFFFFFF80u, 1, 1, 1) == std::size_t{0x01000000u} * tile_size_in_bytes);
+        CHECK(!detile_surface_64k(til, lin, 0xFFFFFFFDu, 1, 8, 4));
+        CHECK(!tile_surface_64k(lin, til, 0xFFFFFFFDu, 1, 8, 4));
+        CHECK(!detile_surface_64k(til, lin, 0xFFFFFF80u, 1, 1, 1));
+        CHECK(!tile_surface_64k(lin, til, 0xFFFFFF80u, 1, 1, 1));
+        // 64-bit size_t product overflow (tiles_x * tiles_y * 65536 > SIZE_MAX):
+        CHECK(tiled_surface_size_64k(0xFFFF0000u, 0xFFFF0000u, 16, 1) == 0);
+        CHECK(linear_surface_size(0xFFFF0000u, 0xFFFF0000u, 16, 1) == 0);
+        CHECK(!detile_surface_64k(til, lin, 0xFFFF0000u, 0xFFFF0000u, 16, 1));
+        CHECK(!tile_surface_64k(lin, til, 0xFFFF0000u, 0xFFFF0000u, 16, 1));
+        // Overlapping spans are rejected (avoids std::memcpy UB), while adjacent non-overlapping subspans work:
+        std::vector<std::byte> arena(tile_size_in_bytes + 16);
+        auto aliased_tiled = std::span<std::byte>(arena).subspan(0, tile_size_in_bytes);
+        auto aliased_linear = std::span<std::byte>(arena).subspan(tile_size_in_bytes - 4, 16);
+        CHECK(!detile_surface_64k(aliased_tiled, aliased_linear, 2, 2, 4));
+        CHECK(!tile_surface_64k(aliased_linear, aliased_tiled, 2, 2, 4));
+        auto adjacent_linear = std::span<std::byte>(arena).subspan(tile_size_in_bytes, 16);
+        fill_synthetic_linear(arena, 0x42u);
+        CHECK(tile_surface_64k(adjacent_linear, aliased_tiled, 2, 2, 4));
+        std::vector<std::byte> check_out(16);
+        CHECK(detile_surface_64k(aliased_tiled, check_out, 2, 2, 4));
+        CHECK(std::memcmp(adjacent_linear.data(), check_out.data(), 16) == 0);
     }
 
     // 1. Single-tile exact dimensions:

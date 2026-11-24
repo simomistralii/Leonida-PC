@@ -57,7 +57,8 @@ l'[issue #166](https://github.com/ItsNotRexed/Leonida/issues/166).
     20 à 40 minutes.
   - Plus rapide si vous utilisez [conda](https://docs.conda.io/) : `conda install -c conda-forge llvm-tools` (sa
     version Windows inclut la cible AMDGPU), puis faites pointer `LLVM_MC` vers le chemin complet du `llvm-mc.exe`
-    installé (`where llvm-mc` l'affiche une fois l'environnement activé).
+    installé (`where.exe llvm-mc` l'affiche une fois l'environnement activé ; le `where` seul est
+    l'alias `Where-Object` de PowerShell).
   - Avec WSL, installez `llvm-21` dans Ubuntu et donnez la commande entière à `LLVM_MC`, dans la session PowerShell
     où vous lancerez `make_game.py` :
 
@@ -115,7 +116,10 @@ python -I make_game.py --game "D:\chemin\vers\le\paquet" --wav  # décode aussi 
 python -I make_game.py --wave64-emulate off            # auto (par défaut), on ou off
 ```
 
-Les étapes s'exécutent dans cet ordre : `check` → `shaders` → `assets` → `runtime` → `pipelines`. L'étape
+`check` passe toujours en premier ; ensuite, `shaders`, `assets` et `runtime` tournent en même temps quand ils sont
+demandés (ils ne dépendent pas les uns des autres). `pipelines` démarre dès que les shaders traduits sont prêts et,
+si l'exécution comprend `runtime`, une fois que cette étape a recompilé `vk_pipeline_check` : elle peut donc tourner
+pendant la fin d'`assets`. L'étape
 `pipelines` crée chaque shader traduit avec le pilote de votre GPU, vérifie qu'il compile, signale ceux qu'elle doit
 ignorer et enregistre un cache de pipelines dans `pipeline_cache.bin` (dans `--out`) ; le runtime ne charge pas
 encore ce cache.

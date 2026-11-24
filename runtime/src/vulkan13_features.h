@@ -34,7 +34,7 @@ public:
     bool core = false;               // a Vulkan 1.3 device: the features are core
     bool dynamic_rendering = false;  // supported, as a core feature or through VK_KHR_dynamic_rendering
     bool synchronization2 = false;   // supported, as a core feature or through VK_KHR_synchronization2
-    // Optional 1.3 core features, enabled where supported; on a 1.2 device they stay off (no required subgroup size).
+    // Optional 1.3 core features, available through VK_EXT_subgroup_size_control on a 1.2 device.
     bool subgroup_size_control = false;
     bool compute_full_subgroups = false;
     bool extended_dynamic_state = false;  // core on 1.3; on 1.2 both VK_EXT_extended_dynamic_state(2) extensions
@@ -65,11 +65,13 @@ public:
         std::vector<VkExtensionProperties> extensions(count);
         enumerate_extensions(physical, nullptr, &count, extensions.data());
         bool has_dynamic_rendering = false, has_synchronization2 = false, has_eds = false, has_eds2 = false;
+        bool has_subgroup_control = false;
         for (const auto& e : extensions) {
             has_dynamic_rendering |= std::strcmp(e.extensionName, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME) == 0;
             has_synchronization2 |= std::strcmp(e.extensionName, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME) == 0;
             has_eds |= std::strcmp(e.extensionName, VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME) == 0;
             has_eds2 |= std::strcmp(e.extensionName, VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME) == 0;
+            has_subgroup_control |= std::strcmp(e.extensionName, VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME) == 0;
         }
         if (!has_dynamic_rendering || !has_synchronization2) return;
         VkPhysicalDeviceExtendedDynamicState2FeaturesEXT eds2{
@@ -78,12 +80,17 @@ public:
                                                             has_eds2 ? &eds2 : nullptr};
         VkPhysicalDeviceSynchronization2FeaturesKHR sync2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES_KHR,
                                                           has_eds ? &eds : nullptr};
+        VkPhysicalDeviceSubgroupSizeControlFeaturesEXT sg{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT, &sync2};
         VkPhysicalDeviceDynamicRenderingFeaturesKHR rendering{
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR, &sync2};
+        if (has_subgroup_control) rendering.pNext = &sg;
         VkPhysicalDeviceFeatures2 query{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &rendering};
         features2(physical, &query);
         dynamic_rendering = rendering.dynamicRendering == VK_TRUE;
         synchronization2 = sync2.synchronization2 == VK_TRUE;
+        subgroup_size_control = has_subgroup_control && sg.subgroupSizeControl == VK_TRUE;
+        compute_full_subgroups = subgroup_size_control && sg.computeFullSubgroups == VK_TRUE;
         extended_dynamic_state = has_eds && has_eds2 && eds.extendedDynamicState == VK_TRUE &&
                                  eds2.extendedDynamicState2 == VK_TRUE;
     }
@@ -109,6 +116,12 @@ public:
             enable13_.computeFullSubgroups = compute_full_subgroups ? VK_TRUE : VK_FALSE;
             return &enable13_;
         }
+        if (subgroup_size_control) {
+            sg_.pNext = chain;
+            sg_.subgroupSizeControl = VK_TRUE;
+            sg_.computeFullSubgroups = compute_full_subgroups ? VK_TRUE : VK_FALSE;
+            chain = &sg_;
+        }
         sync2_.pNext = chain;
         sync2_.synchronization2 = VK_TRUE;
         if (extended_dynamic_state) {
@@ -124,13 +137,18 @@ public:
     }
 
     // Where a feature struct goes to follow these: insert with `s.pNext = *next(); *next() = &s;`.
-    void** next() { return core ? &enable13_.pNext : extended_dynamic_state ? &eds2_.pNext : &sync2_.pNext; }
+    void** next() {
+        if (core) return &enable13_.pNext;
+        if (subgroup_size_control) return &sg_.pNext;
+        return extended_dynamic_state ? &eds2_.pNext : &sync2_.pNext;
+    }
 
     // The device extensions a 1.2 device needs for both features; none on 1.3.
     void add_extensions(std::vector<const char*>& extensions) const {
         if (core) return;
         extensions.push_back(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
         extensions.push_back(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
+        if (subgroup_size_control) extensions.push_back(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
         if (!extended_dynamic_state) return;
         extensions.push_back(VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME);
         extensions.push_back(VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME);
@@ -141,6 +159,8 @@ private:
     VkPhysicalDeviceDynamicRenderingFeaturesKHR rendering_{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR};
     VkPhysicalDeviceSynchronization2FeaturesKHR sync2_{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES_KHR};
     VkPhysicalDeviceExtendedDynamicStateFeaturesEXT eds_{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT};
+    VkPhysicalDeviceSubgroupSizeControlFeaturesEXT sg_{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT};
     VkPhysicalDeviceExtendedDynamicState2FeaturesEXT eds2_{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT};
 };

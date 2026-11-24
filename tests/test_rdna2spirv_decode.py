@@ -230,14 +230,21 @@ class TestFormatDecoderBoundary(unittest.TestCase):
         self.gen.decode_format(words, 7, fixed=False)
         self.assertEqual(len(self.gen.tbuffer_norm_fns), fns_count)
 
-    def test_decode_any_format_selection(self):
+    def test_run_time_format_decode_selects_without_branching(self):
+        # SHADER-849 (9ad6cc8) replaced decode_any_format's search over the format codes with one shared function
+        # per output component that picks the conversion with OpSelect: the call site only calls them, and the
+        # functions hold no branch.
         words = ["%w0", "%w1", "%w2", "%w3"]
         initial_lines = len(self.gen.body)
-        comps = self.gen.decode_any_format("%run_fmt", words)
+        comps = self.gen.format_decode_call("%run_fmt", words)
         self.assertEqual(len(comps), 4)
         emitted = "\n".join(self.gen.body[initial_lines:])
-        self.assertIn("OpIEqual %bool %run_fmt", emitted)
-        self.assertIn("OpSelect %uint", emitted)
+        for k in range(4):
+            self.assertIn(f"OpFunctionCall %uint %fmt_dec_c{k} %run_fmt", emitted)
+        functions = "\n".join(self.gen.fmt_fn)
+        self.assertIn("OpSelect %uint", functions)
+        for op in ("OpBranchConditional", "OpSwitch"):
+            self.assertNotIn(op, functions)
 
     def test_format_decode_call_builds_and_caches_function(self):
         words = ["%w0", "%w1", "%w2", "%w3"]

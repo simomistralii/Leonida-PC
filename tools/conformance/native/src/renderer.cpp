@@ -432,7 +432,8 @@ bool CreateVertexColorPipeline(Renderer& renderer, ID3D12Device& device,
 bool LoadShaderFile(const std::filesystem::path& path, ShaderFile& shader_out) {
     std::ifstream input(path, std::ios::binary | std::ios::ate);
     if (!input.is_open()) {
-        ReportFailure(__FILE__, __LINE__, "std::ifstream::open", "could not open " + path.string(),
+        ReportFailure(__FILE__, __LINE__, "std::ifstream::open",
+                      "could not open " + TextFromWide(path.native()),
                       "the build ran the conform_shaders target and the shaders directory sits "
                       "next to conform_native.exe; use --shaders to point elsewhere");
         return false;
@@ -440,7 +441,7 @@ bool LoadShaderFile(const std::filesystem::path& path, ShaderFile& shader_out) {
     const std::streamoff size = input.tellg();
     if (size <= 0) {
         ReportFailure(__FILE__, __LINE__, "std::ifstream::tellg",
-                      path.string() + " is empty",
+                      TextFromWide(path.native()) + " is empty",
                       "rebuild with the conform_shaders target so dxc writes a real .cso");
         return false;
     }
@@ -449,7 +450,7 @@ bool LoadShaderFile(const std::filesystem::path& path, ShaderFile& shader_out) {
     input.read(reinterpret_cast<char*>(shader_out.bytes.data()), size);
     if (!input) {
         ReportFailure(__FILE__, __LINE__, "std::ifstream::read",
-                      "could not read all of " + path.string(),
+                      "could not read all of " + TextFromWide(path.native()),
                       "the file is not locked by another process and the disk is readable");
         return false;
     }

@@ -246,6 +246,16 @@ static int run(int argc, char** argv) {
     vkGetPhysicalDeviceProperties2(pd, &props2);
     std::fprintf(stderr, "device: %s (subgroup %u..%u)%s\n", props.deviceName, sgProps.minSubgroupSize,
                  sgProps.maxSubgroupSize, validation.enabled() ? " (validation on)" : "");
+    // 144 push-constant bytes (s0..s31, heap base, code base), or 128 under LEONIDA_PC_TAIL_UBO=1
+    // (rdna2spirv.py --pc-tail-ubo). A 128-byte device cannot declare a 144-byte range
+    // (VUID-VkPushConstantRange-size-00298): exit 77, as vk_harness and vk_texture_test do (D3D-14).
+    const bool pc_tail = leonida::vk_test::pc_tail_requested();
+    const uint32_t pc_bytes = pc_tail ? 128u : 144u;
+    if (props.limits.maxPushConstantsSize < pc_bytes) {
+        std::fprintf(stderr, "unsupported: need %u push constant bytes, device has %u\n", pc_bytes,
+                     props.limits.maxPushConstantsSize);
+        return 77;
+    }
     uint32_t qn = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(pd, &qn, nullptr);
     std::vector<VkQueueFamilyProperties> qf(qn);
@@ -411,8 +421,6 @@ static int run(int argc, char** argv) {
     // 144 push-constant bytes: s0..s31, heap base, code base. With LEONIDA_PC_TAIL_UBO=1 (rdna2spirv.py
     // --pc-tail-ubo) only s0..s31; the tail, if the module reads it, is a uniform block at set 1 (vk_pc_tail.h), one
     // slot for the dispatch and one per workgroup_yz origin.
-    const bool pc_tail = leonida::vk_test::pc_tail_requested();
-    const uint32_t pc_bytes = pc_tail ? 128u : 144u;
     leonida::vk_test::PcTail tail;
     const bool tail_block = pc_tail &&
         leonida::vk_test::spirv_declares_set(code.data(), code.size(), leonida::vk_test::pc_tail_set);

@@ -35,6 +35,7 @@ synthetic. The encrypted RPF9 table of contents is still the reason an archive p
 mapped to a carved document; those targets remain target nodes rather than invented document
 edges. This is a mount/reference graph, not a full runtime schema: the catalog carries names and
 categories, not field types.
+Usage: `python -I tools/gamedata_graph.py --help` lists the options.
 """
 import argparse
 import json
@@ -118,9 +119,10 @@ def scan_document(doc: dict) -> dict:
         "refs": [],
         "includes": [],
     }
+    data = doc["data"]
     try:
-        root = ET.fromstring(doc["data"])
-    except (ET.ParseError, ValueError):
+        root = ET.fromstring(data)
+    except (ET.ParseError, ValueError, LookupError):
         # A truncated tail can still carry a closing-root hint from the index. It is a named but
         # unparsed document, not a rootless fragment; only an empty hint is rootless.
         report["root"] = doc.get("root_hint") or ""

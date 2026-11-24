@@ -209,6 +209,43 @@ class GuidSites(unittest.TestCase):
                 with open(header, "rb") as f:
                     self.assertEqual(f.read(), header_text)
 
+    def test_image_respects_fewer_than_16_data_directories(self):
+        # Build a minimal valid PE32+ image with NumberOfRvaAndSizes = 0 and opt_size = 112 so the
+        # section table starts immediately at opt + 112.
+        pe = 0x80
+        opt_size = 112
+        text_raw = 0x200
+        hdr = bytearray(text_raw + 0x20)
+        hdr[0:2] = b"MZ"
+        struct.pack_into("<I", hdr, 0x3C, pe)
+        hdr[pe:pe + 4] = b"PE\0\0"
+        struct.pack_into("<HHIIIHH", hdr, pe + 4, 0x8664, 1, 0, 0, 0, opt_size, 0x2022)
+        opt = pe + 24
+        struct.pack_into("<H", hdr, opt, 0x20B)
+        struct.pack_into("<Q", hdr, opt + 24, 0x180000000)
+        struct.pack_into("<I", hdr, opt + 108, 0)  # NumberOfRvaAndSizes = 0
+        sec = opt + opt_size
+        hdr[sec:sec + 8] = b".text\0\0\0"
+        struct.pack_into("<IIII", hdr, sec + 8, 0x20, 0x1000, 0x20, text_raw)
+        struct.pack_into("<I", hdr, sec + 36, 0x60000020)
+        img = sites.Image(bytes(hdr))
+        self.assertEqual(img.dirs[0], (0, 0))
+        self.assertEqual(img.dirs[1], (0, 0))
+        self.assertEqual(img.imports(), [])
+        self.assertEqual(img.iat_slots(), {})
+
+    def test_image_rejects_unknown_optional_header_magic_and_undersized_opt_header(self):
+        image, _ = pe32plus(b"\x90", QUEUE.bytes_le)
+        bad_magic = bytearray(image)
+        struct.pack_into("<H", bad_magic, 0x80 + 24, 0x0999)
+        with self.assertRaisesRegex(ValueError, "optional header magic"):
+            sites.Image(bytes(bad_magic))
+
+        short_opt = bytearray(image)
+        struct.pack_into("<H", short_opt, 0x80 + 20, 64)
+        with self.assertRaisesRegex(ValueError, "optional header"):
+            sites.Image(bytes(short_opt))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,6 +17,8 @@ import zlib
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "tools"))
+import report_paths
 
 
 def load_tool():
@@ -466,7 +468,7 @@ class WorldIndexTest(unittest.TestCase):
         source = os.path.join(self.dir, "resource.bin")
         with open(source, "wb") as f:
             f.write(make_resource())
-        for i, alias in enumerate((lambda p: p + ".", lambda p: p + " ", lambda p: "\\\\?\\" + p)):
+        for i, alias in enumerate((lambda p: "\\\\?\\" + p, lambda p: p.replace("\\", "/"), lambda p: p.upper())):
             with self.subTest(alias=i, case="report"):
                 report = os.path.join(self.dir, f"report-{i}.json")
                 self.assert_report_collision(
@@ -518,13 +520,90 @@ class WorldIndexTest(unittest.TestCase):
             with open(upper, encoding="utf-8") as f:
                 self.assertEqual(json.load(f)["summary"]["resources"], 1)
 
-    @unittest.skipUnless(sys.platform == "darwin", "macOS volume case query")
-    def test_macos_case_query_follows_the_volume(self):
-        missing = os.path.join(self.dir, "new", "deeper", "report.json")
-        probe = os.path.join(self.dir, "Probe")
-        with open(probe, "wb"):
-            pass
-        self.assertEqual(WI._case_insensitive_volume(missing), os.path.exists(probe.lower()))
+    def test_uses_shared_same_report_path(self):
+        self.assertIs(WI.same_report_path, report_paths.same_report_path)
+        self.assertFalse(hasattr(WI, "_case_insensitive_volume"))
+        self.assertFalse(hasattr(WI, "_pending_path_key"))
+        self.assertFalse(hasattr(WI, "_file_identity"))
+
+    def test_cli_rejects_case_alias_before_scan(self):
+        source = os.path.join(self.dir, "resource.bin")
+        with open(source, "wb") as f:
+            f.write(make_resource())
+        out = os.path.join(self.dir, "out.json")
+        alias = os.path.join(self.dir, "OUT.JSON")
+        with mock.patch.object(WI, "same_report_path", side_effect=lambda a, b: a != source and b != source) as guard, \
+                mock.patch.object(WI, "scan_path", side_effect=AssertionError("scan started")) as scan:
+            self.assert_report_collision(
+                [source, "--out", out, "--csv", alias],
+                "--out and --csv must use different paths")
+        scan.assert_not_called()
+        guard.assert_called()
+        self.assertTrue(any(c.args == (out, alias) for c in guard.call_args_list))
+
+    def test_cli_rejects_hard_link_alias_via_same_report_path(self):
+        source = os.path.join(self.dir, "resource.bin")
+        with open(source, "wb") as f:
+            f.write(make_resource())
+        out = os.path.join(self.dir, "out.json")
+        csv_out = os.path.join(self.dir, "out.csv")
+        with open(out, "wb") as f:
+            f.write(b"existing")
+        try:
+            os.link(out, csv_out)
+        except (OSError, NotImplementedError):
+            self.skipTest("hard links unavailable")
+        self.assert_report_collision(
+            [source, "--out", out, "--csv", csv_out],
+            "--out and --csv must use different paths")
+        with open(out, "rb") as f:
+            self.assertEqual(f.read(), b"existing")
+
+    def test_cli_rejects_report_overwriting_input_via_same_report_path(self):
+        source = os.path.join(self.dir, "resource.bin")
+        with open(source, "wb") as f:
+            f.write(make_resource())
+        out = os.path.join(self.dir, "out.json")
+        with mock.patch.object(WI, "same_report_path", side_effect=lambda a, b: a == source and b == out) as guard, \
+                mock.patch.object(WI, "scan_path", side_effect=AssertionError("scan started")) as scan:
+            self.assert_report_collision(
+                [source, "--out", out],
+                "--out would overwrite the input")
+        scan.assert_not_called()
+        guard.assert_called()
+        self.assertTrue(any(c.args == (source, out) for c in guard.call_args_list))
+
+    def test_cli_rejects_report_overwriting_directory_file_via_same_report_path(self):
+        carve = os.path.join(self.dir, "carve")
+        os.makedirs(carve)
+        payload = os.path.join(carve, "0001.bin")
+        with open(payload, "wb") as f:
+            f.write(make_resource())
+        out = os.path.join(self.dir, "out.json")
+        with mock.patch.object(WI, "same_report_path", side_effect=lambda a, b: a == payload and b == out) as guard, \
+                mock.patch.object(WI, "scan_path", side_effect=AssertionError("scan started")) as scan:
+            self.assert_report_collision(
+                [carve, "--out", out],
+                f"--out would overwrite the input {payload}")
+        scan.assert_not_called()
+        guard.assert_called()
+        self.assertTrue(any(c.args == (payload, out) for c in guard.call_args_list))
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows path aliases")
+    def test_windows_existing_file_trailing_dot_and_space_aliases(self):
+        source = os.path.join(self.dir, "resource.bin")
+        with open(source, "wb") as f:
+            f.write(make_resource())
+        out = os.path.join(self.dir, "existing.json")
+        with open(out, "wb") as f:
+            f.write(b"existing")
+        for alias in (out + ".", out + " "):
+            with self.subTest(alias=alias):
+                self.assert_report_collision(
+                    [source, "--out", out, "--csv", alias],
+                    "--out and --csv must use different paths")
+                with open(out, "rb") as f:
+                    self.assertEqual(f.read(), b"existing")
 
     @unittest.skipUnless(os.name == "nt", "requires Windows verbatim paths")
     def test_windows_verbatim_path_can_name_a_distinct_report(self):
@@ -841,6 +920,27 @@ class WorldIndexTest(unittest.TestCase):
         WI.parse_resource(make_resource(), agg)
         stats = WN.resolve_archetypes(agg.to_json(), WN.NameDictionary())
         self.assertEqual((stats["entities"], stats["unique_hashes"], stats["unresolved_hashes"]), (1, 1, 1))
+
+    def test_csv_report_writes_content_flags_and_covers_json_keys(self):
+        path = os.path.join(self.dir, "sample.rpf")
+        with open(path, "wb") as f:
+            f.write(make_rpf_streams([make_resource()]))
+        out = os.path.join(self.dir, "out.json")
+        csv_out = os.path.join(self.dir, "out.csv")
+        self.assertEqual(WI.main([path, "--out", out, "--csv", csv_out]), 0)
+        with open(out, encoding="utf-8") as f:
+            json_row = json.load(f)["resources"][0]
+        with open(csv_out, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            fieldnames = list(reader.fieldnames or [])
+            rows = list(reader)
+        self.assertEqual(len(rows), 1)
+        self.assertIn("content_flags", fieldnames)
+        self.assertNotIn("contentFlags", fieldnames)
+        self.assertEqual(rows[0]["content_flags"], str(json_row["content_flags"]))
+        self.assertEqual(rows[0]["map_flags"], str(json_row["map_flags"]))
+        # Every resource field emitted by parse_resource() for this map must have a matching CSV column.
+        self.assertEqual(set(json_row) - set(fieldnames), set())
 
 
 def setUpModule():

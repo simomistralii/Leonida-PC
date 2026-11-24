@@ -171,7 +171,8 @@ HRESULT WINAPI D3D12XboxCreateDevice(IUnknown* adapter, const void* params, cons
                          static_cast<unsigned long>(vhr));
             return result(method, vhr);
         }
-        vhr = rt::d3d12_xs::create_device_proxy(vulkan, *riid, out);
+        // The title's queues take the console slot map (d3d12_xs_device.h, QueueLayout).
+        vhr = rt::d3d12_xs::create_device_proxy(vulkan, *riid, out, rt::d3d12_xs::xbox_device_queue_layout());
         if (FAILED(vhr)) {
             vulkan->Release();
             std::fprintf(stderr, "[rt] d3d12_xs: D3D12XboxCreateDevice: proxy over the Vulkan device failed "
@@ -199,7 +200,7 @@ HRESULT WINAPI D3D12XboxCreateDevice(IUnknown* adapter, const void* params, cons
         return result(method, FAILED(hr) ? hr : E_FAIL);
     }
 
-    hr = rt::d3d12_xs::create_device_proxy(real, *riid, out);
+    hr = rt::d3d12_xs::create_device_proxy(real, *riid, out, rt::d3d12_xs::xbox_device_queue_layout());
     if (FAILED(hr)) {
         // create_device_proxy keeps the caller's reference on failure.
         real->Release();
@@ -217,6 +218,11 @@ static_assert(std::is_same_v<decltype(&serialize_root_signature), SerializeFn>);
 static_assert(std::is_same_v<decltype(&create_root_signature_deserializer), DeserializerFn>);
 static_assert(std::is_same_v<decltype(&serialize_root_signature_legacy), LegacySerializeFn>);
 
+// Measured call (RT-5, 1.0.2.1): the title calls it once at startup with one pointer to a zeroed 32-byte block whose
+// dword at +4 it sets (a count), and only checks the result for failure. The PC/Vulkan side owns virtual memory,
+// so the policy is accepted and ignored.
+HRESULT WINAPI configure_virtual_memory(void* /*desc*/) { return S_OK; }
+
 }  // namespace
 
 SHIM_TABLE(d3d12_xs,
@@ -225,4 +231,5 @@ SHIM_TABLE(d3d12_xs,
     {"d3d12_xs.dll", "D3D12CreateRootSignatureDeserializer",
      reinterpret_cast<void*>(&create_root_signature_deserializer)},
     {"d3d12_xs.dll", "D3D12XboxCreateDevice", reinterpret_cast<void*>(&D3D12XboxCreateDevice)},
+    {"d3d12_xs.dll", "D3D12ConfigureVirtualMemoryX", reinterpret_cast<void*>(&configure_virtual_memory)},
 );

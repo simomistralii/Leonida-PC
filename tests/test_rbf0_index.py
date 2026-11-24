@@ -413,6 +413,27 @@ class OutputTest(unittest.TestCase):
             doc = json.load(f)
         self.assertEqual(doc["files"][0]["sample_strings"], ["alpha", "body"])
 
+    def test_json_failed_replace_preserves_previous_and_cleans_temp_files(self):
+        path = os.path.join(self.root, "out.json")
+        previous = '{"summary": {"previous": true}, "files": []}\n'
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(previous)
+        with mock.patch.object(rbf0_index, "replace_retry", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                rbf0_index.write_output(path, self.records, self.summary)
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), previous)
+        self.assertEqual(os.listdir(self.root), ["out.json"])
+
+    def test_json_successful_write_cleans_temp_files(self):
+        path = os.path.join(self.root, "out.json")
+        rbf0_index.write_output(path, self.records, self.summary)
+        self.assertEqual(os.listdir(self.root), ["out.json"])
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+        self.assertEqual(doc["summary"]["rbf0"]["resources"], 1)
+        self.assertEqual(doc["files"][0]["root"], "TestRoot")
+
 
 class ScanDirCollisionAndTrailingTest(unittest.TestCase):
     def _make_rbf0(self, root_name):

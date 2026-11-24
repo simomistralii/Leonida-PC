@@ -43,6 +43,10 @@ Fn get(const char* name) {
 using InitFn = HRESULT(__stdcall*)();
 using UninitFn = void(__stdcall*)();
 using DeviceTypeFn = uint32_t(__stdcall*)();
+using RegOpenFn = LSTATUS(APIENTRY*)(HKEY, LPCWSTR, PHKEY);
+using RegOpenExFn = LSTATUS(APIENTRY*)(HKEY, LPCWSTR, DWORD, REGSAM, PHKEY);
+using RegQueryFn = LSTATUS(APIENTRY*)(HKEY, LPCWSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD);
+using RegCloseFn = LSTATUS(APIENTRY*)(HKEY);
 using ConsoleIdFn = HRESULT(__stdcall*)(size_t, char*, size_t*);
 using QueueCreateFn = HRESULT(__stdcall*)(XTaskQueueDispatchMode, XTaskQueueDispatchMode, XTaskQueueHandle*);
 using QueueCloseFn = void(__stdcall*)(XTaskQueueHandle);
@@ -185,11 +189,11 @@ void check_measured_classes(QueryFn query, XSystemAnalyticsInfo (*named_analytic
     if (f) {
         using Available = bool(STDMETHODCALLTYPE*)(void*, uint32_t);  // bool, per Microsoft's reference page
         auto available = method<Available>(f, 3);
-        // XGameRuntimeFeature values: XAsync 2, XAsyncProvider 3, XDisplay 4, XGame 5, XGameSave 7, XGameUI 8,
+        // XGameRuntimeFeature values: XAccessibility 0, XLauncher 9, XSpeechSynthesizer 13, XAsync 2, XAsyncProvider 3, XDisplay 4, XGame 5, XGameSave 7, XGameUI 8,
         // XNetworking 10, XPackage 11, XPersistentLocalStorage 12, XStore 14, XSystem 15, XTaskQueue 16, XThread 17,
         // XUser 18, XError 19, XGameEvent 20, XGameStreaming 21.
         bool served = true;
-        for (uint32_t v : {2u, 3u, 5u, 7u, 8u, 10u, 11u, 12u, 14u, 15u, 16u, 17u, 18u, 19u, 20u, 21u})
+        for (uint32_t v : {0u, 2u, 3u, 5u, 7u, 9u, 13u, 8u, 10u, 11u, 12u, 14u, 15u, 16u, 17u, 18u, 19u, 20u, 21u})
             served = served && available(f, v);
         check(served, "slot 3 (XGameRuntimeIsFeatureAvailable): true for the features whose classes are served, "
                       "XPersistentLocalStorage among them");
@@ -252,10 +256,9 @@ void check_measured_classes(QueryFn query, XSystemAnalyticsInfo (*named_analytic
         release_object(a);
     }
 
-    // Classes nobody serves yet are still refused, and logged, as before.
+    // Classes nobody serves are still refused, and logged, as before.
     const GUID refused[] = {
-        {0x1b339674, 0x328d, 0x4283, {0xa2, 0x00, 0x31, 0x71, 0xf1, 0x8d, 0x36, 0x39}},  // XLauncherImpl
-        {0x3e241977, 0x6237, 0x41e9, {0x85, 0x59, 0x10, 0x2c, 0x2d, 0x99, 0x83, 0xf1}},  // XAccessibilityImpl
+        {0xa4f1aee2, 0x4bf1, 0x4485, {0xb0, 0x08, 0xa7, 0xc2, 0x6d, 0x52, 0xac, 0x27}},  // XAppCaptureImpl
         {0x12345678, 0x9abc, 0xdef0, {0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0}},  // no such class
     };
     bool all_refused = true;
@@ -263,7 +266,7 @@ void check_measured_classes(QueryFn query, XSystemAnalyticsInfo (*named_analytic
         void* out = reinterpret_cast<void*>(1);
         all_refused = all_refused && query(&cls, cls, &out) == static_cast<HRESULT>(0x80070032) && out == nullptr;
     }
-    check(all_refused, "XLauncherImpl, XAccessibilityImpl and an unknown class are still refused");
+    check(all_refused, "XAppCaptureImpl and an unknown class are still refused");
 }
 
 // xgameruntime.lib's thunks don't import the runtime: they LoadLibraryW(L"xgameruntime.dll") and GetProcAddress five
@@ -732,8 +735,8 @@ void check_run_time_load() {
             reinterpret_cast<IsPackagedExport>(rt::shims::find("xgameruntime.dll", "XPackageIsPackagedProcess"));
         check(packaged_export && reinterpret_cast<IsPackaged>(slot(pk, 4))(pk) == packaged_export(),
               "slot 4 is XPackageIsPackagedProcess");
-        // Slot 11, XPackageGetUserLocale: one of the package's declared locales, never the host's; nothing written
-        // (but S_OK) when the package declares none.
+        // Slot 11, XPackageGetUserLocale: one of the package's declared locales, never the host's; an empty
+        // string (with S_OK) when the package declares none.
         using Locale = HRESULT(STDMETHODCALLTYPE*)(void*, size_t, char*);
         char tmp[MAX_PATH] = {};
         GetTempPathA(sizeof(tmp), tmp);
@@ -742,8 +745,8 @@ void check_run_time_load() {
         SetEnvironmentVariableA("LEONIDA_GAME_DIR", game.c_str());
         char locale[128];
         std::memset(locale, 'z', sizeof(locale));
-        check(reinterpret_cast<Locale>(slot(pk, 11))(pk, sizeof(locale), locale) == S_OK && locale[0] == 'z',
-              "slot 11 without declared locales: S_OK and nothing written");
+        check(reinterpret_cast<Locale>(slot(pk, 11))(pk, 1, locale) == S_OK && locale[0] == '\0',
+              "slot 11 without declared locales: S_OK and an empty string in a one-byte buffer");
         if (FILE* f = std::fopen((game + "\\MicrosoftGame.Config").c_str(), "wb")) {
             std::fputs("<Game><Resources><Resource Language=\"zz-ZZ\"/><Resource Language='xx-YY'/></Resources></Game>",
                        f);
@@ -753,6 +756,20 @@ void check_run_time_load() {
                   (std::strcmp(locale, "zz-ZZ") == 0 || std::strcmp(locale, "xx-YY") == 0) &&
                   reinterpret_cast<Locale>(slot(pk, 11))(pk, 3, locale) == HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER),
               "slot 11 gives one of the package's declared locales, not the host's; a short buffer is refused");
+        // Only ww-WW is declared: the commented-out entries, <ResourceGroup> and DefaultLanguage are not, and the real
+        // entry has whitespace around '=' (valid XML). With one declared locale the answer is that one on any host.
+        if (FILE* f = std::fopen((game + "\\MicrosoftGame.Config").c_str(), "wb")) {
+            std::fputs("<Game><!-- <Resource Language=\"fr-FR\"/> --><Resources>\r\n"
+                       "  <ResourceGroup Language=\"aa-AA\"/>\r\n"
+                       "  <Resource Id=\"one\" DefaultLanguage='bb-BB' Language = \"ww-WW\" />\r\n"
+                       "</Resources></Game><!-- unterminated <Resource Language=\"cc-CC\"/>",
+                       f);
+            std::fclose(f);
+        }
+        std::memset(locale, 'z', sizeof(locale));
+        check(reinterpret_cast<Locale>(slot(pk, 11))(pk, sizeof(locale), locale) == S_OK &&
+                  std::strcmp(locale, "ww-WW") == 0,
+              "slot 11 skips commented-out resources, other elements and attributes, and allows spaces around '='");
         DeleteFileA((game + "\\MicrosoftGame.Config").c_str());
         RemoveDirectoryA(game.c_str());
         SetEnvironmentVariableA("LEONIDA_GAME_DIR", nullptr);
@@ -832,6 +849,18 @@ void check_run_time_load() {
             if (same) release(same);
         }
         check(all, "IXPackageImpl3 answers for IXPackageImpl and IXPackageImpl2 too");
+        // IXPackageImpl4 (tools/gdk_runtime_classes.json): IXPackageImpl3 plus slot 41, XPackageGetPackageKind. VIctory
+        // records the retail title asking for XPackageImpl with this id (docs/related_projects_gaps.md).
+        const GUID package4 = {0x0b9d556e, 0xab70, 0x43f4, {0xba, 0xa0, 0x99, 0x99, 0xac, 0x4c, 0xb0, 0x40}};
+        void* pk4 = nullptr;
+        check(query(&package_cls, package4, &pk4) == S_OK && pk4 == pk,
+              "QueryApiImpl hands out the same XPackageImpl for IXPackageImpl4");
+        if (pk4) {
+            using NoArgs = HRESULT(STDMETHODCALLTYPE*)(void*);
+            check(reinterpret_cast<NoArgs>(slot(pk4, 41))(pk4) == E_NOTIMPL,
+                  "IXPackageImpl4's slot 41 (GetPackageKind) is there and answers E_NOTIMPL");
+            release(pk4);
+        }
         release(pk);
     }
     {
@@ -931,6 +960,107 @@ int main() {
 
     check(get<DeviceTypeFn>("XSystemGetDeviceType")() == 7, "XSystemGetDeviceType reports XboxScarlettAnaconda (7)");
 
+    // The device type as the title reads it: ConsoleMode under HKLM\...\OEM (xgameruntime.cpp, console_registry).
+    {
+        const wchar_t* const oem = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\OEM";
+        auto open = reinterpret_cast<RegOpenFn>(rt::shims::find("advapi32.dll", "RegOpenKeyW"));
+        auto open_ex = reinterpret_cast<RegOpenExFn>(rt::shims::find("advapi32.dll", "RegOpenKeyExW"));
+        auto query = reinterpret_cast<RegQueryFn>(rt::shims::find("advapi32.dll", "RegQueryValueExW"));
+        auto close = reinterpret_cast<RegCloseFn>(rt::shims::find("advapi32.dll", "RegCloseKey"));
+        check(open && open_ex && query && close &&
+                  rt::shims::find("api-ms-win-core-registry-l1-1-0.dll", "RegQueryValueExW") ==
+                      reinterpret_cast<void*>(query) &&
+                  rt::shims::find("api-ms-win-core-registry-l2-1-0.dll", "RegOpenKeyW") == reinterpret_cast<void*>(open) &&
+                  rt::shims::find("kernelbase.dll", "RegCloseKey") == reinterpret_cast<void*>(close),
+              "the registry reads are served under advapi32.dll, the registry api sets and kernelbase.dll");
+        check(!rt::shims::owns_dll("advapi32.dll"), "advapi32.dll stays a host module (only four names are replaced)");
+        if (open && open_ex && query && close) {
+            HKEY key = nullptr;
+            DWORD type = 0, mode = 0, size = sizeof(mode);
+            check(open(HKEY_LOCAL_MACHINE, oem, &key) == ERROR_SUCCESS && key != nullptr &&
+                      query(key, L"ConsoleMode", nullptr, &type, reinterpret_cast<BYTE*>(&mode), &size) ==
+                          ERROR_SUCCESS &&
+                      type == REG_DWORD && size == 4 && mode == 0x64,
+                  "RegOpenKeyW(HKLM\\...\\OEM) and RegQueryValueExW(ConsoleMode) read 0x64, Series X");
+            size = 0;
+            type = 0;
+            check(query(key, L"consolemode", nullptr, &type, nullptr, &size) == ERROR_SUCCESS && size == 4 &&
+                      type == REG_DWORD,
+                  "the value name is matched in any case, and a size query without a buffer answers 4");
+            BYTE one = 0xAB;
+            size = 1;
+            check(query(key, L"ConsoleMode", nullptr, nullptr, &one, &size) == ERROR_MORE_DATA && size == 4 &&
+                      one == 0xAB,
+                  "a 1-byte buffer gets ERROR_MORE_DATA and the size it needs");
+            DWORD reserved = 0;
+            size = sizeof(mode);
+            check(query(key, L"ConsoleMode", nullptr, nullptr, reinterpret_cast<BYTE*>(&mode), nullptr) ==
+                          ERROR_INVALID_PARAMETER &&
+                      query(key, L"ConsoleMode", &reserved, nullptr, reinterpret_cast<BYTE*>(&mode), &size) ==
+                          ERROR_INVALID_PARAMETER,
+                  "a buffer without a size, or a reserved word that is not null, is ERROR_INVALID_PARAMETER");
+            check(query(key, L"OEMID", nullptr, nullptr, nullptr, &size) == ERROR_FILE_NOT_FOUND &&
+                      query(key, nullptr, nullptr, nullptr, nullptr, &size) == ERROR_FILE_NOT_FOUND,
+                  "the key has no other value and no default value");
+            HKEY sub = nullptr, again = nullptr;
+            check(open_ex(key, L"Sub", 0, KEY_READ, &sub) == ERROR_FILE_NOT_FOUND &&
+                      open_ex(key, L"", 0, KEY_READ, &again) == ERROR_SUCCESS && again == key,
+                  "the key has no subkeys; an empty path opens it again");
+            check(close(key) == ERROR_SUCCESS, "RegCloseKey closes the answered key");
+            HKEY ex = nullptr;
+            mode = 0;
+            size = sizeof(mode);
+            check(open_ex(HKEY_LOCAL_MACHINE, L"\\SOFTWARE\\MICROSOFT\\WINDOWS NT\\CURRENTVERSION\\OEM", 0,
+                          KEY_READ | KEY_WOW64_64KEY, &ex) == ERROR_SUCCESS &&
+                      query(ex, L"ConsoleMode", nullptr, nullptr, reinterpret_cast<BYTE*>(&mode), &size) ==
+                          ERROR_SUCCESS &&
+                      mode == 0x64 && close(ex) == ERROR_SUCCESS,
+                  "RegOpenKeyExW finds the same key in upper case and with a leading backslash");
+            check(open(HKEY_LOCAL_MACHINE, oem, nullptr) == ERROR_INVALID_PARAMETER,
+                  "opening the key without a result pointer is ERROR_INVALID_PARAMETER");
+
+            // LEONIDA_DEVICE_TYPE moves the answer with XSystemGetDeviceType
+            const struct {
+                const char* type;
+                DWORD mode;   // 0: the key is missing
+            } kModes[] = {{"6", 0x60}, {"8", 0x68}, {"3", 0x40}, {"4", 0x50}, {"5", 0x58}, {"1", 0}, {"0", 0}, {"2", 0}};
+            bool all = true;
+            for (const auto& m : kModes) {
+                SetEnvironmentVariableA("LEONIDA_DEVICE_TYPE", m.type);
+                HKEY k = nullptr;
+                const LSTATUS opened = open(HKEY_LOCAL_MACHINE, oem, &k);
+                DWORD v = 0, n = sizeof(v);
+                const bool ok = m.mode == 0
+                                    ? opened == ERROR_FILE_NOT_FOUND
+                                    : opened == ERROR_SUCCESS &&
+                                          query(k, L"ConsoleMode", nullptr, nullptr, reinterpret_cast<BYTE*>(&v), &n) ==
+                                              ERROR_SUCCESS &&
+                                          v == m.mode && close(k) == ERROR_SUCCESS;
+                if (!ok) {
+                    std::printf("  LEONIDA_DEVICE_TYPE=%s: open %ld, ConsoleMode 0x%lx (expected 0x%lx)\n", m.type,
+                                static_cast<long>(opened), static_cast<unsigned long>(v),
+                                static_cast<unsigned long>(m.mode));
+                    all = false;
+                }
+            }
+            SetEnvironmentVariableA("LEONIDA_DEVICE_TYPE", nullptr);
+            check(all, "LEONIDA_DEVICE_TYPE 6/8/3/4/5 read 0x60/0x68/0x40/0x50/0x58; Pc, Unknown and XboxOne find no "
+                       "key");
+
+            // every other key is the host's
+            HKEY host = nullptr;
+            wchar_t build[32] = {};
+            DWORD build_size = sizeof(build), build_type = 0;
+            check(open_ex(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows NT\\CurrentVersion", 0, KEY_READ,
+                          &host) == ERROR_SUCCESS &&
+                      host != key &&
+                      query(host, L"CurrentBuildNumber", nullptr, &build_type, reinterpret_cast<BYTE*>(build),
+                            &build_size) == ERROR_SUCCESS &&
+                      build_type == REG_SZ && build[0] != L'\0' && close(host) == ERROR_SUCCESS,
+                  "another key goes to the host registry (CurrentVersion\\CurrentBuildNumber)");
+        }
+    }
+
     auto console_id = get<ConsoleIdFn>("XSystemGetConsoleId");
     char id[64] = {};
     size_t used = 0;
@@ -1021,6 +1151,54 @@ int main() {
           "XPackageGetMountPathSize rejects closed/stale mount handle");
     check(mount_path(dlc_mount, sizeof(mnt_path), mnt_path) == HRESULT_FROM_WIN32(ERROR_NOT_FOUND),
           "XPackageGetMountPath rejects closed/stale mount handle");
+    // Mount paths are sized by the query API, and the mapping can exceed 1024 bytes.
+    const std::string long_path(300, 'p');
+    for (const std::string& mapping : {std::string("pkg=") + long_path,
+                                       std::string("unused=") + std::string(1024, 'x') + ";pkg=" + long_path}) {
+        SetEnvironmentVariableA("LEONIDA_CONTENT_PACKAGES", mapping.c_str());
+        XPackageMountHandle long_mount{0};
+        const HRESULT long_hr = mount_pkg("pkg", &long_mount);
+        check(long_hr == S_OK, "XPackageMount accepts a 300-byte path in a long mapping");
+        size_t long_size = 0;
+        check(long_hr == S_OK && mount_path_size(long_mount, &long_size) == S_OK && long_size == 301,
+              "XPackageGetMountPathSize returns 301 for a 300-byte path");
+        std::string returned(long_size, '\0');
+        check(long_hr == S_OK && mount_path(long_mount, long_size, returned.data()) == S_OK &&
+                  returned == long_path + '\0', "XPackageGetMountPath returns the entire long path");
+        if (long_hr == S_OK) close_mount(long_mount);
+    }
+    {
+        namespace fs = std::filesystem;
+        const auto folder = fs::temp_directory_path() /
+            (L"leonida_content_\u16a0_\U0001F680_" + std::to_wstring(GetCurrentProcessId()));
+        std::error_code ec;
+        const bool created = fs::create_directory(folder, ec);
+        check(created, "create a Unicode content package folder");
+        if (created) {
+            std::ofstream(folder / L"marker.txt") << "mounted";
+            const auto mapping = L"unused=other;unicode=" + folder.native() + L";last=another";
+            check(SetEnvironmentVariableW(L"LEONIDA_CONTENT_PACKAGES", mapping.c_str()) != 0,
+                  "configure the content mapping in the native Windows environment");
+            XPackageMountHandle mount{};
+            check(mount_pkg("unicode", &mount) == S_OK, "mount the package with a Unicode directory");
+            const auto expected = folder.u8string();
+            size_t bytes = 0;
+            check(mount_path_size(mount, &bytes) == S_OK && bytes == expected.size() + 1,
+                  "the Unicode mount size includes every UTF-8 byte and the terminator");
+            std::string path(expected.size() + 1, '\0');
+            check(mount_path(mount, expected.size(), path.data()) == HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER),
+                  "the Unicode mount refuses a buffer one UTF-8 byte short");
+            const bool exact = mount_path(mount, path.size(), path.data()) == S_OK &&
+                               std::memcmp(path.data(), expected.c_str(), path.size()) == 0;
+            check(exact, "the Unicode mount returns the exact UTF-8 path");
+            std::string marker;
+            if (exact) std::ifstream(fs::u8path(path.c_str()) / L"marker.txt") >> marker;
+            check(marker == "mounted", "the returned UTF-8 path opens the package marker");
+            close_mount(mount);
+            fs::remove_all(folder, ec);
+            check(!ec, "remove the Unicode content package fixture");
+        }
+    }
     SetEnvironmentVariableA("LEONIDA_CONTENT_PACKAGES", nullptr);
 
     auto is_packaged = get<PackagedProcessFn>("XPackageIsPackagedProcess");

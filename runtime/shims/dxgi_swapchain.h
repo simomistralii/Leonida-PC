@@ -556,18 +556,15 @@ private:
         fn_.get_images(device_, swapchain_, &img_count, images_.data());
         image_initialized_.assign(img_count, false);
         const std::uint32_t requested = buffer_count ? buffer_count : 2u;
-        const bool blit_needed = extent_.width != surface_extent_.width || extent_.height != surface_extent_.height ||
-                                 format_ != chosen.format;
-        if (blit_needed || img_count != requested) {
-            // A varying native count (Vulkan may return more images than minImageCount, and minImageCount may
-            // exceed the app's request) cannot be mapped one-to-one onto DXGI backbuffers: the app owns one
-            // persistent resource per BufferCount index. Expose the requested count as offscreen images and
-            // blit the presented slot into the acquired native image instead.
-            if (!create_offscreen_backbuffers(requested)) return false;
-            exposed_count_ = requested;
-        } else {
-            exposed_count_ = img_count;
-        }
+        // The native images are never the app's back buffers. A size, format or count that differs cannot be mapped
+        // one-to-one (Vulkan may return more images than minImageCount, and minImageCount may exceed the app's
+        // request), and even a matching set comes back from vkAcquireNextImageKHR in any order (0 1 0 2 1 0 2 on an
+        // RTX 5070 Ti with three FIFO images), where DXGI hands a flip-model chain's buffers out round-robin, 0, 1,
+        // ..., BufferCount-1 (host-measured on NVIDIA and WARP). The app owns one persistent resource per BufferCount
+        // index: expose the requested count as offscreen images and blit the presented slot into the acquired native
+        // image instead.
+        if (!create_offscreen_backbuffers(requested)) return false;
+        exposed_count_ = requested;
         current_index_ = 0;
         next_back_buffer_ = 0;
         acquired_index_ = 0;

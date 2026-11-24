@@ -20,6 +20,7 @@ individual file is identified by the basename that was passed. The output is a l
 be committed or attached to an issue. Report paths are refused before the scan when they alias an input: a
 nested XML in directory mode, or a carve ``index.json`` or stream. The test fixtures are synthetic and contain
 no game data.
+Usage: `python -I tools/gamedata_xml.py --help` lists the options.
 """
 import argparse
 import csv

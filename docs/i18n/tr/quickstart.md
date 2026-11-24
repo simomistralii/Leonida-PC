@@ -76,7 +76,9 @@ yazılır; yarım kalan bir derleme kaldığı yerden devam eder.
 
 ```powershell
 python -I make_game.py --find                          # bilgisayarda bulunan kopyaları listele
+python -I make_game.py --pick                          # oyun klasörünü bir klasör penceresinde seç
 python -I make_game.py --check                         # kopyayı doğrula, derleme yapma
+python -I make_game.py --check --full-check            # ayrıca her dosyanın SHA-256 özetini karşılaştır (yavaş)
 python -I make_game.py --game "D:\paket\yolu" --out "D:\Games\Leonida" --work "E:\leonida-work"
 python -I make_game.py --stages shaders,assets         # yalnızca seçili aşamaları çalıştır
 python -I make_game.py --game "D:\paket\yolu" --wav    # Opus akışlarını ayrıca PCM WAV'a çöz (büyük boyut)

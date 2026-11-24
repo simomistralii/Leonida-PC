@@ -49,6 +49,7 @@ import mmap
 import os
 import struct
 import sys
+import tempfile
 import time
 import zlib
 
@@ -57,6 +58,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import anim_clips  # noqa: E402
 import anim_index  # noqa: E402
+from file_mode import published_mode  # noqa: E402
 import glb_writer  # noqa: E402
 from pool_workers import process_workers  # noqa: E402
 import skin_streams  # noqa: E402
@@ -723,6 +725,29 @@ def coverage(args):
             "counts": dict(sorted(total.items())), "seconds": round(time.monotonic() - started, 1)}
 
 
+def write_report(path, text):
+    """Stage the JSON report next to its destination and swap it in, so a write or replace failure keeps any
+    previous report intact and preserves its permission bits."""
+    parent = os.path.dirname(os.path.abspath(path))
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="\n", dir=parent,
+                                         prefix=".anim_glb-", suffix=".tmp", delete=False) as f:
+            tmp = f.name
+            f.write(text)
+        os.chmod(tmp, published_mode(path))
+        os.replace(tmp, path)
+    except BaseException:
+        if tmp is not None:
+            try:
+                if os.path.lexists(tmp):
+                    os.chmod(tmp, 0o600)
+                    os.remove(tmp)
+            except OSError:
+                pass
+        raise
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("archive", help="archive holding the skeleton and the parts (packs.rpf)")
@@ -778,9 +803,7 @@ def main(argv=None):
         return 2
     if args.report:
         try:
-            with open(args.report, "w", encoding="utf-8", newline="\n") as f:
-                json.dump(report, f, indent=1, sort_keys=True)
-                f.write("\n")
+            write_report(args.report, json.dumps(report, indent=1, sort_keys=True) + "\n")
         except OSError as e:
             print(f"ERROR: cannot write report {args.report}: {e.strerror or e}", file=sys.stderr)
             return 2

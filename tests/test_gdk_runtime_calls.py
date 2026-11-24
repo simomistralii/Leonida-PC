@@ -416,7 +416,8 @@ class ImageTest(unittest.TestCase):
         self.assertEqual(served.get("704c3f58-e629-4cc2-b197-30511b996fe2"), "kSaveClass")
         # xgameruntime.cpp serves XGameRuntimeFeatureImpl; the ids its feature table only names (k...ClassId) don't count.
         self.assertEqual(served.get("8836fe87-edb9-4fe3-8dad-05f0d2cd5b40"), "kGameRuntimeFeatureClass")
-        self.assertNotIn("1b339674-328d-4283-a200-3171f18d3639", served)   # XLauncherImpl
+        self.assertEqual(served.get("1b339674-328d-4283-a200-3171f18d3639"), "kLauncherClass")   # XLauncherImpl, xgameruntime_offline.cpp
+        self.assertNotIn("a4f1aee2-4bf1-4485-b008-a7c26d52ac27", served)   # XAppCaptureImpl
         empty = os.path.join(self.tmp, "no-shims")
         os.makedirs(empty, exist_ok=True)
         with self.assertRaises(OSError):
@@ -459,6 +460,10 @@ class DecoderTest(unittest.TestCase):
             "48B80000000000000000": 10,   # mov rax,imm64
             "F6C101": 3,                  # test cl,1
             "F7C100000000": 6,            # test ecx,imm32
+            "66F7C10000": 5,              # test cx,imm16
+            "6648F7C100000000": 8,        # test rcx,imm32 (REX.W overrides 66h)
+            "66C7C10000": 5,              # mov cx,imm16
+            "6648C7C100000000": 8,        # mov rcx,imm32 (REX.W overrides 66h)
             "4C8B11": 3,                  # mov r10,[rcx]
             "0F8400000000": 6,            # je rel32
         }

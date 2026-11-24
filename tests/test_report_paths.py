@@ -21,7 +21,7 @@ import report_paths  # noqa: E402
 
 # Tools that use report_paths and must not define their own copy again.
 SHARED = ("anim_index", "awc_manifest", "gamedata_index", "gamedata_xml", "gen_d3d12_stubs", "glb_inspect",
-          "navmesh_index", "rpf_probe", "tile_probe", "world_lights_paths", "world_names")
+          "navmesh_index", "rpf_probe", "tile_probe", "world_index", "world_lights_paths", "world_names")
 # The one tool that still carries its own copy (an open pull request edits its call site). Do not add to this list:
 # import report_paths instead.
 LEGACY_COPIES = {"navmesh_decode"}
@@ -84,6 +84,22 @@ class SamePathTests(unittest.TestCase):
         insensitive = os.path.exists(self.p("PROBE.TMP"))
         got = report_paths.same_report_path(self.p("new", "B.json"), self.p("new", "b.json"))
         self.assertEqual(got, insensitive or os.path.normcase("A") == os.path.normcase("a"))
+
+
+class OsErrorTextTests(unittest.TestCase):
+    def test_keeps_errno_message_and_the_exact_names(self):
+        # str(OSError) shows a filename through repr(): backslashes double and quotes are escaped.
+        name = 'C:\\Users\\o\'brien\\"x"\\blocked'
+        error = PermissionError(13, "Permission denied", name)
+        self.assertIn("\\\\", str(error))
+        self.assertEqual(report_paths.os_error_text(error), f"[Errno 13] Permission denied: {name}")
+        error = OSError(18, "Invalid cross-device link", name, None, name + "2")
+        self.assertEqual(report_paths.os_error_text(error),
+                         f"[Errno 18] Invalid cross-device link: {name} -> {name}2")
+
+    def test_other_errors_keep_their_own_text(self):
+        for error in (OSError("no errno here"), OSError(2, "No such file"), ValueError("bad value")):
+            self.assertEqual(report_paths.os_error_text(error), str(error))
 
 
 class MacVolumeTests(unittest.TestCase):
@@ -212,7 +228,7 @@ class NoPrivateCopiesTests(unittest.TestCase):
 
     def test_tools_still_expose_same_report_path(self):
         # gamedata_xml.py and others call it by this name (and tests or sibling tools may import it).
-        for tool in ("gamedata_index", "gamedata_xml", "navmesh_index"):
+        for tool in ("gamedata_index", "gamedata_xml", "navmesh_index", "world_index"):
             with self.subTest(tool=tool):
                 module = __import__(tool)
                 self.assertIs(module.same_report_path, report_paths.same_report_path)

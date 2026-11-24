@@ -54,6 +54,22 @@ class DisasmFailureTest(unittest.TestCase):
             f.write(body)
         return f'"{sys.executable}" "{path}"'  # a command line, not just a path: LLVM_MC must accept both
 
+    def test_python_backend_uses_the_fssm_wave_size(self):
+        compare = (0x3E << 25) | (0xC2 << 17) | (2 << 9) | 128
+        for flag, operand in ((0, "vcc"), (0x20, "vcc_lo")):
+            with self.subTest(operand=operand):
+                blob = bytearray(fssm())
+                blob[0xD4] = flag
+                blob[0x128:0x12C] = compare.to_bytes(4, "little")
+                with open(self.fssm, "wb") as f:
+                    f.write(blob)
+                out = os.path.join(self.dir, operand)
+                result = subprocess.run([sys.executable, "-I", TOOL, self.fssm, "--out", out, "--backend", "python"],
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                with open(os.path.join(out, "one.s"), encoding="utf-8") as f:
+                    self.assertIn(f" {operand},", f.read())
+
     def test_missing_tool(self):
         out = os.path.join(self.dir, "out")
         p = self.run_tool("definitely-not-an-llvm-mc", out)

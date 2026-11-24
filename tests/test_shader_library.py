@@ -297,6 +297,99 @@ class Main(unittest.TestCase):
             finally:
                 rdna2spirv._STAGES = None
 
+    def test_carve_reports_corrupt_and_unreadable_containers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            carve = os.path.join(tmp, "carve")
+            os.makedirs(carve)
+            with open(os.path.join(carve, "PS_A.dxbc"), "wb") as f:
+                f.write(dxbc(D_PS))
+            with open(os.path.join(carve, "VS_C.dxbc"), "wb") as f:
+                f.write(dxbc(D_VS)[:20])                             # truncated header
+            with open(os.path.join(carve, "MS_D.dxbc"), "wb") as f:
+                f.write(dxbc(D_MS)[:-4])                             # truncated part payload
+            os.makedirs(os.path.join(carve, "CS_B.dxbc"))            # exists on disk, unreadable OSError
+            index = [
+                {"name": "PS_A", "file": "PS_A.dxbc"},
+                {"name": "gone", "file": "gone.dxbc"},               # missing: skipped silently
+                {"name": "VS_C", "file": "VS_C.dxbc"},
+                {"name": "MS_D", "file": "MS_D.dxbc"},
+                {"name": "CS_B", "file": "CS_B.dxbc"},
+            ]
+            with open(os.path.join(carve, "index.json"), "w", encoding="utf-8", newline="\n") as f:
+                json.dump(index, f)
+            src = os.path.join(tmp, "lib.bin")
+            with open(src, "wb") as f:
+                f.write(sample())
+            out = os.path.join(tmp, "out")
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                rc = sl.main([src, "--out", out, "--carve", carve])
+            self.assertEqual(rc, 0)
+            self.assertIn("1 of 4 named by a carved shader's HASH digest, 3 not in the carve, "
+                          "3 unreadable/corrupt containers", stdout.getvalue())
+            err_lines = stderr.getvalue().splitlines()
+            self.assertEqual(len(err_lines), 3)
+            self.assertEqual(err_lines[0], "carve: VS_C.dxbc: truncated DXBC header")
+            self.assertEqual(err_lines[1], "carve: MS_D.dxbc: truncated DXBC part payload")
+            self.assertTrue(err_lines[2].startswith("carve: CS_B.dxbc: ") and len(err_lines[2]) > len("carve: CS_B.dxbc: "))
+            self.assertNotIn("gone.dxbc", stderr.getvalue())
+            self.assertTrue(os.path.isfile(os.path.join(out, "lib_ps_00000.dxbc")))
+
+    def test_carve_missing_only_stays_silent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            carve = os.path.join(tmp, "carve")
+            os.makedirs(carve)
+            with open(os.path.join(carve, "PS_A.dxbc"), "wb") as f:
+                f.write(dxbc(D_PS))
+            index = [
+                {"name": "PS_A", "file": "PS_A.dxbc"},
+                {"name": "gone", "file": "gone.dxbc"},
+            ]
+            with open(os.path.join(carve, "index.json"), "w", encoding="utf-8", newline="\n") as f:
+                json.dump(index, f)
+            src = os.path.join(tmp, "lib.bin")
+            with open(src, "wb") as f:
+                f.write(sample())
+            out = os.path.join(tmp, "out")
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                rc = sl.main([src, "--out", out, "--carve", carve])
+            self.assertEqual(rc, 0)
+            self.assertEqual(stderr.getvalue(), "")
+            self.assertIn("1 of 4 named by a carved shader's HASH digest, 3 not in the carve\n", stdout.getvalue())
+            self.assertNotIn("unreadable/corrupt", stdout.getvalue())
+
+    def test_carve_single_corrupt_container_and_direct_api(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            carve = os.path.join(tmp, "carve")
+            os.makedirs(carve)
+            with open(os.path.join(carve, "PS_A.dxbc"), "wb") as f:
+                f.write(dxbc(D_PS))
+            with open(os.path.join(carve, "ZERO.dxbc"), "wb") as f:
+                f.write(bytes(64))                                   # valid length/count=0, wrong magic
+            index = [
+                {"name": "PS_A", "file": "PS_A.dxbc"},
+                {"name": "ZERO", "file": "ZERO.dxbc"},
+            ]
+            with open(os.path.join(carve, "index.json"), "w", encoding="utf-8", newline="\n") as f:
+                json.dump(index, f)
+            direct_err = io.StringIO()
+            with contextlib.redirect_stderr(direct_err):
+                digests = sl.carve_digests(carve)
+            self.assertEqual(digests, {D_PS: [("PS_A", os.path.join(carve, "PS_A.dxbc"))]})
+            self.assertEqual(direct_err.getvalue().splitlines(), ["carve: ZERO.dxbc: not a DXBC container"])
+            src = os.path.join(tmp, "lib.bin")
+            with open(src, "wb") as f:
+                f.write(sample())
+            out = os.path.join(tmp, "out")
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                rc = sl.main([src, "--out", out, "--carve", carve])
+            self.assertEqual(rc, 0)
+            self.assertIn("1 of 4 named by a carved shader's HASH digest, 3 not in the carve, "
+                          "1 unreadable/corrupt container\n", stdout.getvalue())
+            self.assertEqual(stderr.getvalue().splitlines(), ["carve: ZERO.dxbc: not a DXBC container"])
+
 
 if __name__ == "__main__":
     unittest.main()

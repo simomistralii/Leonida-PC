@@ -206,6 +206,55 @@ int main(int argc, char** argv) {
                                         IID_PPV_ARGS(reserved.GetAddressOf()));
     check(SUCCEEDED(hr) && reserved != nullptr, "slot 30 forwards CreateReservedResource (stack arguments)");
 
+    // Slots 25 and 26 return a struct, and the title calls them with the return buffer first (boot-chain stop 7,
+    // docs/retail_boot_chain.md section 3.1): (buffer, this, ...). Both orders must give the PC device's answer, and
+    // the buffer comes back in RAX. A stack buffer that starts with a stale copy of the proxy's vtable pointer still
+    // reads as the buffer: it is the one on this thread's stack.
+    if (real && slots > 26) {
+        const D3D12_HEAP_PROPERTIES want = real->GetCustomHeapProperties(0, D3D12_HEAP_TYPE_UPLOAD);
+        using PcOrder26 = D3D12_HEAP_PROPERTIES*(WINAPI*)(void*, D3D12_HEAP_PROPERTIES*, UINT, D3D12_HEAP_TYPE);
+        using BufferFirst26 = D3D12_HEAP_PROPERTIES*(WINAPI*)(D3D12_HEAP_PROPERTIES*, void*, UINT, D3D12_HEAP_TYPE);
+        D3D12_HEAP_PROPERTIES pc{};
+        D3D12_HEAP_PROPERTIES* back = reinterpret_cast<PcOrder26>(proxy_vtbl[26])(device.Get(), &pc, 0,
+                                                                                   D3D12_HEAP_TYPE_UPLOAD);
+        check(back == &pc && std::memcmp(&pc, &want, sizeof(want)) == 0,
+              "slot 26 GetCustomHeapProperties called PC style returns the PC device's answer");
+        D3D12_HEAP_PROPERTIES first{};
+        back = reinterpret_cast<BufferFirst26>(proxy_vtbl[26])(&first, device.Get(), 0, D3D12_HEAP_TYPE_UPLOAD);
+        check(back == &first && std::memcmp(&first, &want, sizeof(want)) == 0,
+              "slot 26 called with the return buffer first fills it and returns it");
+        union {
+            void* stale_vtable;
+            D3D12_HEAP_PROPERTIES props;
+        } stale{};
+        stale.stale_vtable = proxy_vtbl;   // the buffer now reads as a proxy too
+        back = reinterpret_cast<BufferFirst26>(proxy_vtbl[26])(&stale.props, device.Get(), 0, D3D12_HEAP_TYPE_UPLOAD);
+        check(back == &stale.props && std::memcmp(&stale.props, &want, sizeof(want)) == 0,
+              "a stack buffer holding the proxy's vtable pointer is still taken as the buffer");
+
+        D3D12_RESOURCE_DESC buffer_desc{};
+        buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        buffer_desc.Width = 65536;
+        buffer_desc.Height = 1;
+        buffer_desc.DepthOrArraySize = 1;
+        buffer_desc.MipLevels = 1;
+        buffer_desc.SampleDesc.Count = 1;
+        buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        const D3D12_RESOURCE_ALLOCATION_INFO want25 = real->GetResourceAllocationInfo(0, 1, &buffer_desc);
+        using PcOrder25 = D3D12_RESOURCE_ALLOCATION_INFO*(WINAPI*)(void*, D3D12_RESOURCE_ALLOCATION_INFO*, UINT, UINT,
+                                                                  const D3D12_RESOURCE_DESC*);
+        using BufferFirst25 = D3D12_RESOURCE_ALLOCATION_INFO*(WINAPI*)(D3D12_RESOURCE_ALLOCATION_INFO*, void*, UINT,
+                                                                      UINT, const D3D12_RESOURCE_DESC*);
+        D3D12_RESOURCE_ALLOCATION_INFO pc25{}, first25{};
+        reinterpret_cast<PcOrder25>(proxy_vtbl[25])(device.Get(), &pc25, 0, 1, &buffer_desc);
+        D3D12_RESOURCE_ALLOCATION_INFO* back25 =
+            reinterpret_cast<BufferFirst25>(proxy_vtbl[25])(&first25, device.Get(), 0, 1, &buffer_desc);
+        check(pc25.SizeInBytes == want25.SizeInBytes && pc25.Alignment == want25.Alignment,
+              "slot 25 GetResourceAllocationInfo called PC style returns the PC device's answer");
+        check(back25 == &first25 && first25.SizeInBytes == want25.SizeInBytes && first25.Alignment == want25.Alignment,
+              "slot 25 called with the return buffer first fills it and returns it");
+    }
+
     // Slot 14: descriptor heap through the proxy. The proxy wraps the real PC heap for the handle ABI.
     D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
     heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;

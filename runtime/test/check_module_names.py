@@ -30,7 +30,9 @@ def main() -> int:
         parser.error("this comparison needs native Windows")
     args.work_dir.mkdir(parents=True, exist_ok=True)
     page = ctypes.windll.kernel32.GetACP()
-    acp_char = next((c for c in "\u00e9\u03b4\u0436\u6f22" if exact_acp(c)), None)
+    # The guest also looks up the upper-case spelling through GetModuleHandleA.
+    # ACP 936 can spell U+00E9 but not U+00C9, so require both forms to round-trip.
+    acp_char = next((c for c in "\u00e9\u03b4\u0436\u6f22" if exact_acp(c) and exact_acp(c.upper())), None)
     unicode_char = next((c for c in "\u6f22\u5b57\u0436\u03b4\u00e9" if exact_acp(c) is None), "\u6f22")
     rows: list[dict] = []
     failures: list[str] = []
@@ -73,10 +75,19 @@ def main() -> int:
             if self_probe and mode in ("native", "--run"):
                 if not entry or "entered=1" not in entry:
                     errors.append("guest did not reach its name checks")
-                if exact_acp(image.name) is not None and (
-                    not entry or "representable=1 self_a=1 ascii_case_a=1" not in entry
-                ):
-                    errors.append("guest did not retain exact and ASCII-case ACP lookup")
+                # The wide lookups (as named, in the system table's upper case, and LoadLibraryW of the mapped
+                # image) must find the image for every name; the ANSI ones, exact, ASCII-case and code-page-case,
+                # for a name the code page can spell.
+                required = ["self_w=1", "case_w=1", "load_w=1"]
+                if exact_acp(image.name) is not None:
+                    required += ["representable=1", "self_a=1", "ascii_case_a=1", "acp_case_a=1"]
+                # Under the loader, a shim-served DLL named through a directory outside ASCII is answered by basename
+                # (natively the probe depends on what the machine has installed, so it is only checked here).
+                if mode == "--run":
+                    required += ["shim_dir_w=1", "shim_dir_load_w=1"]
+                missing = [field for field in required if not entry or field not in entry.split()]
+                if missing:
+                    errors.append("guest lookups not retained: " + " ".join(missing))
             mapped_names: list[str] = []
             if mode != "native":
                 try:

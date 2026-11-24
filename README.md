@@ -1,7 +1,7 @@
 <h1 align="center">
   <br>
   <a>
-  <img src="assets/logo.png" alt="Leonida" width="200">
+  <img src="assets/logo.svg" alt="Leonida" width="200">
 </a>
 
   <br>
@@ -34,7 +34,9 @@ happens **on your PC, from your own copy of the game**.
 > Everything the build creates (the generated shaders, extracted assets, the runtime folder and your saves) comes
 > from your game and stays on your PC. Never share those files.
 
-Discord: https://discord.gg/rexed
+Discord: https://discord.gg/mjgjRFcUWW
+
+Custom Git Mirror: https://git.notrexed.dev/notrexed/Leonida
 <br>
 
 ## Project status
@@ -118,10 +120,7 @@ Your game folder is the one that holds `MicrosoftGame.Config` and the `.rpf` arc
   runtime stage (the runtime uses version 1.2 root signatures, which older SDKs don't declare).
 - [ffmpeg](https://ffmpeg.org/download.html) on PATH (optional: decodes the XMA2 streams, and required for `--wav`).
 
-**Is this PC strong enough?** `python -I tools/pc_checker.py --cli` detects the CPU, GPU and RAM and compares them
-with the reference profiles before a long build: `--profile 1`, the default, is an Xbox Series X PC equivalent and
-`--profile 2` a 1080p Low community estimate. `python -I tools/pc_checker.py --check --json` prints the same verdict
-as JSON and returns it as an exit code (0 good, 1 weak, 2 unknown).
+**Is this PC strong enough?** [Can I Run Leonida](https://assttro.github.io/can-i-run-leonida/) is a lightweight browser-based checker that compares your PC against reference profiles. It's a rough estimate, not a benchmark.
 
 **Low disk space:** the ~400 GB figure is for the full build. To *run* the port, `--stages check,shaders,runtime`
 needs about 30 GB; the `assets` stage (~370 GB) is only for the asset tools, and `--wav` adds several times the
@@ -165,7 +164,8 @@ them translates them again: `--no-float-controls` (drop `SignedZeroInfNanPreserv
 skips a shader without `shaderSignedZeroInfNanPreserveFloat32`; needs PR #664's translator flag), `--bary-fallback`
 (read raw barycentrics from an interpolated input, for devices without `VK_KHR_fragment_shader_barycentric`),
 `--texel-offset-fallback` (fold `image_sample*_o` offsets into the coordinate, for devices without
-`VK_KHR_maintenance8`) and `--mesh-compute` (mesh shaders as compute, for devices without `VK_EXT_mesh_shader`).
+`VK_KHR_maintenance8`) and `--mesh-compute` (mesh shaders as compute, for devices without `VK_EXT_mesh_shader`;
+on by itself on Intel's Windows Vulkan driver, whose native mesh draws crash, BUILD-2202, unless `--native-mesh`).
 Each is documented in [docs/design.md](docs/design.md).
 
 The build records which llvm-mc command and version produced the disassembly. Changing either, or reusing a work
@@ -243,7 +243,7 @@ in `<work>/shaders/spirv` using `shader_path.txt` beside `gta6rt.exe`. Set `LEON
 | Piece | What it does | Where |
 |---|---|---|
 | Version check | Every package file's name, size and SHA-256 for each supported version | `game/`, `make_game.py` |
-| Shader pipeline | Carves DXBC containers from `shaders.rpf` without its encrypted table of contents. Unpacks the `XBCH` → `FSSM` native RDNA2 program, disassembles it with LLVM (`gfx1013`) and translates it to SPIR-V | `tools/shader_carve.py`, `fssm_unpack.py`, `shader_disasm.py`, `rdna2spirv.py` |
+| Shader pipeline | Carves DXBC containers from `shaders.rpf` without its encrypted table of contents. Unpacks the `XBCH` → `FSSM` native RDNA2 program, disassembles it with LLVM (`gfx1013`) and translates it to SPIR-V | `tools/shader_carve.py` ([optional Rust scanner](tools/shader_carve_native/README.md)), `fssm_unpack.py`, `shader_disasm.py`, `rdna2spirv.py` |
 | Asset export | Finds validated resources inside RPF9 archives and the loose `.ttpf` texture pools | `tools/rpf9dump` (on rpf9-explorer's Core) |
 | Runtime | Maps the PE image, resolves imports to shims (GDK, XMem, `d3d12_xs`) | `runtime/` |
 | Research tools | PE/RTTI inspection, raw carving, texture tiling probes, GPU test harnesses | `tools/`, `runtime/test/` |

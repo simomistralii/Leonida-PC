@@ -7,6 +7,7 @@ Counts each mnemonic (number of shaders using it and total occurrences), groups 
 classifies instructions (ALU vs memory vs branch), computes operation ratios, and summarises register pressure
 per stage (VGPR/SGPR counts from `profile_shader`; `--per-shader` also lists every shader).
 In the JSON report, ratios.alu_to_memory is null when the corpus has ALU instructions and no memory instructions.
+`categories_by_stage` uses the carve index first, then a recognized stage prefix in the filename, otherwise `?`.
 
 `undecoded` counts the llvm-mc 'invalid instruction encoding' warnings shader_disasm.py copies into each .s file.
 by_word lists the four bytes at each warning position, their total occurrences and how many shaders contain them.
@@ -27,6 +28,7 @@ FAMILIES = [("s_buffer_", "smem"), ("s_load", "smem"), ("s_", "scalar"), ("v_", 
             ("buffer_", "buffer"), ("tbuffer_", "buffer"), ("image_", "image"), ("global_", "global"),
             ("flat_", "flat"), ("scratch_", "scratch"), ("exp", "export")]
 
+STAGE_PREFIX = re.compile(r"(ps|vs|gs|hs|ds|cs|ms|as|lib)_", re.IGNORECASE | re.ASCII)
 VGPR_RANGE = re.compile(r"\bv\[(\d+):(\d+)\]")
 VGPR_SINGLE = re.compile(r"\bv(\d+)\b")
 SGPR_RANGE = re.compile(r"\bs\[(\d+):(\d+)\]")
@@ -197,24 +199,29 @@ def profile_shader(text: str) -> dict:
 
 
 LLVM_MESSAGES = "; --- llvm-mc messages ---"    # the header shader_disasm.py writes above llvm-mc's stderr
+INVALID_WORD_HEADER = re.compile(r"^;\s*\S+\s+code 0x[0-9a-f]+\.\.0x[0-9a-f]+ .+, ([0-9]{1,20}) invalid words$")
 WARNING_LOCATION = re.compile(r"; <stdin>:[1-9][0-9]*:([1-9][0-9]*)")
 BYTE_ECHO = re.compile(r"; [ \t]*0x[0-9a-fA-F]{2}(?=[ \t]|$)")
 WORD = re.compile(r"[ \t]+".join([r"0x([0-9a-fA-F]{2})"] * 4) + r"(?!\S)")    # four complete 0xNN tokens
 
 
 def warning_words(text: str):
-    """Words LLVM warned about in one .s file's llvm-mc messages section, as (words, unresolved).
+    """Invalid words from a listing, as (words identified from LLVM diagnostics, unresolved count).
 
     Each 'invalid instruction encoding' warning gives one word: the four complete 0xNN tokens starting exactly
     at its one-based column of the source line LLVM echoes right after it, as e.g. 'ff ff ff d7'. A warning whose
-    position, echo or tokens don't give such a word counts as unresolved instead."""
-    if LLVM_MESSAGES not in text:    # clean shaders have no messages section
-        return [], 0
+    position, echo or tokens don't give such a word counts as unresolved instead. The listing header also gives
+    an invalid-word count when the Python decoder produces no LLVM diagnostics."""
+    header = text.partition("\n")[0].rstrip("\r")
+    count = INVALID_WORD_HEADER.fullmatch(header)
+    declared = int(count[1]) if count else 0
+    if LLVM_MESSAGES not in text:
+        return [], declared
     lines = text.splitlines()
     try:
         start = lines.index(LLVM_MESSAGES) + 1
     except ValueError:
-        return [], 0
+        return [], declared
     words, unresolved = [], 0
     for index in range(start, len(lines)):
         head = lines[index]
@@ -238,7 +245,7 @@ def warning_words(text: str):
             words.append(" ".join(word.groups()).lower())
         else:
             unresolved += 1
-    return words, unresolved
+    return words, max(unresolved, declared - len(words))
 
 
 def register_summary(reg_stage) -> dict:
@@ -273,7 +280,7 @@ def stage_map(disasm_dir) -> dict:
     so the name is only a fallback for shaders the index doesn't list. Empty when there is no readable index."""
     path = carve_index_path(disasm_dir)
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             entries = json.load(f)
         return {os.path.splitext(e["file"])[0]: e["stage"] for e in entries
                 if isinstance(e, dict) and isinstance(e.get("file"), str) and isinstance(e.get("stage"), str)}
@@ -327,7 +334,7 @@ def main():
     occ, users = Counter(), Counter()
     word_occ, word_users = Counter(), Counter()    # warned-at word -> warnings, shaders
     unresolved = 0
-    per_stage = defaultdict(Counter)
+    categories_by_stage = defaultdict(Counter)
     reg_stage = defaultdict(list)    # stage -> [(vgpr_count, sgpr_count)]
     shaders = []
     stages = stage_map(a.src)
@@ -335,7 +342,10 @@ def main():
     for entry in shader_files:
         name = entry.name
         n += 1
-        stage = stages.get(name[:-2]) or (name[:2].lower() if name[2:3] == "_" else "?")
+        stage = stages.get(name[:-2])
+        if not stage:
+            prefix = STAGE_PREFIX.match(name)
+            stage = prefix[1].lower() if prefix else "?"
         try:
             with open(entry.path, encoding="utf-8", errors="replace") as f:
                 text = f.read()
@@ -350,7 +360,7 @@ def main():
                             "vgpr_count": regs["vgpr_count"], "sgpr_count": regs["sgpr_count"]})
         occ.update(prof["mnemonics"])
         users.update(prof["mnemonics"].keys())
-        per_stage[stage].update(prof["mnemonics"].keys())
+        categories_by_stage[stage].update(prof["categories"])
         words, bad = warning_words(text)
         word_occ.update(words)
         word_users.update(set(words))
@@ -367,6 +377,7 @@ def main():
     out = {"shaders": n, "mnemonics": len(occ),
            "families": {k: {"mnemonics": v[0], "occurrences": v[1]} for k, v in sorted(fam.items())},
            "categories": cats,
+           "categories_by_stage": dict(sorted(categories_by_stage.items())),
            "ratios": ratios,
            "by_mnemonic": [{"m": m, "shaders": shader_count, "count": occ[m]}
                            for m, shader_count in ranked_users],

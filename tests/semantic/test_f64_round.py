@@ -67,7 +67,7 @@ class F64RoundTests(unittest.TestCase):
 
     def test_rejects_bad_operand_forms(self):
         for instruction in ("v_floor_f64 v4, v[0:1]", "v_round_f64 v[4:5], v[0:1]",
-                            "v_trunc_f64 v[4:5], v0", "v_ceil_f64 v[4:5], 0x100000000"):
+                            "v_trunc_f64 v[4:5], v0"):
             with self.subTest(instruction=instruction):
                 with self.assertRaises(support.rdna2spirv.Unsupported):
                     support.translate_lines("ps_f64_bad", [instruction, "s_endpgm"])

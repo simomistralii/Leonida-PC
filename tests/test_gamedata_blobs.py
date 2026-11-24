@@ -252,12 +252,12 @@ class BadCarveIndexTest(unittest.TestCase):
         return subprocess.run([sys.executable, "-I", TOOL, target],
                               cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
-    def assert_one_error(self, result, *needles):
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+    def assert_one_error(self, result, *needles, code=1, prefix="error:"):
+        self.assertEqual(result.returncode, code, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         lines = result.stderr.strip().splitlines()
         self.assertEqual(len(lines), 1, result.stderr)
-        self.assertTrue(lines[0].startswith("error:"), lines[0])
+        self.assertTrue(lines[0].startswith(prefix), lines[0])
         for needle in needles:
             self.assertIn(needle, lines[0])
 
@@ -286,8 +286,23 @@ class BadCarveIndexTest(unittest.TestCase):
         self.assert_one_error(self.run_tool(folder), "index.json", "row 0", "'off'", "'stored'")
 
     def test_missing_file_names_what_is_wrong(self):
+        # A missing input is "ERROR: ..." and exit 2 (#6701, tests/test_missing_input_exit_codes.py).
         folder = self.make_folder()
-        self.assert_one_error(self.run_tool(os.path.join(folder, "nope.rpf")), "nope.rpf", "no such file or folder")
+        self.assert_one_error(self.run_tool(os.path.join(folder, "nope.rpf")), "nope.rpf", "no such file or folder",
+                              code=2, prefix="ERROR:")
+
+    def test_reads_carve_index_with_utf8_bom(self):
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, True)
+        payload = fixed_table_1296_blob(1)
+        with open(os.path.join(folder, f"{0x1000:012x}.bin"), "wb") as f:
+            f.write(payload)
+        doc = {"files": [{"off": 0x1000, "stored": len(payload), "size": len(payload), "head": payload[:16].hex(), "pre": ""}]}
+        with open(os.path.join(folder, "index.json"), "wb") as f:
+            f.write(b"\xef\xbb\xbf" + json.dumps(doc).encode("utf-8"))
+        r = self.run_tool(folder)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("fixed_table_1296", r.stdout)
 
 
 if __name__ == "__main__":

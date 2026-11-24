@@ -1,10 +1,15 @@
 r"""Run the translator regression suite (tests/semantic) one process per test file, several files at a time.
 
     python -I scripts/run_semantic_tests.py tests/semantic          # one file per core
+    python -I scripts/run_semantic_tests.py tests/semantic -p 'test_image_*.py'  # a matching subset
     python -I scripts/run_semantic_tests.py tests/semantic -j 4     # four at a time
     python -I scripts/run_semantic_tests.py tests/semantic -v       # also print the output of the files that pass
 
-It runs the files `python -m unittest discover -s tests/semantic` finds (`test*.py`, and packages below it), each as
+`-p` / `--pattern` selects test filenames using unittest discover's glob syntax (default `test*.py`). Quote the
+pattern so the shell does not expand it. Only Python module filenames are selected, including inside packages;
+the pattern matches their basenames, not directory paths. No matching files is an error in serial and parallel runs.
+
+It runs the files `python -m unittest discover -s tests/semantic` finds (`test*.py` by default, and packages below it), each as
 `python -m unittest <module>` from that folder, so a file sees the same import path as under discover. The files can
 run side by side because each one writes only into its own temporary folder; a new test must do the same. With -j 1,
 or on a single core, it runs that discover command itself. Prints the output of every failing file and one summary
@@ -20,14 +25,14 @@ import sys
 import time
 
 
-def test_modules(directory):
+def test_modules(directory, pattern="test*.py"):
     """Dotted names of the test modules unittest discover finds under `directory` (it enters packages only)."""
     names = []
     for base, dirs, files in os.walk(directory):
         dirs[:] = sorted(d for d in dirs if os.path.isfile(os.path.join(base, d, "__init__.py")))
         prefix = os.path.relpath(base, directory).replace(os.sep, ".")
         for name in sorted(files):
-            if fnmatch.fnmatchcase(name, "test*.py"):
+            if re.fullmatch(r"[_a-z]\w*\.py", name, re.IGNORECASE) and fnmatch.fnmatch(name, pattern):
                 names.append(name[:-3] if prefix == "." else f"{prefix}.{name[:-3]}")
     return names
 
@@ -44,17 +49,18 @@ def run_module(directory, module, verbose):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("directory", help="the suite's folder, tests/semantic")
+    ap.add_argument("-p", "--pattern", default="test*.py", help="test filename glob (default: test*.py)")
     ap.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 1, help="files at a time (default: cores)")
     ap.add_argument("-v", "--verbose", action="store_true", help="unittest -v, and print passing files' output")
     a = ap.parse_args(argv)
     directory = os.path.abspath(a.directory)
+    modules = test_modules(directory, a.pattern)
+    if not modules:
+        print(f"no {a.pattern} files in {directory}")
+        return 1
     if a.jobs <= 1:
         return subprocess.call([sys.executable, "-m", "unittest", "discover", "-s", directory,
-                                *(["-v"] if a.verbose else [])])
-    modules = test_modules(directory)
-    if not modules:
-        print(f"no test*.py files in {directory}")
-        return 1
+                                "-p", a.pattern, *(["-v"] if a.verbose else [])])
     # Largest files first: they tend to run longest, and one started last would set the wall time alone.
     modules.sort(key=lambda m: -os.path.getsize(os.path.join(directory, *m.split(".")) + ".py"))
     start, total, failed = time.monotonic(), 0, []

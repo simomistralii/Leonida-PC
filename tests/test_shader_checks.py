@@ -29,14 +29,15 @@ PARTIAL = {n for n, _ in check.W64X_PARTIAL}
 WAVE32_WORDS = {n: w for n, w in check.CS_DUMPS if n in check.WAVE32_DUMPS and n not in ("cs_store", "cs_smem_soffset_imm")}
 
 
-# All check.py cases, including the four vk_store_test shaders and the three mesh fixtures, and TEST-184's
+# All check.py cases, including the six vk_store_test shaders and the three mesh fixtures, and TEST-184's
 # vk_store_test "words" fixtures and image_get_lod draws.
-TOTAL = (len(check.COMPUTE) + 7 + len(check.CS_DUMPS) + len(check.W64X_DUMPS) + len(check.W64X_PARTIAL) + 4
+TOTAL = (len(check.COMPUTE) + 7 + len(check.CS_DUMPS) + len(check.W64X_DUMPS) + len(check.W64X_PARTIAL) + 6
          + len(check.PIXEL_TESTS) + len(check.CLIP_TESTS) + len(check.BOUNDS) + len(check.GLOBAL_OFFSET)
          + len(check.MIP_TEST_PASSES) + len(check.GRADIENT_TESTS)
          + len(check.STORE_WORDS) + len(check.GET_LOD_TESTS)
-         + len(check.TEXTURE_CONSTANTS) + 15)  # three mesh fixtures, ps_tex, ps_imgatomic, six compute fixtures,
-         # ps_ssharp, vs_base_ids, main's standalone cs_fmt_d16_xyz / cs_heap_init dumps (net one more case) and cs_fmt_all
+         + len(check.TEXTURE_CONSTANTS) + 16)  # three mesh fixtures, ps_tex, ps_imgatomic, six compute fixtures,
+         # ps_ssharp, vs_base_ids, main's standalone cs_fmt_d16_xyz / cs_heap_init dumps (net one more case), cs_fmt_all
+         # and ps_table_fetch
 CVT = {bits: [u, s] for bits, u, s in check.CVT_F32_SAT_CASES}
 
 
@@ -158,7 +159,8 @@ class Wave64Checks(unittest.TestCase):
                 return 0, "out[0..7] = " + " ".join(map(str, (WAVE32_WORDS[name] + [0] * 8)[:8])) + "\n"
             if name == "cs_workgroup_yz":     # #186: vk_compute_test's 2x3x4 Y/Z histogram line
                 return 0, "2x3x4 workgroup Y/Z: 0 mismatches\n"
-            if name in ("cs_imgstore", "cs_imgload", "cs_imgload_d16", "cs_sample_lz_int_d16"):   # vk_store_test checks
+            if name in ("cs_imgstore", "cs_imgload", "cs_imgload_tfe", "cs_imgload_d16", "cs_imgload_d16_tfe",
+                        "cs_sample_lz_int_d16"):   # vk_store_test checks
                 return 0, "0 bad\n0 bad\n0 bad\n"
             if name in check.STORE_WORDS:     # vk_store_test "words": the three images, judged by check.py
                 self.assertEqual(args, ("words",))
@@ -183,6 +185,7 @@ class Wave64Checks(unittest.TestCase):
                   patch.object(check, "base_ids_test", return_value=""),
                   patch.object(check, "get_lod_test", return_value=""),
                   patch.object(check, "sampler_test", return_value=""),
+                  patch.object(check, "table_fetch_test", return_value=""),
                   contextlib.redirect_stdout(output)):
                 status = check.main()
         return status, output.getvalue()

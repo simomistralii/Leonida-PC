@@ -62,6 +62,7 @@ a VGPR value is the selected lane's value; VCC/EXEC remain full 64-bit masks.
 CLI:
     python -I tools/cpu_ref.py <listing.s> [--lanes 64] [--parse-only] [--json]
     python -I tools/cpu_ref.py <listing.s> --sgpr 0=0x3f800000 --vgpr 1=0x40000000
+Usage: `python -I tools/cpu_ref.py --help` lists the options.
 """
 import argparse
 import json

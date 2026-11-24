@@ -325,7 +325,8 @@ failure-path log above.
 ```
 CMakeLists.txt                 build, shader compilation, shader copy
 scripts/build.ps1              configure + build
-scripts/run.ps1                run one output directory with extra arguments
+scripts/run.ps1                run one output directory with extra arguments; empties it first only
+                               when it holds just a run's PNGs and manifest.json, else exits 2
 scripts/verify.ps1             re-checks every claim in this README, exits 0 only if all hold
 scripts/failure-log.cmd        exercises the three failure paths and prints one merged log
 scripts/negative-control.ps1   throwaway build with depth/blend/scissor disabled, then deleted

@@ -1,3 +1,4 @@
+; regen_fixtures: this source has a translator fixture in tests/semantic/fixtures/disasm
 ; Plain 8/16-bit MUBUF stores (#1864): buffer_store_byte / buffer_store_short, the forms docs/embedded_shaders.md names
 ; as Box16Rehydration's blocker (cs_w32_buffer_sub16 covers the d16 forms; @YaBulochka on #1864). On the output V#
 ; (base 0, num_records 0xFFFFFFFF) lane 0 seeds dwords 0x40..0x54, stores into them and reads them back. A store writes

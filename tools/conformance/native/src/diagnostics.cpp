@@ -48,3 +48,13 @@ void ReportFailure(const char* file, int line, const char* call, const std::stri
                    const char* what_to_check) {
     PrintDiagnostic(file, line, call, message, what_to_check);
 }
+
+std::string TextFromWide(const std::wstring& wide) {
+    const int wide_count = static_cast<int>(wide.size());
+    const int byte_count =
+        WideCharToMultiByte(CP_UTF8, 0, wide.data(), wide_count, nullptr, 0, nullptr, nullptr);
+    std::string text(static_cast<size_t>(byte_count), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide.data(), wide_count, text.data(), byte_count, nullptr,
+                        nullptr);
+    return text;
+}

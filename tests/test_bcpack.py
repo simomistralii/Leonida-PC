@@ -1234,5 +1234,123 @@ class UnknownBlockCountTest(unittest.TestCase):
                 bcpack._bc7_blocks(lanes, n, set())
 
 
+class ValidationAndTerminationTests(unittest.TestCase):
+    """Regression tests for decoder termination and provisional validation guards."""
+
+    def test_non_flush_fragment_ending_at_rans_l_raises_instead_of_hanging(self):
+        # Single-lane direct test: non-flushing (flush=0), 4-byte payload 01 00 00 00
+        # loads st == RANS_L with in_rem == 0 while out_rem == 1 remains.
+        bad_frag = bytes(_make_hdr(8, 8, 0, False, 4) + [0x01, 0x00, 0x00, 0x00])
+        with self.assertRaisesRegex(bcpack.BcpackError, r"lane 0 .*fragment did not end at its home state"):
+            bcpack._decode_lanes_raw(bad_frag, (8,), 1)
+
+        # Full 12-lane BC1 chunk via public decode_lanes(): lane 0 has bad_frag while
+        # lanes 1..11 carry valid 1-symbol fragments interleaved under prefetch budget.
+        widths = bcpack.LANE_WIDTHS[1]
+        frags = [bad_frag] + [_encode_fragment([0], w, w, 0, strip_zeros=False)[0] for w in widths[1:]]
+        lpos = [0] * 12
+        ctrl = [0] * 12
+        inbuf = [0] * 12
+        in_rem = [0] * 12
+        full = [False] * 12
+        w_cur = [0] * 12
+        q_cur = [0] * 12
+        p0 = [0] * 12
+        p1 = [0] * 12
+        model = [None] * 12
+        raw = bytearray()
+        for _ in range(32):
+            if all(lpos[i] == len(frags[i]) for i in range(12)):
+                break
+            left = bcpack.PREFETCH_BUDGET
+            stall = [False] * 12
+            for i in range(12):
+                if not full[i] and (ctrl[i] != 3 or in_rem[i] > 0):
+                    if left == 0:
+                        stall[i] = True
+                        continue
+                    b = frags[i][lpos[i]]
+                    lpos[i] += 1
+                    raw.append(b)
+                    inbuf[i] = b
+                    full[i] = True
+                    left -= 1
+                if ctrl[i] == 3:
+                    p0[i] = p1[i]
+            for i in range(12):
+                if stall[i] or not full[i]:
+                    continue
+                if ctrl[i] == 0:
+                    h = inbuf[i]
+                    q_cur[i] = h & 15
+                    w_cur[i] = widths[i] - (h >> 6)
+                    full[i] = False
+                    ctrl[i] = 1
+                elif ctrl[i] == 1:
+                    full[i] = False
+                    model[i] = bcpack._get_model(w_cur[i], q_cur[i])
+                    in_rem[i] = inbuf[i] + 1
+                    ctrl[i] = 3
+                elif ctrl[i] == 3 and p0[i] < bcpack.RANS_L and in_rem[i] > 0:
+                    p1[i] = (p0[i] << 8) | inbuf[i]
+                    in_rem[i] -= 1
+                    full[i] = False
+        self.assertEqual(lpos, [len(f) for f in frags])
+        with self.assertRaisesRegex(bcpack.BcpackError, r"lane 0 .*fragment did not end at its home state"):
+            bcpack.decode_lanes(bytes(raw), 1, 8)
+
+    def test_bc6h_anchor_violation_without_provisional_history_raises_in_provisional_mode(self):
+        # Self-contained mode-11 chunk (di=0, de=0) with anchor bit set must fail
+        # with BcpackError even when allow_provisional=True.
+        lanes_bad = [[0, 0] for _ in range(16)]
+        lanes_bad[15] = [10, 0]
+        raw_bad = encode_lanes(lanes_bad, 6)
+        with self.assertRaisesRegex(bcpack.BcpackError, "anchor pixel") as ctx:
+            bcpack.decode_with_info(raw_bad, 6, 16, allow_provisional=True)
+        self.assertNotIsInstance(ctx.exception, bcpack.BcpackProvisionalError)
+
+        # Conversely, when a fitted provisional history entry IS referenced and causes
+        # <= _loose_limit(nblocks) anchor violations, provisional mode accepts and labels both.
+        k_fit = 42
+        l1a, l1b = _deint4(256 - k_fit)
+        eh_val = ((0x2000, 0x100, 0x08, 0x04), (0x4000, 0x200, 0x0C, 0x08), (0x6000, 0x300, 0x10, 0x0C))
+        ih_val = (8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)  # ih_val[0]=8 with delta=0 violates anchor 0
+        bc6h_doc = {
+            "endpointHistory": {str(k_fit): eh_val},
+            "indexHistory": {str(k_fit): list(ih_val)},
+            "endpointClass": {str(k_fit): 1},
+            "indexClass": {str(k_fit): 1},
+        }
+        lanes_p = [[0, 0] for _ in range(16)]
+        lanes_p[1] = [l1a, l1b]
+        lanes_p[15] = [10, 0]
+        raw_p = encode_lanes(lanes_p, 6)
+        out_p, prov_p = bcpack.decode_with_info(raw_p, 6, 16, allow_provisional=True, history=bc6h_doc)
+        self.assertEqual(len(out_p), 16)
+        self.assertIn("BC6H anchor index inconsistent in 1 pixels", prov_p)
+        self.assertIn(f"BC6H endpoint history {k_fit}", prov_p)
+
+    def test_bc7_signature_failure_not_masked_by_anchor_or_pbit_flags(self):
+        from unittest import mock
+
+        lanes = [[0, 0, 0, 0] for _ in range(16)]
+        with mock.patch.object(bcpack, "_bc7_check", return_value=[]):
+            with mock.patch.object(
+                bcpack,
+                "_bc7_rebuild",
+                return_value=(b"\x00" * 32, [bcpack._B7_ANCHOR, bcpack._B7_SIGNATURE]),
+            ):
+                with self.assertRaisesRegex(bcpack.BcpackError, r"signature check \(1/2 blocks; first: block 1\)"):
+                    bcpack._bc7_blocks(lanes, 2, {"BC7 signature 0"})
+
+            with mock.patch.object(
+                bcpack,
+                "_bc7_rebuild",
+                return_value=(b"\x00" * 32, [bcpack._B7_PBIT | bcpack._B7_SIGNATURE, 0]),
+            ):
+                with self.assertRaisesRegex(bcpack.BcpackError, r"signature check \(1/2 blocks; first: block 0\)"):
+                    bcpack._bc7_blocks(lanes, 2, {"BC7 signature 0"})
+
+
 if __name__ == "__main__":
     unittest.main()

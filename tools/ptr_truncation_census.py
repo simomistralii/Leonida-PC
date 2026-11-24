@@ -37,7 +37,8 @@ Usage:
 
 <disasm dir> is `<work>/shaders/disasm` (the carve's index.json one level up gives each stage). --json writes the
 summary; --index-out writes {number: {"stage", "user_sgpr_reads"}} with shaders numbered in listing order, not
-named, which `tools/user_sgpr_census.py` reads. Neither prints or writes a shader name, listing or byte.
+named, which `tools/user_sgpr_census.py` reads. Neither prints or writes a shader name, listing or byte. --limit
+stops after that many listings and must be at least 1; a smaller value is a usage error.
 """
 import argparse
 import json
@@ -291,11 +292,22 @@ def listings(src):
         return sorted(e.path for e in entries if e.name.endswith(".s") and e.is_file())
 
 
+def positive_int(text: str) -> int:
+    """--limit -1 dropped the last listing and --limit 0 scanned none, both with exit 0."""
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid int value: {text!r}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be at least 1 (a smaller value would silently scan fewer listings)")
+    return value
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("src", help="folder of .s listings (<work>/shaders/disasm)")
     ap.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) - 1))
-    ap.add_argument("--limit", type=int)
+    ap.add_argument("--limit", type=positive_int, help="scan at most this many listings (at least 1)")
     ap.add_argument("--json", help="write the summary here")
     ap.add_argument("--index-out", help="write {number: {stage, user_sgpr_reads}} for tools/user_sgpr_census.py")
     a = ap.parse_args(argv)

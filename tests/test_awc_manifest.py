@@ -360,8 +360,10 @@ class ManifestTest(unittest.TestCase):
         previous = '{"previous": true}\n'
         with open(out, "w", encoding="utf-8") as f:
             f.write(previous)
-        os.chmod(out, 0o444)
-        self.addCleanup(lambda: os.path.exists(out) and os.chmod(out, 0o600))
+        # The staged file takes the destination's mode (published_mode), so a read-only manifest gives a read-only
+        # temp, and a failed replace has to make it writable before it can be removed. The destination itself stays
+        # writable here: a 0o444 file fails write_manifest's up-front os.open(O_WRONLY) check for every user but root
+        # (macOS and Windows CI), and the write never reaches the replace this test is about.
         made_writable = []
         real_chmod = os.chmod
 
@@ -370,7 +372,8 @@ class ManifestTest(unittest.TestCase):
                 made_writable.append(path)
             return real_chmod(path, mode, *args, **kwargs)
 
-        with mock.patch.object(awc_manifest.os, "replace", side_effect=OSError("replace denied")), \
+        with mock.patch.object(awc_manifest, "replace_retry", side_effect=OSError("replace denied")), \
+                mock.patch.object(awc_manifest, "published_mode", return_value=0o444), \
                 mock.patch.object(awc_manifest.os, "chmod", chmod):
             with self.assertRaises(OSError):
                 awc_manifest.write_manifest([], 0, 0, "json", out)
@@ -400,6 +403,29 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual((row["channels"], row["declared_samples"]), ("2", "960"))
         self.assertAlmostEqual(float(row["duration_s"]), 0.02, places=6)
         self.assertEqual(row["streamed_music"], "yes")
+
+
+    def test_a_single_named_file_that_is_not_a_bank_is_refused(self):
+        path = os.path.join(self.tmp.name, "notes.bin")
+        with open(path, "wb") as f:
+            f.write(b"not an AWC bank")
+        out = os.path.join(self.tmp.name, "manifest.json")
+        p = self.run_tool(path, "--out", out)
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("holds no AWC bank", p.stderr)
+        self.assertNotIn("Traceback", p.stderr)
+        self.assertEqual(p.stdout, "")
+        self.assertFalse(os.path.exists(out))
+
+    def test_a_scanned_directory_with_no_bank_still_reports_empty(self):
+        # The refusal is for one named file: an empty folder scan is a valid "0 banks" answer.
+        os.mkdir(os.path.join(self.tmp.name, "banks"))
+        with open(os.path.join(self.tmp.name, "banks", "notes.bin"), "wb") as f:
+            f.write(b"not an AWC bank")
+        p = self.run_tool(os.path.join(self.tmp.name, "banks"))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("0 banks, 0 streams, 0 streamed-music channels", p.stderr)
+        self.assertEqual(p.stdout.splitlines()[0], ",".join(HEADER))
 
 
 if __name__ == "__main__":

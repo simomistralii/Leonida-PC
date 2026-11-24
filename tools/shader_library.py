@@ -192,7 +192,7 @@ def stage_digest(y: bytes):
     return None
 
 
-def carve_digests(folder: str) -> dict:
+def carve_digests(folder: str, errors=None) -> dict:
     """digest -> [(shader name, container path)] over a tools/shader_carve.py output folder (its index.json and
     .dxbc files)."""
     import shader_carve
@@ -200,15 +200,24 @@ def carve_digests(folder: str) -> dict:
         index = json.load(f)
     out = {}
     for e in index:
+        path = os.path.join(folder, e["file"])
         try:
-            with open(os.path.join(folder, e["file"]), "rb") as f:
+            with open(path, "rb") as f:
                 c = f.read()
             parts = shader_carve.parts(c)
-        except (OSError, ValueError):
+            if c[:4] != b"DXBC":
+                raise ValueError("not a DXBC container")
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as exc:
+            msg = exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc)
+            print(f"carve: {e['file']}: {msg}", file=sys.stderr)
+            if errors is not None:
+                errors.append((e["file"], msg))
             continue
         if "HASH" in parts and parts["HASH"][1] >= 20:
             o = parts["HASH"][0]
-            out.setdefault(c[o + 4:o + 20], []).append((e["name"], os.path.join(folder, e["file"])))
+            out.setdefault(c[o + 4:o + 20], []).append((e["name"], path))
     return out
 
 
@@ -292,7 +301,8 @@ def main(argv=None) -> int:
         disasm = shader_disasm
         os.makedirs(os.path.join(a.out, "disasm"), exist_ok=True)
     names = {i: program_name(i, lib["stage"].get(i)) for i in range(lib["header"]["programs"])}
-    sources = carve_digests(a.carve) if a.carve else None
+    carve_errors = []
+    sources = carve_digests(a.carve, errors=carve_errors) if a.carve else None
     cs_state = {c["program"]: c["state"] for c in lib["compute"]}
     index, written, work = [], 0, []
     for i in range(lib["header"]["programs"]):
@@ -366,7 +376,10 @@ def main(argv=None) -> int:
           f"{h['programs']} programs; {written} written to {a.out}")
     if sources is not None:
         linked = sum(1 for e in index if e["source"])
-        print(f"{linked} of {written} named by a carved shader's HASH digest, {written - linked} not in the carve")
+        extra = (f", {len(carve_errors)} unreadable/corrupt container"
+                 f"{'s' if len(carve_errors) != 1 else ''}") if carve_errors else ""
+        print(f"{linked} of {written} named by a carved shader's HASH digest, "
+              f"{written - linked} not in the carve{extra}")
     return 0
 
 

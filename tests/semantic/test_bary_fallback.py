@@ -13,6 +13,7 @@ run_gpu_tests.py / check.py with LEONIDA_BARY_FALLBACK=1 check ps_bary through t
 """
 import gc
 import json
+import math
 from pathlib import Path
 import os
 import re
@@ -232,6 +233,150 @@ class BaryFallbackGeometryShader(unittest.TestCase):
                             ["spirv-val", "--target-env", "vulkan1.2", spv]):
                     r = subprocess.run(cmd, capture_output=True, text=True)
                     self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
+class BaryAndF16FallbackInteraction(unittest.TestCase):
+    """Combined --bary-fallback and --f16-interp-fallback behaviour (BUILD-1447)."""
+
+    @staticmethod
+    def _pack_f16_pair(lo, hi):
+        return struct.unpack("<I", struct.pack("<ee", lo, hi))[0]
+
+    @staticmethod
+    def _translate_with(name, lines, bary=False, f16_halves=False):
+        old_bary, old_f16 = rdna2spirv.BARY_FALLBACK, rdna2spirv.F16_HALVES
+        rdna2spirv.BARY_FALLBACK = bary
+        rdna2spirv.F16_HALVES = f16_halves
+        try:
+            spv = support.translate_lines(name, lines)
+            return spv, rdna2spirv.shader_meta(rdna2spirv.translate.last_gen, spv)
+        finally:
+            rdna2spirv.BARY_FALLBACK = old_bary
+            rdna2spirv.F16_HALVES = old_f16
+
+    def _assert_gs_validates(self, gs_asm):
+        if shutil.which("spirv-as") and shutil.which("spirv-val"):
+            with tempfile.TemporaryDirectory() as tmp:
+                asm = os.path.join(tmp, "gs.spvasm")
+                spv_path = os.path.join(tmp, "gs.spv")
+                with open(asm, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(gs_asm)
+                for cmd in (["spirv-as", "--target-env", "vulkan1.2", asm, "-o", spv_path],
+                            ["spirv-val", "--target-env", "vulkan1.2", spv_path]):
+                    r = subprocess.run(cmd, capture_output=True, text=True)
+                    self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_bary_fallback_alone_diverges_on_f16_interp_and_f16_fallback_matches_default(self):
+        lines = [
+            "v_interp_p1ll_f16 v2, v0, attr0.x",
+            "v_interp_p2_f16 v2, v1, attr0.x, v2",
+            "v_cvt_f32_f16_e32 v2, v2",
+            "v_interp_p1ll_f16 v3, v0, attr0.x high",
+            "v_interp_p2_f16 v3, v1, attr0.x, v3 high",
+            "v_cvt_f32_f16_e32 v3, v3",
+            "exp mrt0 v2, v3, v2, v3 done vm",
+            "s_endpgm",
+        ]
+        bary = (0.25, 0.25, 0.5)
+        lo_vals, hi_vals = (0.5, 1.5, 2.5), (-4.0, 8.0, 16.0)
+        packed_attr0 = [(self._pack_f16_pair(lo, hi), 0, 0, 0) for lo, hi in zip(lo_vals, hi_vals)]
+
+        spv_def, _ = self._translate_with("ps_f16_def", lines)
+        spv_bary_only, _ = self._translate_with("ps_f16_bary_only", lines, bary=True)
+        spv_both, meta_both = self._translate_with("ps_f16_both", lines, bary=True, f16_halves=True)
+
+        self.assertEqual(meta_both["f16_halves"], {"0": [28, 29]})
+        w_def = support.mrt0_words(spv_def, inputs=support.varyings(spv_def, {0: packed_attr0}, bary))
+        self.assertEqual(w_def, [f32_bits(1.75), f32_bits(9.0), f32_bits(1.75), f32_bits(9.0)])
+
+        w_bary_only = support.mrt0_words(spv_bary_only, inputs=support.varyings(spv_bary_only, {0: packed_attr0}, bary))
+        self.assertNotEqual(w_bary_only, w_def)
+
+        lo_interp = sum(b * x for b, x in zip(bary, lo_vals))
+        hi_interp = sum(b * x for b, x in zip(bary, hi_vals))
+        w_both = support.mrt0_words(
+            spv_both,
+            inputs={
+                "%in_f16h0_0": (lo_interp, 0.0, 0.0, 0.0),
+                "%in_f16h0_1": (hi_interp, 0.0, 0.0, 0.0),
+            },
+        )
+        self.assertEqual(w_both, w_def)
+
+        # Mirror ps_sweep without f16_halves: a smooth [0, 1] f32 whose low f16 bits are NaN produces NaN under
+        # default PerVertexKHR unpacking while --bary-fallback alone reads the smooth f32 bits as finite.
+        smooth_attr0 = [(0x3E7FFE00, 0, 0, 0)] * 3
+        w_smooth_def = support.mrt0_words(spv_def, inputs=support.varyings(spv_def, {0: smooth_attr0}, bary))
+        w_smooth_bary = support.mrt0_words(spv_bary_only, inputs=support.varyings(spv_bary_only, {0: smooth_attr0}, bary))
+        self.assertTrue(math.isnan(struct.unpack("<f", struct.pack("<I", w_smooth_def[0]))[0]))
+        self.assertFalse(math.isnan(struct.unpack("<f", struct.pack("<I", w_smooth_bary[0]))[0]))
+
+    def test_bary_location_avoids_unread_reserved_f16_half_slot(self):
+        lines = [
+            "v_mov_b32_e32 v4, v0",
+            "v_mov_b32_e32 v5, v1",
+            "v_interp_p1ll_f16 v2, v0, attr0.x",
+            "v_interp_p2_f16 v2, v1, attr0.x, v2",
+            "v_interp_p1_f32_e32 v3, v0, attr0.y",
+            "v_interp_p2_f32_e32 v3, v1, attr0.y",
+        ]
+        for attr in range(1, 28):
+            lines.append(f"v_interp_p1_f32_e32 v6, v0, attr{attr}.x")
+            lines.append(f"v_interp_p2_f32_e32 v6, v1, attr{attr}.x")
+        lines.extend(["exp mrt0 v2, v3, v4, v5 done vm", "s_endpgm"])
+
+        spv, meta = self._translate_with("ps_bary_reserved_slot", lines, bary=True, f16_halves=True)
+        self.assertEqual(meta["f16_halves"], {"0": [28, 29]})
+        self.assertEqual(meta["bary_fallback_input"], {"location": 30})
+        self.assertNotIn(29, meta["inputs"])
+        self.assertNotIn(30, meta["inputs"])
+        self.assertIn("OpDecorate %bary Location 30", spv)
+
+        gs_asm = bary_fallback_gs.gs_spvasm(sorted(set(meta["inputs"]) | {29}), 30)
+        self.assertIn("OpDecorate %out_bary Location 30", gs_asm)
+        self._assert_gs_validates(gs_asm)
+
+    def test_combined_raw_bary_and_f16_interp_matches_default(self):
+        lines = [
+            "v_mov_b32_e32 v4, v0",
+            "v_mov_b32_e32 v5, v1",
+            "v_interp_p1ll_f16 v2, v0, attr0.x",
+            "v_interp_p2_f16 v2, v1, attr0.x, v2",
+            "v_cvt_f32_f16_e32 v2, v2",
+            "v_interp_p1ll_f16 v3, v0, attr0.x high",
+            "v_interp_p2_f16 v3, v1, attr0.x, v3 high",
+            "v_cvt_f32_f16_e32 v3, v3",
+            "exp mrt0 v2, v3, v4, v5 done vm",
+            "s_endpgm",
+        ]
+        bary = (1.0 - I - J, I, J)
+        lo_vals, hi_vals = (0.5, 1.5, 2.5), (-4.0, 8.0, 16.0)
+        packed_attr0 = [(self._pack_f16_pair(lo, hi), 0, 0, 0) for lo, hi in zip(lo_vals, hi_vals)]
+
+        spv_def, _ = self._translate_with("ps_bary_f16_def", lines)
+        spv_comb, meta_comb = self._translate_with("ps_bary_f16_comb", lines, bary=True, f16_halves=True)
+
+        self.assertNotIn("PerVertexKHR", spv_comb)
+        self.assertNotIn("BaryCoordKHR", spv_comb)
+        self.assertNotIn("fragmentShaderBarycentric", meta_comb["features"])
+        self.assertEqual(meta_comb["f16_halves"], {"0": [28, 29]})
+        self.assertEqual(meta_comb["bary_fallback_input"], {"location": 0})
+
+        w_def = support.mrt0_words(spv_def, inputs=support.varyings(spv_def, {0: packed_attr0}, bary))
+        lo_interp = sum(b * x for b, x in zip(bary, lo_vals))
+        hi_interp = sum(b * x for b, x in zip(bary, hi_vals))
+        w_comb = support.mrt0_words(
+            spv_comb,
+            inputs={
+                "%bary": bary,
+                "%in_f16h0_0": (lo_interp, 0.0, 0.0, 0.0),
+                "%in_f16h0_1": (hi_interp, 0.0, 0.0, 0.0),
+            },
+        )
+        self.assertEqual(w_comb, w_def)
+
+        gs_asm = bary_fallback_gs.gs_spvasm(meta_comb["inputs"], meta_comb["bary_fallback_input"]["location"])
+        self._assert_gs_validates(gs_asm)
 
 
 if __name__ == "__main__":

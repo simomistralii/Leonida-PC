@@ -20,7 +20,7 @@ struct Table {
 void* find(const std::string& dll_lower, const std::string& name);
 
 // Whether the shims own a whole module: the registry serves names from it and it is not a host system DLL (kernel32,
-// kernelbase, the CRTs, api-ms-* sets, vulkan-1) of which only a few functions are replaced. A title's
+// kernelbase, advapi32, the CRTs, api-ms-* sets, vulkan-1) of which only a few functions are replaced. A title's
 // LoadLibrary/GetModuleHandle of an owned module gets a pseudo-handle that GetProcAddress resolves through find()
 // (library_loader.cpp). `dll_lower` is a lower-case file name with ".dll".
 bool owns_dll(const std::string& dll_lower);
@@ -65,12 +65,18 @@ struct BundledModuleOps {
     void* (*load_bundled)(void* ctx, const std::string& dll_lower, uint32_t flags, bool& handled);
     void* (*get_proc)(void* ctx, void* module, const std::string& sym, bool& owns_handle);
     bool (*owns_handle)(void* ctx, void* module);
+    // The same two lookups by the module's native (wide) basename, for names the ANSI code page cannot spell
+    // (library_loader's W entries use them when a name has a character outside ASCII). Either may be null.
+    void* (*find_loaded_w)(void* ctx, const std::wstring& basename);
+    void* (*load_bundled_w)(void* ctx, const std::wstring& basename, uint32_t flags, bool& handled);
 };
 void add_bundled_loader(void* ctx, const BundledModuleOps* ops);
 void remove_bundled_loader(void* ctx);
 
 void* find_loaded_bundled_module(const std::string& dll_lower);
 void* load_bundled_module(const std::string& dll_lower, uint32_t flags, bool& handled);
+void* find_loaded_bundled_module_w(const std::wstring& basename);
+void* load_bundled_module_w(const std::wstring& basename, uint32_t flags, bool& handled);
 void* get_bundled_proc_address(void* module, const std::string& sym, bool& owns_handle);
 bool owns_bundled_module_handle(void* module);
 

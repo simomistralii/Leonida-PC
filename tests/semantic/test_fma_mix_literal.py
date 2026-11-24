@@ -115,6 +115,122 @@ class FmaMixLiteralTest(unittest.TestCase):
         stored = program(0x3C000001, words=words, text=text)
         self.assertEqual(self.run_ps(listing(printed), blob(stored)), [f2u(1.0)] * 4)
 
+    def test_llvm23_lit_form_of_an_f32_source(self):
+        # llvm-mc 23.1.5's own text and encoding for these bytes: the f32 source's literal 0x40400000 (3.0) prints
+        # in full as lit(...), and the printed encoding keeps only its low half (0). LLVM 21 prints the inline 0 and
+        # drops the literal word (FmaMixInlineLiteralTest). fma(3.0, 2.0, 0) = 6.0. The pipeline library has 5,733 such operands (#4343).
+        text = "v_fma_mix_f32 v1, lit(0x40400000), v2, 0"
+        words = "01 00 20 cc ff 04 02 02"
+        printed = program(0x00000000, words=words, text=text)
+        stored = program(0x40400000, words=words, text=text)
+        self.assertEqual(self.run_ps(listing(printed), blob(stored)), [f2u(6.0)] * 4)
+        self.assertEqual(self.run_ps(listing(printed, invalid=True), blob(stored)), [f2u(6.0)] * 4)
+
+    def test_llvm23_lit_form_next_to_an_inline_constant(self):
+        # The case above, as llvm-mc 23.1.5 prints it: lit(0x3c000001), whose high half 1.0 is src2.
+        text = "v_fma_mix_f32 v1, v2, 1, lit(0x3c000001) op_sel:[0,0,1] op_sel_hi:[0,0,1]"
+        words = "01 60 20 cc 02 03 fd 03"
+        printed = program(0x00000001, words=words, text=text)
+        stored = program(0x3C000001, words=words, text=text)
+        self.assertEqual(self.run_ps(listing(printed), blob(stored)), [f2u(1.0)] * 4)
+
+    def test_lit_around_a_register_is_refused(self):
+        # A register inside lit() is no literal: refused, as before lit() was read (review on #6808).
+        program_ = program(0, words="01 00 20 cc ff 04 02 02", text="v_fma_mix_f32 v1, lit(v2), v2, 0")
+        with self.assertRaises(rdna2spirv.Unsupported):
+            self.run_ps(listing(program_), None)
+
+    def test_llvm23_lit_form_with_another_literal_is_refused(self):
+        # The text names 3.0, the blob holds a literal whose low half differs: refused, as for the cut form.
+        text = "v_fma_mix_f32 v1, lit(0x40400000), v2, 0"
+        words = "01 00 20 cc ff 04 02 02"
+        with self.assertRaises(rdna2spirv.Unsupported):
+            self.run_ps(listing(program(0x00000000, words=words, text=text)),
+                        blob(program(0x40400001, words=words, text=text)))
+
+
+def printed_and_stored(text, printed_words, stored_words, literal):
+    """(listing, blob) for llvm-mc 21's print of a 12-byte v_fma_mix*: an 8-byte printed encoding, while the blob
+    and the header's code range hold the stored 12 bytes (shader_disasm.py names the range it disassembled)."""
+    printed = [MOV, (text, printed_words), EXP, END]
+    stored = [MOV, (text, f"{stored_words} {lit(literal)}"), EXP, END]
+    data = listing(printed).decode("utf-8").split("\n", 1)
+    end = CODE_START + sum(len(bytes.fromhex(enc)) for _, enc in stored)
+    header = data[0].replace(data[0].split("code ")[1].split(" ")[0], f"0x{CODE_START:x}..0x{end:x}")
+    return (header + "\n" + data[1]).encode("utf-8"), blob(stored)
+
+
+def with_invalid(data):
+    return data + b"\n; --- llvm-mc messages ---\n; <stdin>:1:1: warning: invalid instruction encoding\n"
+
+
+class FmaMixInlineLiteralTest(unittest.TestCase):
+    """llvm-mc 21 prints a v_fma_mix* literal whose low half is an inline constant's f16 value as that constant, in
+    8 bytes (the text and encodings below are llvm-mc 21.1.8's, -mcpu=gfx1013, for the stored bytes). The literal and
+    the 4 bytes come from the blob, and the instructions after it keep their offsets (EXP and s_endpgm are checked
+    against the blob 4 bytes further on)."""
+
+    def run_ps(self, data, fssm):
+        return mrt0_words(translate_listing(NAME, data, fssm=fssm))
+
+    def both_paths(self, data, fssm, want):
+        self.assertEqual(self.run_ps(data, fssm), [f2u(want)] * 4)
+        self.assertEqual(self.run_ps(with_invalid(data), fssm), [f2u(want)] * 4)
+
+    def test_f32_source_keeps_its_high_half(self):
+        # Stored literal 0x40400000 (3.0) read as f32 by src0; llvm-mc 21 prints `0`. fma(3.0, 2.0, 0) = 6.0.
+        data, fssm = printed_and_stored("v_fma_mix_f32 v1, 0, v2, 0", "01 00 20 cc 80 04 02 02",
+                                        "01 00 20 cc ff 04 02 02", 0x40400000)
+        self.both_paths(data, fssm, 6.0)
+        # LLVM's text alone (no blob) is what the listing says: fma(0, 2.0, 0) = 0.
+        self.assertEqual(self.run_ps(data, None), [0] * 4)
+
+    def test_f16_halves_of_one_literal(self):
+        # 0x3c003800: src0 the low half 0.5, src2 the high half 1.0 (op_sel:[0,0,1] op_sel_hi:[1,0,1]); llvm-mc 21
+        # prints 0.5 for both. fma(0.5, 2.0, 1.0) = 2.0, where the print would give 1.5.
+        data, fssm = printed_and_stored("v_fma_mix_f32 v1, 0.5, v2, 0.5 op_sel:[0,0,1] op_sel_hi:[1,0,1]",
+                                        "01 60 20 cc f0 04 c2 0b", "01 60 20 cc ff 04 fe 0b", 0x3C003800)
+        self.both_paths(data, fssm, 2.0)
+
+    def test_neg_and_abs_come_from_the_stored_bits(self):
+        data, fssm = printed_and_stored("v_fma_mix_f32 v1, neg(0), v2, 0", "01 00 20 cc 80 04 02 22",
+                                        "01 00 20 cc ff 04 02 22", 0x40400000)
+        self.both_paths(data, fssm, -6.0)
+        data, fssm = printed_and_stored("v_fma_mix_f32 v1, |0|, v2, 0", "01 01 20 cc 80 04 02 02",
+                                        "01 01 20 cc ff 04 02 02", 0xC0400000)
+        self.both_paths(data, fssm, 6.0)
+
+    def test_every_inline_code_maps_to_its_f16_bits(self):
+        self.assertEqual(len(rdna2spirv.MIX_INLINE_F16), 90)
+        for code, bits in rdna2spirv.MIX_INLINE_F16.items():
+            stored = bytes.fromhex("0100 20cc ff04 0202") + struct.pack("<I", 0xABCD0000 | bits)
+            printed = bytes.fromhex("0100 20cc") + struct.pack("<I", 0x02020400 | code)
+            with self.subTest(code=hex(code)):
+                self.assertEqual(rdna2spirv.mix_inline_literal(stored, printed, "v_fma_mix_f32"), 0xABCD0000 | bits)
+
+    def test_a_low_half_that_is_not_the_printed_constant_is_refused(self):
+        data, fssm = printed_and_stored("v_fma_mix_f32 v1, 0, v2, 0", "01 00 20 cc 80 04 02 02",
+                                        "01 00 20 cc ff 04 02 02", 0x40400001)
+        with self.assertRaises(rdna2spirv.Unsupported) as cm:
+            self.run_ps(data, fssm)
+        self.assertIn("v_fma_mix_f32 at 0x104", str(cm.exception))
+
+    def test_any_other_difference_is_still_refused(self):
+        # The stored instruction reads v3 as src1 (SRC1 field 0x103), not the printed v2.
+        data, fssm = printed_and_stored("v_fma_mix_f32 v1, 0, v2, 0", "01 00 20 cc 80 04 02 02",
+                                        "01 00 20 cc ff 06 02 02", 0x40400000)
+        with self.assertRaises(rdna2spirv.Unsupported) as cm:
+            self.run_ps(data, fssm)
+        self.assertIn("dropped", str(cm.exception))
+
+    def test_only_v_fma_mix_and_only_literal_fields(self):
+        stored = bytes.fromhex("0100 20cc ff04 0202") + struct.pack("<I", 0x40400000)
+        printed = bytes.fromhex("0100 20cc 8004 0202")
+        self.assertIsNone(rdna2spirv.mix_inline_literal(stored, printed, "v_pk_fma_f16"))
+        self.assertIsNone(rdna2spirv.mix_inline_literal(stored[:8], printed, "v_fma_mix_f32"))
+        # A stored inline 0 (0x80) printed as 0: nothing to restore, and same_encoding already accepts it.
+        self.assertIsNone(rdna2spirv.mix_inline_literal(printed + bytes(4), printed, "v_fma_mix_f32"))
+
 
 if __name__ == "__main__":
     unittest.main()

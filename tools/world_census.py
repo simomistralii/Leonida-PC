@@ -636,6 +636,12 @@ def _shard_path(outdir, want):
     return os.path.join(outdir, "shard_%03d_%d_%d.json" % (want["index"], want["start"], want["end"]))
 
 
+def _row_ok(r):
+    """A row as _summarize, _duplicates and _bands read it: ints (not bool) for offset/stored/entities, a str sha1."""
+    return (isinstance(r, dict) and isinstance(r.get("sha1"), str)
+            and all(type(r.get(k)) is int for k in ("offset", "stored", "entities")))
+
+
 def _read_shard(outdir, want, source_id):
     try:
         with open(_shard_path(outdir, want), encoding="utf-8") as f:
@@ -646,7 +652,8 @@ def _read_shard(outdir, want, source_id):
             and source_id is not None and doc.get("source_id") == source_id
             and all(type(doc.get(k)) is int and doc[k] == want[k] for k in ("index", "start", "end"))
             and isinstance(doc.get("stats"), dict)
-            and all(isinstance(doc.get(k), list) for k in ("rows", "intervals", "raw_pages", "raw_system"))):
+            and all(isinstance(doc.get(k), list) for k in ("rows", "intervals", "raw_pages", "raw_system"))
+            and all(_row_ok(r) for r in doc["rows"])):
         return doc
     return None
 

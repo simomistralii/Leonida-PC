@@ -20,6 +20,8 @@ Dictionary sources:
 ``--conversations`` files or directories whose conversation data pairs a dialogue key with line labels
                     (``<ROOT>AU_<XXXX>\\0<LABEL>\\0``). A key with N labels yields the waves ``<key>_01`` ..
                     ``<key>_<N>``: wave ``_01`` speaks the first label, ``_02`` the second, and so on.
+                    In a carve folder a ``.bin`` stream of a whole number of 64 KiB blocks is read together with the
+                    streams that continue it (docs/page_directory.md), so a pair across that boundary still counts.
 
 Bank sources (positional; each one is reported and thresholded on its own): ``.awc`` files, directories searched
 for ``.awc`` files, or an ``audio_manifest.json`` written by ``rpf9dump audio``. Sources with the same basename
@@ -41,8 +43,14 @@ import csv
 import json
 import os
 import re
+import stat
 import struct
 import sys
+import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from file_mode import published_mode  # noqa: E402
+from replace_retry import replace as replace_retry  # noqa: E402
 
 M32 = 0xFFFFFFFF
 M29 = 0x1FFFFFFF
@@ -57,6 +65,10 @@ CONTROL_LIMIT = 0.02
 FAMILY_SIZES = range(2, 12)
 MIN_TOKEN = 5
 MAX_SCAN_BYTES = 256 << 20
+# A carved stream that inflates to a whole number of 64 KiB blocks continues in the next one (docs/page_directory.md);
+# these heads start a stream of their own instead.
+CONTINUATION_BLOCK = 65536
+NEW_STREAM_HEADS = (b"PSIN", b"RBF0", b"<?xml", b"\xef\xbb\xbf<?xml")
 
 
 # ---- joaat ----
@@ -90,12 +102,17 @@ def bank_ids(path: str) -> list:
         head = fh.read(16)
         if len(head) < 16 or head[:4] != b"ADAT":
             raise ValueError(f"{path}: not a little-endian AWC")
-        flags, n, _header_size = struct.unpack_from("<III", head, 4)
+        flags, n, header_size = struct.unpack_from("<III", head, 4)
         skip = (4 if flags & 0x400000 else 0) + (n * 2 if flags & 0x10000 else 0) \
             + ((n + 1) * 4 if flags & 0x200000 else 0)
         table_end = 16 + skip + 4 * n
-        if table_end > os.fstat(fh.fileno()).st_size:
+        file_size = os.fstat(fh.fileno()).st_size
+        if table_end > file_size:
             raise ValueError(f"{path}: stream table extends past the end of the file")
+        if header_size > file_size:
+            raise ValueError(f"{path}: declared header extends past the end of the file")
+        if header_size < 16 or table_end > header_size:
+            raise ValueError(f"{path}: stream table extends past the declared header")
         fh.seek(16 + skip)
         table = fh.read(4 * n)
     if len(table) < 4 * n:
@@ -179,14 +196,7 @@ def conversation_waves(paths) -> list:
     """Dialogue wave names from conversation key/label pairs: <key>_01 .. <key>_<labels>."""
     labels = collections.defaultdict(list)
     for path in paths:
-        for full in _files(path):
-            try:
-                if os.path.getsize(full) > MAX_SCAN_BYTES:
-                    continue
-                with open(full, "rb") as fh:
-                    data = fh.read()
-            except OSError:
-                continue
+        for data in _blobs(path):
             if b"AU_" not in data:
                 continue
             for key, label in CONVERSATION_PAIR.findall(data):
@@ -194,6 +204,42 @@ def conversation_waves(paths) -> list:
                 if label not in seen:
                     seen.append(label)
     return [f"{key.decode().lower()}_{n:02d}" for key, ls in labels.items() for n in range(1, len(ls) + 1)]
+
+
+def _blobs(path: str):
+    """The contents of the files under `path`, a carved stream joined with the streams that continue it.
+
+    rpf9_carve.py writes every zlib stream as its own `<offset>.bin`, and a stream that inflates to a whole number
+    of 64 KiB blocks continues in the next one: the next `.bin` of the same folder in name (offset) order, unless
+    that one starts a stream of its own. Matched apart, a pair across that boundary would be lost."""
+    parts, folder, size = [], None, 0
+    for full in _files(path):
+        try:
+            if os.path.getsize(full) > MAX_SCAN_BYTES:
+                data = None
+            else:
+                with open(full, "rb") as fh:
+                    data = fh.read()
+        except OSError:
+            data = None
+        here, carved = os.path.dirname(full), full.lower().endswith(".bin")
+        continues = (data is not None and carved and parts and here == folder
+                     and len(parts[-1]) and len(parts[-1]) % CONTINUATION_BLOCK == 0
+                     and not data.startswith(NEW_STREAM_HEADS) and size + len(data) <= MAX_SCAN_BYTES)
+        if not continues:
+            if parts:
+                yield b"".join(parts)
+            parts, size = [], 0
+        if data is None:
+            continue
+        if not carved:
+            yield data                       # not a carved stream: read on its own
+            continue
+        parts.append(data)
+        size += len(data)
+        folder = here
+    if parts:
+        yield b"".join(parts)
 
 
 class Dictionary:
@@ -337,6 +383,56 @@ def positive_int(text):
     return value
 
 
+def _publish_text(path, write_body, *, newline, prefix):
+    """Publish a complete regular file via a temp sibling, or write a non-regular destination directly."""
+    destination = os.path.realpath(path)
+    parent = os.path.dirname(destination) or "."
+    try:
+        mode = os.stat(destination).st_mode
+    except FileNotFoundError:
+        mode = None
+    if mode is not None and not stat.S_ISREG(mode):
+        with open(path, "w", encoding="utf-8", newline=newline) as fh:
+            write_body(fh)
+        return
+    if mode is not None:
+        # Retain the direct writer's permission check without truncating the report.
+        os.close(os.open(destination, os.O_WRONLY))
+
+    staged = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", newline=newline, delete=False,
+        dir=parent, prefix=prefix, suffix=".tmp",
+    )
+    try:
+        with staged:
+            write_body(staged)
+        if os.name != "nt":
+            os.chmod(staged.name, published_mode(destination))
+        replace_retry(staged.name, destination)
+    finally:
+        try:
+            os.unlink(staged.name)
+        except FileNotFoundError:
+            pass
+
+
+def write_json_report(path, doc):
+    def write_body(fh):
+        json.dump(doc, fh, indent=1)
+
+    _publish_text(path, write_body, newline="\n", prefix=".awc_names-")
+
+
+def write_csv_report(path, rows):
+    def write_body(fh):
+        w = csv.DictWriter(fh, fieldnames=["source", "bank", "stream_id", "name", "rule"],
+                           lineterminator="\n")
+        w.writeheader()
+        w.writerows(rows)
+
+    _publish_text(path, write_body, newline="", prefix=".awc_names-")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("banks", nargs="+", help="an .awc file, a bank directory, or JSON from awc_manifest.py or rpf9dump audio")
@@ -398,14 +494,9 @@ def main(argv=None) -> int:
     if a.out:
         try:
             if a.out.lower().endswith(".json"):
-                with open(a.out, "w", encoding="utf-8", newline="\n") as fh:
-                    json.dump({"summary": summary, "streams": rows}, fh, indent=1)
+                write_json_report(a.out, {"summary": summary, "streams": rows})
             else:
-                with open(a.out, "w", encoding="utf-8", newline="") as fh:
-                    w = csv.DictWriter(fh, fieldnames=["source", "bank", "stream_id", "name", "rule"],
-                                       lineterminator="\n")
-                    w.writeheader()
-                    w.writerows(rows)
+                write_csv_report(a.out, rows)
         except OSError as error:
             print(f"awc_names: error: cannot write {a.out}: {error}", file=sys.stderr)
             return 2

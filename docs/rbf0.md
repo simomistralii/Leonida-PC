@@ -480,7 +480,9 @@ The 23 refused resources are exactly those that hold the 26 invalid UTF-8 text p
 occurs, and with them `--check` exits 1 on this corpus. So the tree loses no byte anywhere else: element words, attribute counts, descriptor order, value widths,
 float bits and NUL terminators all survive. The encoder also writes an edited tree, for example a JSON report
 changed by hand. It then checks each string and text against the recorded byte length when one is present, so a
-change that alters a length needs that field dropped or updated.
+change that alters a length needs that field dropped or updated. Report-to-folder export also exits 1 if any resource is refused,
+even when it writes the valid resources; on the measured corpus it writes 1,240 resources and refuses 23.
+An export with no refusals exits 0.
 
 ## 10. Reproduction
 

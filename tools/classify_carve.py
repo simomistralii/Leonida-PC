@@ -8,7 +8,7 @@ Classes:
   other:<hex>  anything else, keyed by its first 4 bytes
 
 Usage:
-    python -I classify_carve.py <work>\\carve
+    python -I tools/classify_carve.py <work>\\carve
 Writes types.json (per archive and overall counts/bytes per class, plus size stats) and prints a summary.
 Every per-class entry, overall and per archive, is {"files": N, "bytes": B, "min": ..., "max": ..., "median": ...}:
 min, max and median are the smallest, largest and median file size in bytes among the files of that class in that
@@ -41,10 +41,10 @@ def classify(r):
 
 
 def index_rows(path):
-    with open(path, encoding="utf-8") as f:
+    with open(path, encoding="utf-8-sig") as f:
         try:
             document = json.load(f)
-        except ValueError:
+        except (ValueError, RecursionError):
             raise ValueError("invalid JSON") from None
     rows = document.get("files") if isinstance(document, dict) else None
     if not isinstance(rows, list):
@@ -63,7 +63,7 @@ def entry(v):
     return {"files": v[0], "bytes": v[1], "min": min(sizes), "max": max(sizes), "median": median_low(sizes)}
 
 
-USAGE = "usage: python -I classify_carve.py <work>\\carve"
+USAGE = "usage: python -I tools/classify_carve.py <work>\\carve"
 
 
 def main():
@@ -84,7 +84,12 @@ def main():
         return 2
     per = {}
     total = defaultdict(lambda: [0, 0, []])
-    for name in sorted(os.listdir(root)):
+    try:
+        entries = sorted(os.listdir(root))
+    except OSError as error:
+        print(f"{root}: {error}", file=sys.stderr)
+        return 2
+    for name in entries:
         p = os.path.join(root, name, "index.json")
         if not os.path.isfile(p):
             continue
@@ -104,14 +109,16 @@ def main():
         per[name] = {k: entry(v) for k, v in sorted(c.items(), key=lambda kv: -kv[1][1])}
     top = sorted(total.items(), key=lambda kv: -kv[1][1])
     out = {"overall": {k: entry(v) for k, v in top}, "per_archive": per}
-    fd, temp = tempfile.mkstemp(dir=root, prefix=".types-", suffix=".tmp")
+    dest = os.path.realpath(report)
+    dest_dir = os.path.dirname(dest) or root
+    fd, temp = tempfile.mkstemp(dir=dest_dir, prefix=".types-", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             json.dump(out, f, indent=1)
             f.flush()
             os.fsync(f.fileno())
-        os.chmod(temp, published_mode(report))                             # mkstemp creates 0600
-        os.replace(temp, report)
+        os.chmod(temp, published_mode(dest))                               # mkstemp creates 0600
+        os.replace(temp, dest)
     except BaseException:
         try:
             os.unlink(temp)

@@ -164,6 +164,24 @@ class BufferLoadSubTests(unittest.TestCase):
                     translate(["s_mov_b32 s4, 0", "s_mov_b32 s5, 0", "s_mov_b32 s6, 8", "s_mov_b32 s7, 0", line])
 
 
+class TypedLoadAlignmentTests(unittest.TestCase):
+    def test_two_byte_typed_load_alignment(self):
+        with open(os.path.join(HERE, "fixtures", "typed_load_alignment.asm"), encoding="utf-8") as fixture:
+            loads = [line.strip() for line in fixture if line.strip() and not line.startswith(";")]
+        # MUBUF takes its format and selector from the descriptor. MTBUF uses
+        # the instruction format even when the descriptor names an 8-bit format.
+        cases = ((0, 0, 0x3100BFAC, 0x807F, 0x807F), (0, 1, 0x3100BFAC, 0, 0),
+                 (0, 3, 0x3100BFAC, 0, 0), (1, 0, 0x3100BFAC, 0, 0),
+                 (1, 1, 0x3100BFAC, 0x01FF, 0x01FF), (0, 7, 0x3100BFAC, 0, 0),
+                 (0, 1, 0x31005FAC, 0x80, 0), (0, 1, 0x3100BFA9, 1, 0))
+        for base_delta, offset, descriptor, mubuf, mtbuf in cases:
+            with self.subTest(base_delta=base_delta, offset=offset, descriptor=descriptor):
+                body = [f"s_mov_b32 s4, {BASE + base_delta:#x}", "s_mov_b32 s5, 0",
+                        "s_mov_b32 s6, 8", f"s_mov_b32 s7, {descriptor:#x}", f"v_mov_b32_e32 v1, {offset}"]
+                mem = run_cs(body + loads)
+                self.assertEqual((mem[OUT], mem[OUT + 4]), (mubuf, mtbuf))
+
+
 class Format8UintTests(unittest.TestCase):
     def test_tbuffer_load_format_x_8_uint_all_byte_offsets(self):
         # V# has a non-zero format (code 20 = 32_UINT); MTBUF uses its own BUF_FMT_8_UINT (code 5) and identity X000.

@@ -183,6 +183,24 @@ class SummaryTests(unittest.TestCase):
             self.assertIn("one file", message)
             self.assertFalse(os.path.exists(one))
 
+    def test_limit_below_one_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            disasm = os.path.join(tmp, "disasm")
+            os.mkdir(disasm)
+            write_listing(tmp, "ps_table32", LISTINGS["ps_table32"])
+            for bad in ("0", "-1"):
+                stderr = sys.stderr
+                sys.stderr = io.StringIO()
+                try:
+                    with self.assertRaises(SystemExit) as cm:
+                        P.main([disasm, "--limit", bad])
+                finally:
+                    message = sys.stderr.getvalue()
+                    sys.stderr = stderr
+                self.assertEqual(cm.exception.code, 2)
+                self.assertIn("--limit", message)
+                self.assertIn("at least 1", message)
+
     def test_missing_folder(self):
         stderr = sys.stderr
         sys.stderr = io.StringIO()
@@ -190,6 +208,20 @@ class SummaryTests(unittest.TestCase):
             self.assertEqual(P.main([os.path.join(ROOT, "no-such-folder-here")]), 2)
         finally:
             sys.stderr = stderr
+
+    def test_limit_must_be_positive(self):
+        for value in ("0", "-1"):
+            with self.subTest(limit=value):
+                stderr = sys.stderr
+                sys.stderr = io.StringIO()
+                try:
+                    with self.assertRaises(SystemExit) as cm:
+                        P.main([os.path.join(ROOT, "tools"), "--limit", value])
+                finally:
+                    message = sys.stderr.getvalue()
+                    sys.stderr = stderr
+                self.assertEqual(cm.exception.code, 2)
+                self.assertIn("argument --limit: must be at least 1", message)
 
 
 if __name__ == "__main__":

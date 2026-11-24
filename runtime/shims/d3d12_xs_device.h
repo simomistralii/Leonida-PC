@@ -49,14 +49,34 @@
 
 #include <d3d12.h>
 
+#include <cstddef>
 #include <cstdint>
 
 namespace rt::d3d12_xs {
 
+// Which slot map the queues of a device answer with.
+//   pc       ID3D12CommandQueue's 19 public slots, Signal and Wait at 14 and 15; slots past 18 are refused.
+//   console  the Xbox Series layout the retail title uses (xcl; TuxBox's run of the title; this repository's own
+//            Intel-host run routing queue slot 35, docs/retail_boot_intel_host.md): slots 0-13 as on the PC, two
+//            console slots at 14 and 15, then Signal 16, Wait 17, GetTimestampFrequency 18, GetClockCalibration 19,
+//            GetDesc 20, SuspendX 23, ResumeX 24, SignalX 25 (fence, value, flush word), a page-mapping update 31,
+//            PresentX 32 and ExecuteCommandListsX 35 (count, lists, frame token, flags)
+//            (docs/related_projects_gaps.md, past stop 13, row 1).
+// A console-layout queue still takes a fence proxy at 14 or 15 as the PC's Signal or Wait, so PC-style callers of a
+// title's device keep working.
+enum class QueueLayout : std::uint8_t { pc, console };
+
 // Wraps `real` and returns the requested device interface through `out`. Takes ownership of one reference to
 // `real` on success; on failure the caller keeps its reference. Returns E_NOINTERFACE if `riid` is not a D3D12
-// device interface the PC device implements.
-HRESULT create_device_proxy(ID3D12Device* real, REFIID riid, void** out);
+// device interface the PC device implements. The queues the device creates use `queue_layout`.
+HRESULT create_device_proxy(ID3D12Device* real, REFIID riid, void** out, QueueLayout queue_layout = QueueLayout::pc);
+
+// The layout D3D12XboxCreateDevice gives the title's device: console, or pc with LEONIDA_QUEUE_LAYOUT=pc (read once;
+// any other value than pc or console is logged and taken as console).
+QueueLayout xbox_device_queue_layout();
+
+// The layout of a queue proxy (pc for anything that is not one). Used by the tests.
+QueueLayout queue_proxy_layout(const void* queue);
 
 // True when `device` points at a proxy created by create_device_proxy. Used by the tests.
 bool is_device_proxy(const void* device);
@@ -88,6 +108,33 @@ unsigned device_proxy_slot_count(const void* device);
 
 // The PC device behind a proxy. Null when `device` is not a proxy.
 ID3D12Device* device_proxy_real_device(const void* device);
+
+// Device slot 133 (the console's CreatePlacedResourceX) makes a buffer on the title's pages at `va`. The proxy does
+// not create it itself: the device behind it does, through this handler, which the Vulkan layer registers
+// (rt::d3d12::create_buffer_at_host_address). With none registered, or a PC device behind the proxy, the slot
+// answers E_NOTIMPL.
+// `layout` is the title's third argument, a D3D12_BARRIER_LAYOUT (0xFFFFFFFF = UNDEFINED), measured on a retail
+// boot: 0x6 SHADER_RESOURCE, 0x3 UNORDERED_ACCESS, as PC CreatePlacedResource2 takes it.
+using PlacedAtVaHandler = HRESULT (*)(ID3D12Device* real, void* va, const D3D12_RESOURCE_DESC& desc,
+                                      std::uint32_t layout, REFIID riid, void** out);
+void set_placed_at_va_handler(PlacedAtVaHandler handler);
+
+// Called by slot 133 for a buffer, before the handler, with the buffer's range [va, va + width). gta6rt registers
+// rt::xmem::commit_physical_range: xmem commits physical pages on first touch, so a range the title has mapped but
+// not written yet is still reserved, and the handler's import refuses reserved pages (it would answer with its
+// fallback buffer, which the title's writes never reach). A false return is logged once and the handler is still
+// called. With none registered nothing is done.
+using PlacedAtVaPagesHook = bool (*)(const void* va, std::size_t bytes);
+void set_placed_at_va_pages_hook(PlacedAtVaPagesHook hook);
+
+// Called by slot 14 for the console-extended CreateDescriptorHeap: the PC description followed by the title's address
+// and size at +0x10/+0x18 (issue #313). The Vulkan device registers rt::d3d12::create_console_descriptor_heap, which
+// reports that address as the heap start. A handler, not a direct call, because this file is also built into gta6rt
+// and test programs without the Vulkan device; with none registered (a PC device, the proxy mock tests) the heap is
+// created by the real device's CreateDescriptorHeap, as before slot 14 read the extension.
+using ConsoleDescriptorHeapHandler = HRESULT (*)(ID3D12Device* real, const D3D12_DESCRIPTOR_HEAP_DESC* desc,
+                                                 std::uint64_t address, std::uint64_t size, REFIID riid, void** out);
+void set_console_descriptor_heap_handler(ConsoleDescriptorHeapHandler handler);
 
 // True for slots the proxy handles itself rather than forwarding verbatim: IUnknown (0-2), 8 and 75 (queue
 // proxies), 9 (allocator proxies), 14, 31/34/35/45/46/50 (proxies unwrapped), 32 and 36 (fence proxies), 48/73 and
@@ -139,8 +186,29 @@ unsigned allocator_proxy_table_size();
 std::uint64_t allocator_slot_hits(unsigned slot);
 bool allocator_slot_first_call_seen(unsigned slot);
 std::uint64_t allocator_table_overruns();
+// Command list proxies created by device slot 73 (CreateCommandListX):
+bool is_command_list_proxy(const void* list);
+ID3D12GraphicsCommandList* command_list_proxy_real_list(const void* list);
+unsigned command_list_proxy_table_size();
+std::uint64_t list_slot_hits(unsigned slot);
+bool list_slot_first_call_seen(unsigned slot);
+
 // Heap slots 0-2, 7 (GetDevice -> device proxy) and 9/10 (handle conversion).
 bool heap_slot_overridden(unsigned slot);
+
+// Console list slot mapping: returns PC vtable slot or ~0u if console-only / unforwarded.
+inline constexpr unsigned kListNotForwarded = ~0u;
+inline constexpr unsigned console_to_pc_list_slot(unsigned slot) {
+    if (slot <= 26) return slot;               // PC order, measured
+    if (slot <= 30) return kListNotForwarded;  // console-only extras
+    if (slot <= 59) return slot - 4;           // PC chain, shifted +4
+    if (slot == 60) return 58;                 // EndEvent (no console SetMarker/BeginEvent)
+    if (slot == 61) return 59;                 // ExecuteIndirect (Package)
+    if (slot == 85) return 16;                 // CopyTextureRegionX -> CopyTextureRegion
+    if (slot == 146) return 80;                // D3D12_BARRIER_GROUP (Package; PC GCL7)
+    return kListNotForwarded;
+}
+
 
 // Number of live references on a device proxy. Test helper for the heap's GetDevice/lifetime checks.
 unsigned long device_proxy_ref_count(const void* device);

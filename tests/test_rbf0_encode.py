@@ -369,7 +369,7 @@ class Cli(unittest.TestCase):
         out_dir = os.path.join(self.tmp.name, "surrogate-out")
         result = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "rbf0_encode.py"),
                                  report, out_dir], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("2 resource(s) written, 3 refused", result.stdout)
         self.assertEqual(result.stdout.count("utf8:"), 3)
         self.assertEqual(result.stderr, "")
@@ -377,6 +377,22 @@ class Cli(unittest.TestCase):
         for name in os.listdir(out_dir):
             with open(os.path.join(out_dir, name), "rb") as f:
                 self.assertEqual(f.read(), good)
+
+    def test_export_cli_reports_total_refusal_as_failure(self):
+        report = os.path.join(self.tmp.name, "refused.json")
+        with open(report, "w", encoding="utf-8", newline="\n") as f:
+            json.dump({"tool": "rbf0_tree", "resources": [{"status": "bad", "offset": 16}]}, f)
+        with open(report, "rb") as f:
+            before = f.read()
+        out_dir = os.path.join(self.tmp.name, "refused-out")
+        result = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "rbf0_encode.py"),
+                                 report, out_dir], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("0 resource(s) written, 1 refused", result.stdout)
+        self.assertEqual(os.listdir(out_dir), [])
+        self.assertNotIn("Traceback", result.stderr)
+        with open(report, "rb") as f:
+            self.assertEqual(f.read(), before)
 
     def test_argument_errors(self):
         for argv in ([], ["--check", self.carve, "extra"], ["--check", self.carve, "--limit", "0"],
@@ -417,7 +433,7 @@ class Cli(unittest.TestCase):
             json.dump({"tool": "rbf0_tree", "resources": [doc, "not-a-dict"]}, f)
         out_dir = os.path.join(self.tmp.name, "out-mixed")
         code, out = self.run_main(report, out_dir)
-        self.assertEqual(code, 0, out)
+        self.assertEqual(code, 1, out)
         self.assertIn("1 resource(s) written, 1 refused", out)
         self.assertTrue(os.path.isfile(os.path.join(out_dir, "00000000.rbf")))
 

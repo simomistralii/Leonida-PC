@@ -1,5 +1,5 @@
-// xgameruntime: XGameEventImpl, XGameUiImpl, XGameStreamingImpl, XDisplayImpl and XUserDeviceImpl, offline: small
-// classes a title calls early.
+// xgameruntime: XGameEventImpl, XGameUiImpl, XGameStreamingImpl, XDisplayImpl, XUserDeviceImpl, XAccessibilityImpl and
+// XLauncherImpl, offline: small classes a title calls early.
 //
 // Each XGameEvent*, XGameUi* and XGameStreaming* function in xgameruntime.lib asks QueryApiImpl for its class and
 // calls one slot with its own arguments after `this`. The class and interface ids and the method order are
@@ -10,13 +10,20 @@
 //   XGameEventImpl      XGameEventWrite (telemetry) succeeds and is dropped; the first event's name is logged, and
 //                       LEONIDA_LOG_GAME_EVENTS=1 logs every one.
 //   XGameUiImpl         a message dialog or error dialog has no screen: its title and text go to the log and it
-//                       completes at once with the dialog's default button (error dialogs: dismissed). Every other UI
-//                       (profile cards, pickers, text entry, web authentication, invites) fails before starting.
+//                       completes at once with the dialog's default button (error dialogs: dismissed). A text entry
+//                       completes as cancelled (E_ABORT), which the title takes as the player backing out. Every
+//                       other UI (profile cards, pickers, web authentication, invites) fails before starting.
 //   XGameStreamingImpl  the game is never streamed: initialising succeeds, IsStreaming is false, there are no
 //                       clients, the connection-state registration hands out a token that never fires.
 //   XDisplayImpl        XDisplayTryEnableHdrMode: Disabled (the host output is SDR), Enabled with LEONIDA_HDR=1.
-//   XUserDeviceImpl     every device belongs to the offline user; associations and audio endpoints never change; the
-//                       user has no audio endpoint of its own; finding a controller shows no UI (as on desktop).
+//   XUserDeviceImpl     every device belongs to the offline user; associations and audio endpoints never change, so
+//                       their change registrations are kept until unregistered and never called back; the user has
+//                       no audio endpoint of its own; finding a controller shows no UI (as on desktop).
+//   XAccessibilityImpl  high contrast is Off, closed captions can't be configured, no voice is installed (enumerating
+//                       calls back zero times), XSpeechSynthesizerCreate fails (E_FAIL) with a null handle, the other
+//                       speech calls refuse the handle they were never given (E_INVALIDARG), speech-to-text display
+//                       calls fail (E_FAIL).
+//   XLauncherImpl       XLaunchUri and the display timeout deferral calls fail (E_FAIL); nothing is launched.
 //
 // Slots whose signature the public pages don't give answer with a value that is safe whichever way the caller reads
 // it: see `client_not_connected` (XGameStreaming) and `offline_failure`.
@@ -29,6 +36,7 @@
 #include <cstring>
 #include <iterator>
 #include <mutex>
+#include <vector>
 
 #include <XAsync.h>
 #include <XAsyncProvider.h>
@@ -146,7 +154,7 @@ const GUID kUiInterfaces[] = {
 
 enum class XGameUiMessageDialogButton : uint32_t { First = 0, Second = 1, Third = 2 };
 
-const char kDialogIdentity = 0, kErrorDialogIdentity = 0;
+const char kDialogIdentity = 0, kErrorDialogIdentity = 0, kTextEntryIdentity = 0;
 
 // The answer of a message dialog rides in the async context: the button, which never needs more.
 HRESULT CALLBACK dialog_provider(XAsyncOp op, const XAsyncProviderData* data) {
@@ -214,6 +222,49 @@ HRESULT STDMETHODCALLTYPE ui_error_dialog_result(void*, XAsyncBlock* async) {
 // 16: XGameUiSetNotificationPositionHint(position): there are no notifications to place.
 HRESULT STDMETHODCALLTYPE ui_set_notification_hint(void*) { return S_OK; }
 
+// A text entry has no keyboard to show, so it ends the way a player backing out of it ends: the async starts, its
+// callback runs, and it completes with E_ABORT and no text. Grand Theft Auto VI takes E_ABORT from a text entry as
+// cancelled and goes on, and any other failure as an error (VIctory's xgameui.rs; docs/related_projects_gaps.md), so
+// failing the call before it starts, as the other UIs do, would be the wrong answer here.
+HRESULT CALLBACK text_entry_provider(XAsyncOp op, const XAsyncProviderData* data) {
+    if (op == XAsyncOp::Begin) return XAsyncSchedule(data->async, 0);
+    if (op == XAsyncOp::DoWork) XAsyncComplete(data->async, E_ABORT, 0);
+    return S_OK;
+}
+
+// 17: HRESULT XGameUiShowTextEntryAsync(XAsyncBlock* async, const char* titleText, const char* descriptionText,
+//        const char* defaultText, XGameUiTextEntryInputScope inputScope, uint32_t maxTextLength)
+HRESULT STDMETHODCALLTYPE ui_text_entry_async(void*, XAsyncBlock* async, const char* title, const char* description,
+                                              const char* default_text, uint32_t scope, uint32_t max_length) {
+    if (!async) return E_POINTER;
+    std::fprintf(stderr, "[rt] game text entry: \"%s\": %s [default \"%s\", input scope %u, up to %u characters; "
+                 "cancelled, there is no keyboard]\n", title ? title : "", description ? description : "",
+                 default_text ? default_text : "", scope, max_length);
+    return XAsyncBegin(async, nullptr, &kTextEntryIdentity, "XGameUiShowTextEntryAsync", text_entry_provider);
+}
+
+// 18: HRESULT XGameUiShowTextEntryResultSize(XAsyncBlock* async, uint32_t* resultTextBufferSize)
+// The async's status comes back: E_PENDING while it runs, then E_ABORT, with a size of 0.
+HRESULT STDMETHODCALLTYPE ui_text_entry_result_size(void*, XAsyncBlock* async, uint32_t* size) {
+    if (!async || !size) return E_POINTER;
+    size_t bytes = 0;
+    const HRESULT hr = XAsyncGetResultSize(async, &bytes);
+    *size = static_cast<uint32_t>(bytes);
+    return hr;
+}
+
+// 19: HRESULT XGameUiShowTextEntryResult(XAsyncBlock* async, uint32_t resultTextBufferSize, char* resultTextBuffer,
+//        uint32_t* resultTextBufferUsed)
+// E_ABORT as well; nothing is written to the buffer, and 0 bytes are used.
+HRESULT STDMETHODCALLTYPE ui_text_entry_result(void*, XAsyncBlock* async, uint32_t buffer_size, char* buffer,
+                                               uint32_t* used) {
+    if (!async) return E_POINTER;
+    size_t written = 0;
+    const HRESULT hr = XAsyncGetResult(async, &kTextEntryIdentity, buffer_size, buffer, &written);
+    if (used) *used = static_cast<uint32_t>(written);
+    return hr;
+}
+
 template <int Slot> HRESULT STDMETHODCALLTYPE ui_offline(void* self) { return offline_failure<kUiName, Slot>(self); }
 template <int Slot> HRESULT STDMETHODCALLTYPE ui_unknown(void* self) { return unknown_slot<kUiName, Slot>(self); }
 
@@ -234,9 +285,9 @@ const void* const kUiVtable[] = {
     FN(ui_error_dialog_async),         // 14 XGameUiShowErrorDialogAsync
     FN(ui_error_dialog_result),        // 15 XGameUiShowErrorDialogResult
     FN(ui_set_notification_hint),      // 16 XGameUiSetNotificationPositionHint
-    FN(ui_offline<17>),                // 17 XGameUiShowTextEntryAsync
-    FN(ui_offline<18>),                // 18 XGameUiShowTextEntryResultSize
-    FN(ui_offline<19>),                // 19 XGameUiShowTextEntryResult
+    FN(ui_text_entry_async),           // 17 XGameUiShowTextEntryAsync
+    FN(ui_text_entry_result_size),     // 18 XGameUiShowTextEntryResultSize
+    FN(ui_text_entry_result),          // 19 XGameUiShowTextEntryResult
     FN(ui_unknown<20>),                // 20 (unknown in the docs)
     FN(ui_unknown<21>),                // 21 (unknown in the docs)
     FN(ui_unknown<22>),                // 22 (unknown in the docs)
@@ -450,18 +501,74 @@ HRESULT STDMETHODCALLTYPE device_find_user(void*, const APP_LOCAL_DEVICE_ID* dev
 
 // 4: HRESULT XUserRegisterForDeviceAssociationChanged(XTaskQueueHandle queue, void* context,
 //        XUserDeviceAssociationChangedCallback* callback, XTaskQueueRegistrationToken* token)
-// 7: HRESULT XUserRegisterForDefaultAudioEndpointUtf16Changed(XTaskQueueHandle, void*, callback, token*)
-// Associations and endpoints never change offline: a token, no callback.
-HRESULT STDMETHODCALLTYPE device_register(void*, XTaskQueueHandle, void*, void* callback,
+// 5: bool XUserUnregisterForDeviceAssociationChanged(XTaskQueueRegistrationToken token, bool wait)
+// 7: HRESULT XUserRegisterForDefaultAudioEndpointUtf16Changed(XTaskQueueHandle queue, void* context,
+//        XUserDefaultAudioEndpointUtf16ChangedCallback* callback, XTaskQueueRegistrationToken* token)
+// 8: bool XUserUnregisterForDefaultAudioEndpointUtf16Changed(XTaskQueueRegistrationToken token, bool wait)
+//
+// Each registration is kept (its kind, a duplicate of its queue, its context and callback) under a token unique
+// across both kinds and never 0, until the title unregisters it with the matching function. Offline, the device
+// association and the default audio endpoint never change, so no event is ever raised: no callback is queued or
+// run, and nothing here calls one. Unregistering therefore never has to wait, whatever `wait` says, and removes the
+// registration at once. It returns true for every token, as XUserUnregisterForChangeEvent does: a token already
+// unregistered, never handed out or of the other kind is left alone (a title polling with wait = false would spin
+// on false). queue and context are _In_opt_; a null queue stays null (the process queue, if an event ever came);
+// callback and token are required (E_INVALIDARG).
+//
+// The state is namespace-scope and the lock a constinit SRW lock, not function-local statics: these calls run on
+// the title's threads.
+enum class DeviceEvent : uint32_t { Association = 0, AudioEndpoint = 1 };
+
+struct DeviceRegistration {
+    uint64_t token;
+    DeviceEvent kind;
+    XTaskQueueHandle queue;   // our duplicate, closed on unregister; null for the process queue
+    void* context;
+    void* callback;
+};
+
+constinit SRWLOCK g_device_lock = SRWLOCK_INIT;
+std::vector<DeviceRegistration> g_device_registrations;   // guarded by g_device_lock
+constinit uint64_t g_device_next_token = 1;               // guarded by g_device_lock
+
+template <DeviceEvent Kind>
+HRESULT STDMETHODCALLTYPE device_register(void*, XTaskQueueHandle queue, void* context, void* callback,
                                           XTaskQueueRegistrationToken* token) {
     if (!callback || !token) return E_INVALIDARG;
-    std::lock_guard<std::mutex> lock(g_streaming_mutex);
-    token->token = g_next_token++;
+    XTaskQueueHandle kept = nullptr;
+    if (queue) {
+        const HRESULT hr = XTaskQueueDuplicateHandle(queue, &kept);
+        if (FAILED(hr)) return hr;
+    }
+    uint64_t issued = 0;
+    AcquireSRWLockExclusive(&g_device_lock);
+    try {
+        g_device_registrations.push_back({g_device_next_token, Kind, kept, context, callback});
+        issued = g_device_next_token++;
+    } catch (...) {   // out of memory: no exception reaches the title
+    }
+    ReleaseSRWLockExclusive(&g_device_lock);
+    if (!issued) {
+        if (kept) XTaskQueueCloseHandle(kept);
+        return E_OUTOFMEMORY;
+    }
+    token->token = issued;
     return S_OK;
 }
 
-// 5, 8: bool ...Unregister...(XTaskQueueRegistrationToken token, bool wait): never pending.
-bool STDMETHODCALLTYPE device_unregister(void*, XTaskQueueRegistrationToken, bool) { return true; }
+template <DeviceEvent Kind> bool STDMETHODCALLTYPE device_unregister(void*, XTaskQueueRegistrationToken token, bool) {
+    XTaskQueueHandle queue = nullptr;
+    AcquireSRWLockExclusive(&g_device_lock);
+    for (auto it = g_device_registrations.begin(); it != g_device_registrations.end(); ++it)
+        if (it->token == token.token && it->kind == Kind) {
+            queue = it->queue;
+            g_device_registrations.erase(it);
+            break;
+        }
+    ReleaseSRWLockExclusive(&g_device_lock);
+    if (queue) XTaskQueueCloseHandle(queue);
+    return true;
+}
 
 // 6: HRESULT XUserGetDefaultAudioEndpointUtf16(XUserLocalId user, XUserDefaultAudioEndpointKind kind,
 //        size_t endpointIdUtf16Count, wchar_t* endpointIdUtf16, size_t* endpointIdUtf16Used)
@@ -507,11 +614,11 @@ HRESULT STDMETHODCALLTYPE device_query_interface(void*, REFIID iid, void** out);
 const void* const kUserDeviceVtable[] = {
     FN(device_query_interface), FN(object_add_ref), FN(object_release),   // 0-2 IUnknown
     FN(device_find_user),                   // 3  XUserFindForDevice
-    FN(device_register),                    // 4  XUserRegisterForDeviceAssociationChanged
-    FN(device_unregister),                  // 5  XUserUnregisterForDeviceAssociationChanged
-    FN(device_audio_endpoint),              // 6  XUserGetDefaultAudioEndpointUtf16
-    FN(device_register),                    // 7  XUserRegisterForDefaultAudioEndpointUtf16Changed
-    FN(device_unregister),                  // 8  XUserUnregisterForDefaultAudioEndpointUtf16Changed
+    FN(device_register<DeviceEvent::Association>),     // 4  XUserRegisterForDeviceAssociationChanged
+    FN(device_unregister<DeviceEvent::Association>),   // 5  XUserUnregisterForDeviceAssociationChanged
+    FN(device_audio_endpoint),                         // 6  XUserGetDefaultAudioEndpointUtf16
+    FN(device_register<DeviceEvent::AudioEndpoint>),   // 7  XUserRegisterForDefaultAudioEndpointUtf16Changed
+    FN(device_unregister<DeviceEvent::AudioEndpoint>), // 8  XUserUnregisterForDefaultAudioEndpointUtf16Changed
     FN(device_find_controller_async),       // 9  XUserFindControllerForUserWithUiAsync
     FN(device_find_controller_result),      // 10 XUserFindControllerForUserWithUiResult
 };
@@ -519,6 +626,123 @@ static_assert(std::size(kUserDeviceVtable) == 11, "IUnknown + IXUserDeviceImpl's
 ClassObject g_user_device_object{kUserDeviceVtable};
 HRESULT STDMETHODCALLTYPE device_query_interface(void*, REFIID iid, void** out) {
     return answer(&g_user_device_object, std::begin(kUserDeviceInterfaces), std::end(kUserDeviceInterfaces), iid, out);
+}
+
+// ======================= XAccessibilityImpl =======================
+
+constexpr char kAccessibilityName[] = "XAccessibilityImpl";
+constexpr GUID kAccessibilityClass = {0x3e241977, 0x6237, 0x41e9, {0x85, 0x59, 0x10, 0x2c, 0x2d, 0x99, 0x83, 0xf1}};
+const GUID kAccessibilityInterfaces[] = {
+    kAccessibilityClass,   // IXAccessibilityImpl: the class id
+    {0xd722b373, 0x8c4d, 0x4692, {0x9e, 0x51, 0xd6, 0xad, 0x9b, 0x37, 0xaa, 0x7d}},   // IXAccessibilityImpl2
+};
+
+// 5: HRESULT XHighContrastGetMode(XHighContrastMode* mode): Off, the first enumerator. ASSUMPTION: the signature and
+// that Off is 0 (GDK reference, not re-checked for this file).
+HRESULT STDMETHODCALLTYPE accessibility_high_contrast(void*, uint32_t* mode) {
+    if (!mode) return E_POINTER;
+    *mode = 0;
+    return S_OK;
+}
+
+// 4: HRESULT XClosedCaptionSetEnabled(bool enabled): there are no captions to show; accepted and dropped.
+HRESULT STDMETHODCALLTYPE accessibility_captions_set_enabled(void*, bool) { return S_OK; }
+
+// 8: HRESULT XSpeechSynthesizerEnumerateInstalledVoices(callback, void* context): no voice is installed, so the
+// callback runs zero times. ASSUMPTION: the argument order (GDK reference), only the count (2) was measured.
+HRESULT STDMETHODCALLTYPE speech_enumerate_voices(void*, void* callback, void*) {
+    return callback ? S_OK : E_INVALIDARG;
+}
+
+// 9: HRESULT XSpeechSynthesizerCreate(XSpeechSynthesizerHandle* handle): no synthesizer offline.
+HRESULT STDMETHODCALLTYPE speech_create(void* self, void** handle) {
+    if (handle) *handle = nullptr;
+    return offline_failure<kAccessibilityName, 9>(self);
+}
+
+// 10-12, 14: a synthesizer or stream handle is the first argument, and none was ever handed out: E_INVALIDARG.
+HRESULT STDMETHODCALLTYPE speech_bad_handle(void*) { return E_INVALIDARG; }
+
+// 13, 21: HRESULT XSpeechSynthesizerCreateStreamFromText/Ssml(synthesizer, const char* text,
+//                                                             XSpeechSynthesizerStreamHandle* stream)
+HRESULT STDMETHODCALLTYPE speech_create_stream(void*, void*, const char*, void** stream) {
+    if (stream) *stream = nullptr;
+    return E_INVALIDARG;
+}
+
+// 15: HRESULT XSpeechSynthesizerGetStreamDataSize(stream, size_t* size)
+HRESULT STDMETHODCALLTYPE speech_stream_size(void*, void*, size_t* size) {
+    if (size) *size = 0;
+    return E_INVALIDARG;
+}
+
+// 16: HRESULT XSpeechSynthesizerGetStreamData(stream, size_t size, void* buffer, size_t* used)
+HRESULT STDMETHODCALLTYPE speech_stream_data(void*, void*, size_t, void*, size_t* used) {
+    if (used) *used = 0;
+    return E_INVALIDARG;
+}
+
+// The slots with no offline counterpart whose arguments the layout doesn't give: the caption properties (3) and
+// speech-to-text display (6, 7, 17-20). Nothing is written.
+template <int Slot> HRESULT STDMETHODCALLTYPE accessibility_offline(void* self) {
+    return offline_failure<kAccessibilityName, Slot>(self);
+}
+
+HRESULT STDMETHODCALLTYPE accessibility_query_interface(void*, REFIID iid, void** out);
+const void* const kAccessibilityVtable[] = {
+    FN(accessibility_query_interface), FN(object_add_ref), FN(object_release),   // 0-2 IUnknown
+    FN(accessibility_offline<3>),            // 3  XClosedCaptionGetProperties
+    FN(accessibility_captions_set_enabled),  // 4  XClosedCaptionSetEnabled
+    FN(accessibility_high_contrast),         // 5  XHighContrastGetMode
+    FN(accessibility_offline<6>),            // 6  XSpeechToTextSetPositionHint
+    FN(accessibility_offline<7>),            // 7  XSpeechToTextSendString
+    FN(speech_enumerate_voices),             // 8  XSpeechSynthesizerEnumerateInstalledVoices
+    FN(speech_create),                       // 9  XSpeechSynthesizerCreate
+    FN(speech_bad_handle),                   // 10 XSpeechSynthesizerCloseHandle
+    FN(speech_bad_handle),                   // 11 XSpeechSynthesizerSetDefaultVoice
+    FN(speech_bad_handle),                   // 12 XSpeechSynthesizerSetCustomVoice
+    FN(speech_create_stream),                // 13 XSpeechSynthesizerCreateStreamFromText
+    FN(speech_bad_handle),                   // 14 XSpeechSynthesizerCloseStreamHandle
+    FN(speech_stream_size),                  // 15 XSpeechSynthesizerGetStreamDataSize
+    FN(speech_stream_data),                  // 16 XSpeechSynthesizerGetStreamData
+    FN(accessibility_offline<17>),           // 17 XSpeechToTextBeginHypothesisString
+    FN(accessibility_offline<18>),           // 18 XSpeechToTextUpdateHypothesisString
+    FN(accessibility_offline<19>),           // 19 XSpeechToTextFinalizeHypothesisString
+    FN(accessibility_offline<20>),           // 20 XSpeechToTextCancelHypothesisString
+    FN(speech_create_stream),                // 21 XSpeechSynthesizerCreateStreamFromSsml
+};
+static_assert(std::size(kAccessibilityVtable) == 22, "IUnknown + IXAccessibilityImpl's 19 methods");
+ClassObject g_accessibility_object{kAccessibilityVtable};
+HRESULT STDMETHODCALLTYPE accessibility_query_interface(void*, REFIID iid, void** out) {
+    return answer(&g_accessibility_object, std::begin(kAccessibilityInterfaces), std::end(kAccessibilityInterfaces),
+                  iid, out);
+}
+
+// ======================= XLauncherImpl =======================
+
+constexpr char kLauncherName[] = "XLauncherImpl";
+constexpr GUID kLauncherClass = {0x1b339674, 0x328d, 0x4283, {0xa2, 0x00, 0x31, 0x71, 0xf1, 0x8d, 0x36, 0x39}};
+
+// 3: HRESULT XLaunchUri(XUserHandle user, const char* uri): nothing is launched; E_FAIL.
+// 4: HRESULT XDisplayAcquireTimeoutDeferral(XDisplayTimeoutDeferralHandle* handle): none is handed out.
+// 5: XDisplayCloseTimeoutDeferralHandle(handle): no handle exists; E_FAIL, which a void caller ignores.
+HRESULT STDMETHODCALLTYPE launcher_acquire_deferral(void* self, void** handle) {
+    if (handle) *handle = nullptr;
+    return offline_failure<kLauncherName, 4>(self);
+}
+
+HRESULT STDMETHODCALLTYPE launcher_query_interface(void*, REFIID iid, void** out);
+const void* const kLauncherVtable[] = {
+    FN(launcher_query_interface), FN(object_add_ref), FN(object_release),   // 0-2 IUnknown
+    FN((offline_failure<kLauncherName, 3>)),   // 3 XLaunchUri
+    FN(launcher_acquire_deferral),             // 4 XDisplayAcquireTimeoutDeferral
+    FN((offline_failure<kLauncherName, 5>)),   // 5 XDisplayCloseTimeoutDeferralHandle
+};
+static_assert(std::size(kLauncherVtable) == 6, "IUnknown + IXLauncherImpl's 3 methods");
+ClassObject g_launcher_object{kLauncherVtable};
+HRESULT STDMETHODCALLTYPE launcher_query_interface(void*, REFIID iid, void** out) {
+    // IXLauncherImpl's id is the class id.
+    return answer(&g_launcher_object, &kLauncherClass, &kLauncherClass + 1, iid, out);
 }
 
 #undef FN
@@ -549,10 +773,29 @@ bool xgameruntime_offline_query(const GUID& class_id, REFIID interface_id, void*
         *hr = device_query_interface(nullptr, interface_id, out);
         return true;
     }
+    if (class_id == kAccessibilityClass) {
+        *hr = accessibility_query_interface(nullptr, interface_id, out);
+        return true;
+    }
+    if (class_id == kLauncherClass) {
+        *hr = launcher_query_interface(nullptr, interface_id, out);
+        return true;
+    }
     return false;
 }
 
 // For tests: how many game events were written.
 long xgameruntime_offline_game_events() { return g_events.load(); }
+
+// For tests: how many XUserDeviceImpl registrations of one kind (0 device association, 1 default audio endpoint)
+// are kept.
+long xgameruntime_offline_device_registrations(uint32_t kind) {
+    long n = 0;
+    AcquireSRWLockShared(&g_device_lock);
+    for (const auto& registration : g_device_registrations)
+        if (static_cast<uint32_t>(registration.kind) == kind) ++n;
+    ReleaseSRWLockShared(&g_device_lock);
+    return n;
+}
 
 }  // namespace rt::shims

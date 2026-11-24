@@ -36,6 +36,7 @@ on:
       - "tools/mesh_compute_vs.py"
       - "tools/rdna2spirv.py"
       - "tools/report_paths.py"
+      - "tools/replace_retry.py"
       - "tools/shader_carve.py"
       - "tools/shader_disasm.py"
       - "tools/shader_ir.py"
@@ -74,6 +75,7 @@ on:
       - "tools/mesh_compute_vs.py"
       - "tools/rdna2spirv.py"
       - "tools/report_paths.py"
+      - "tools/replace_retry.py"
       - "tools/shader_carve.py"
       - "tools/shader_disasm.py"
       - "tools/shader_ir.py"
@@ -287,7 +289,9 @@ jobs:
           retention-days: 7
           if-no-files-found: error
       - name: CPU runtime tests
-        run: ctest --test-dir runtime/build --output-on-failure
+        # --timeout: a test without a TIMEOUT of its own that hangs fails after 5 minutes with its output, and the
+        # tests after it still run, instead of the job ending at timeout-minutes with nothing to show which one it was.
+        run: ctest --test-dir runtime/build --output-on-failure --timeout 300
 
   # Runs the Windows build's tests under Wine, so a change that breaks the loader on Linux (through Wine or Proton)
   # shows up. The required ones are the loader and the stand-in game run end to end; the table in the job summary

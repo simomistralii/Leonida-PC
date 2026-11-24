@@ -684,9 +684,18 @@ bool g_use_fls = false;
 DWORD g_fls_index = FLS_OUT_OF_INDEXES;
 int g_fls_callbacks = 0;
 
+// DllMain's lpvReserved for its last DLL_PROCESS_ATTACH, and whether one was seen.
+void* g_attach_reserved = nullptr;
+bool g_attach_seen = false;
+
 void observe_notification(void* base, DWORD reason, void* reserved, bool tls) {
     g_notifications.push_back({base, reason, tls});
-    if (reserved) g_detach_state_live = false;
+    if (reason == DLL_PROCESS_ATTACH && !tls) {
+        g_attach_reserved = reserved;
+        g_attach_seen = true;
+    }
+    // ~Loader unmaps the image after the detach, which is FreeLibrary's case: lpvReserved is NULL there.
+    if (reason == DLL_PROCESS_DETACH && reserved) g_detach_state_live = false;
     if (reason != DLL_PROCESS_DETACH) return;
     for (const auto& m : g_live_modules) {
         MEMORY_BASIC_INFORMATION info{};
@@ -732,6 +741,8 @@ void reset_notifications() {
     g_fail_attach = false;
     g_use_fls = false;
     g_fls_callbacks = 0;
+    g_attach_reserved = nullptr;
+    g_attach_seen = false;
 }
 
 void expect_notifications(const char* what, const std::vector<Notification>& expected) {
@@ -861,6 +872,37 @@ void test_process_detach_without_entry() {
                          {{first_base, DLL_PROCESS_ATTACH, true}, {first_base, DLL_PROCESS_ATTACH, false},
                           {first_base, DLL_PROCESS_DETACH, true}, {first_base, DLL_PROCESS_DETACH, false}});
     reset_notifications();
+}
+
+// DllMain docs (learn.microsoft.com/windows/win32/dlls/dllmain): "If fdwReason is DLL_PROCESS_ATTACH, lpvReserved is
+// NULL for dynamic loads and non-NULL for static loads." Loader::load() from the host is the process-start graph (the
+// executable and the DLLs it imports), a run-time LoadLibrary of a bundled DLL is a dynamic load.
+void test_attach_reserved() {
+    reset_notifications();
+    try {
+        rt::Loader loader(g_dir);
+        loader.load(write_image(make_lifecycle_image()));
+        loader.initialise();
+        if (!g_attach_seen) failed("a static load's DllMain gets a non-NULL lpvReserved", "DllMain was not called");
+        else if (!g_attach_reserved) failed("a static load's DllMain gets a non-NULL lpvReserved", "lpvReserved was NULL");
+        else pass("a static load's DllMain gets a non-NULL lpvReserved");
+    } catch (const std::exception& e) {
+        failed("a static load's DllMain gets a non-NULL lpvReserved", e.what());
+    }
+
+    reset_notifications();
+    try {
+        write_image_as(make_lifecycle_image(), "attach_reserved_dynamic.dll");
+        rt::Loader loader(g_dir);
+        bool handled = false;
+        void* h = loader.load_runtime_module("attach_reserved_dynamic.dll", 0, handled);
+        if (!handled || !h) failed("a run-time load's DllMain gets a NULL lpvReserved", "the run-time load failed");
+        else if (!g_attach_seen) failed("a run-time load's DllMain gets a NULL lpvReserved", "DllMain was not called");
+        else if (g_attach_reserved) failed("a run-time load's DllMain gets a NULL lpvReserved", "lpvReserved was non-NULL");
+        else pass("a run-time load's DllMain gets a NULL lpvReserved");
+    } catch (const std::exception& e) {
+        failed("a run-time load's DllMain gets a NULL lpvReserved", e.what());
+    }
 }
 
 void test_process_detach_dependencies() {
@@ -1266,9 +1308,137 @@ std::string written_images_blocked() {
     return {};
 }
 
+// A DLL Windows' own loader accepts (LEONIDA_COMPAT_DIR loads with LoadLibraryExW, not with rt::Loader): no entry
+// point, no imports, one export "Answer" (ordinal 1) whose code returns 42.
+std::vector<uint8_t> make_os_dll(uint64_t image_base) {
+    auto img = make_image();
+    std::fill(img.begin() + 0x200, img.begin() + 0x400, uint8_t{0});
+    auto* nt = nt_of(img);
+    nt->FileHeader.Characteristics = IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_DLL | IMAGE_FILE_LARGE_ADDRESS_AWARE;
+    auto& oh = nt->OptionalHeader;
+    oh.ImageBase = leonida_test::free_image_base(image_base);
+    oh.SectionAlignment = 0x1000;
+    oh.FileAlignment = 0x200;
+    oh.MajorOperatingSystemVersion = 6;
+    oh.MajorSubsystemVersion = 6;
+    oh.AddressOfEntryPoint = 0;
+    oh.BaseOfCode = 0x1000;
+    oh.SizeOfCode = 0x200;
+    oh.Subsystem = IMAGE_SUBSYSTEM_WINDOWS_GUI;
+    oh.DllCharacteristics = IMAGE_DLLCHARACTERISTICS_NX_COMPAT;
+    oh.SizeOfStackReserve = oh.SizeOfHeapReserve = 0x100000;
+    oh.SizeOfStackCommit = oh.SizeOfHeapCommit = 0x1000;
+    auto* ed = reinterpret_cast<IMAGE_EXPORT_DIRECTORY*>(img.data() + 0x200);
+    ed->Base = 1;
+    ed->NumberOfFunctions = 1;
+    ed->AddressOfFunctions = 0x1100;
+    ed->NumberOfNames = 1;
+    ed->AddressOfNames = 0x1120;
+    ed->AddressOfNameOrdinals = 0x1140;
+    *reinterpret_cast<uint32_t*>(img.data() + 0x300) = 0x1180;  // code, outside the export directory
+    *reinterpret_cast<uint32_t*>(img.data() + 0x320) = 0x1160;
+    *reinterpret_cast<uint16_t*>(img.data() + 0x340) = 0;
+    std::memcpy(img.data() + 0x360, "Answer\0", 7);
+    const uint8_t code[] = {0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3};  // mov eax, 42; ret
+    std::memcpy(img.data() + 0x380, code, sizeof(code));
+    auto& dir = oh.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    dir.VirtualAddress = 0x1000;
+    dir.Size = 0x170;
+    return img;
+}
+
+// An importer of `dll`!`symbol` bound under LEONIDA_COMPAT_DIR = `compat` (empty = unset). Returns its one record and
+// writes the IAT slot to `bound`.
+rt::ImportRecord bind_with_compat(const std::filesystem::path& compat, const char* dll, const char* symbol,
+                                  void*& bound) {
+    if (compat.empty()) SetEnvironmentVariableW(L"LEONIDA_COMPAT_DIR", nullptr);
+    else SetEnvironmentVariableW(L"LEONIDA_COMPAT_DIR", compat.c_str());
+    struct Reset {
+        ~Reset() { SetEnvironmentVariableW(L"LEONIDA_COMPAT_DIR", nullptr); }
+    } reset;
+    rt::Loader loader(g_dir);
+    rt::Module& m = loader.load(write_image(make_import_image(dll, symbol)));
+    if (m.imports.size() != 1) throw std::runtime_error("expected one import record");
+    bound = *reinterpret_cast<void**>(m.base + 0x1180);
+    return m.imports[0];
+}
+
+void test_compat_modules() {
+    const std::filesystem::path compat = g_dir / "compat";
+    std::filesystem::create_directories(compat);
+    const auto dll_path = compat / "testcompat.dll";
+    write_image_as(make_os_dll(0x1A0000000), "compat/testcompat.dll");
+    write_image_as(make_os_dll(0x1B0000000), "compat/testshim.dll");  // has Answer, not the shim's F
+    try {
+        void* bound = nullptr;
+        {
+            const char* what = "without LEONIDA_COMPAT_DIR an import with no shim stays unimplemented";
+            auto r = bind_with_compat({}, "testcompat.dll", "Answer", bound);
+            if (r.binding != rt::Binding::Unimplemented) failed(what, "it was bound");
+            else pass(what);
+        }
+        {
+            const char* what = "LEONIDA_COMPAT_DIR binds an import to the drop-in DLL's export, and it runs";
+            auto r = bind_with_compat(compat, "TestCompat.dll", "Answer", bound);
+            HMODULE h = GetModuleHandleW(dll_path.c_str());
+            auto expected = h ? reinterpret_cast<void*>(GetProcAddress(h, "Answer")) : nullptr;
+            if (r.binding != rt::Binding::Host) failed(what, "the import was not bound as Host");
+            else if (!expected || bound != expected) failed(what, "the IAT does not hold the DLL's export");
+            else if (reinterpret_cast<int (*)()>(bound)() != 42) failed(what, "the export did not return 42");
+            else pass(what);
+        }
+        {
+            const char* what = "a compat DLL owns its module: a symbol it lacks is unimplemented, not shimmed";
+            auto r = bind_with_compat(compat, "testshim.dll", "F", bound);
+            if (r.binding != rt::Binding::Unimplemented) failed(what, "F was not left unimplemented");
+            else if (!bound || bound == reinterpret_cast<void*>(&test_shim_function)) failed(what, "F reached the shim");
+            else pass(what);
+        }
+        {
+            const char* what = "a DLL that is not in the compat folder still binds to its shim";
+            std::filesystem::path empty = g_dir / "compat_empty";
+            std::filesystem::create_directories(empty);
+            auto r = bind_with_compat(empty, "testshim.dll", "F", bound);
+            if (r.binding != rt::Binding::Shim || bound != reinterpret_cast<void*>(&test_shim_function))
+                failed(what, "F did not bind to the test shim");
+            else pass(what);
+        }
+        {
+            const char* what = "a compat file Windows cannot load is reported, not skipped";
+            std::filesystem::path bad = g_dir / "compat_bad";
+            std::filesystem::create_directories(bad);
+            write_image_as(std::vector<uint8_t>(64, 0x5A), "compat_bad/testcompat.dll");
+            DWORD thread_mode = 0;
+            SetThreadErrorMode(0, &thread_mode);   // the loader quiets the load itself, then puts this back
+            try {
+                bind_with_compat(bad, "testcompat.dll", "Answer", bound);
+                failed(what, "the load succeeded");
+            } catch (const std::exception& e) {
+                if (std::string(e.what()).find("LEONIDA_COMPAT_DIR") == std::string::npos) failed(what, e.what());
+                else if (GetThreadErrorMode() != 0) failed(what, "the thread's error mode was not restored");
+                else pass(what);
+            }
+            SetThreadErrorMode(thread_mode, nullptr);
+        }
+    } catch (const std::exception& e) {
+        failed("LEONIDA_COMPAT_DIR", e.what());
+    }
+    // Loaders keep compat DLLs for the process lifetime; drop the references so the work folder can be removed. Each
+    // was loaded once per binding above, so a few releases are enough; a module Windows keeps loaded anyway (pinned)
+    // must not turn this into an endless loop.
+    for (const auto& p : {dll_path, compat / "testshim.dll"})
+        for (int release = 0; release < 8; ++release) {
+            HMODULE h = GetModuleHandleW(p.c_str());
+            if (!h || !FreeLibrary(h)) break;
+        }
+}
+
 }  // namespace
 
 int main() {
+    // No error dialog to wait on: a test image Windows refuses (test_compat_modules loads one on purpose) would
+    // otherwise stop an unattended run at a "Bad Image" box, as the other runtime tests also guard against.
+    SetErrorMode(GetErrorMode() | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
     g_dir = work_dir();
     std::error_code ec;
     std::filesystem::remove_all(g_dir, ec);
@@ -1303,6 +1473,7 @@ int main() {
         test_process_detach();
         test_process_detach_invalid_tls();
         test_process_detach_without_entry();
+        test_attach_reserved();
         test_process_detach_dependencies();
         test_failed_dependency_not_registered();
         test_delay_descriptor_fields();
@@ -1311,6 +1482,7 @@ int main() {
         test_tls_directory_count();
         test_unwind_registration();
         test_lookup_during_loads();
+        test_compat_modules();
     } catch (const std::exception& e) {
         // A write that fails (write_image throws) ends the run with the reason, instead of terminating the process.
         failed("writing the test images", e.what());

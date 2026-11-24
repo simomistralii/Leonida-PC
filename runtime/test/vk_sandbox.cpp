@@ -33,6 +33,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -277,13 +278,13 @@ int main(int argc, char** argv) {
     if (!n) { std::fprintf(stderr, "unsupported: no Vulkan physical device\n"); return 77; }
     std::vector<VkPhysicalDevice> pds(n);
     CHECK(vkEnumeratePhysicalDevices(inst, &n, pds.data()));
-    VkPhysicalDevice pd = VK_NULL_HANDLE;
-    VkPhysicalDeviceProperties props{};
-    int best = -1;
-    for (auto p : pds) {
-        VkPhysicalDeviceProperties pp; vkGetPhysicalDeviceProperties(p, &pp);
-        if (int r = leonida::vk_test::device_rank(pp.deviceType, pp.vendorID); r > best) { pd = p; props = pp; best = r; }
-    }
+    // The shared pick, so LEONIDA_VK_DEVICE names the GPU here too (vk_device_pick.h, docs/testing.md).
+    std::vector<VkPhysicalDeviceProperties> candidates(n);
+    for (uint32_t i = 0; i < n; ++i) vkGetPhysicalDeviceProperties(pds[i], &candidates[i]);
+    const std::size_t chosen = leonida::vk_test::pick_device(candidates);
+    if (chosen == candidates.size()) { leonida::vk_test::report_no_device(); return 1; }
+    VkPhysicalDevice pd = pds[chosen];
+    const VkPhysicalDeviceProperties props = candidates[chosen];
     constexpr uint32_t push_words = 36, push_bytes = push_words * 4;
     if (props.limits.maxPushConstantsSize < push_bytes) { std::fprintf(stderr, "unsupported: push constants\n"); return 77; }
     std::fprintf(stderr, "device: %s\n", props.deviceName);
@@ -639,7 +640,7 @@ int main(int argc, char** argv) {
     if (make_swap() < 0) { std::fprintf(stderr, "cannot create a swapchain (TRANSFER_DST unsupported?)\n"); return 1; }
     VkSemaphoreCreateInfo semi{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     VkSemaphore acquired; CHECK(vkCreateSemaphore(dev, &semi, nullptr, &acquired));
-    Ground ground; ground.build(scene);
+    std::optional<Ground> ground;
     auto last = std::chrono::steady_clock::now();
     bool shot_held = false;
     int frame = 0;
@@ -662,6 +663,10 @@ int main(int argc, char** argv) {
             cam.pos[0] += r[0] * side * v; cam.pos[1] += r[1] * side * v;
             cam.pos[2] += (float(key('E')) - float(key('Q'))) * v;
         } else {
+            if (!ground) {
+                ground.emplace().build(scene);
+                last = std::chrono::steady_clock::now();  // Exclude grid construction from the next movement step.
+            }
             const float h = std::hypot(f[0], f[1]) > 1e-4f ? std::hypot(f[0], f[1]) : 1;
             if (cam.mode == 1) cam.speed = fwd * (key(VK_SHIFT) ? 7.f : 2.5f);
             else { cam.speed += fwd * 12.f * dt; cam.speed *= std::pow(0.6f, dt); cam.yaw -= side * dt * std::clamp(cam.speed / 10.f, -1.f, 1.f); }
@@ -669,7 +674,7 @@ int main(int argc, char** argv) {
             if (cam.mode == 1) { cam.pos[0] += r[0] * side * 2.5f * dt; cam.pos[1] += r[1] * side * 2.5f * dt; }
             const float eye = cam.mode == 1 ? 1.7f : 1.2f;
             float gz;
-            if (ground.height(cam.pos[0], cam.pos[1], cam.pos[2] - eye + 0.6f, gz)) cam.pos[2] = gz + eye;
+            if (ground->height(cam.pos[0], cam.pos[1], cam.pos[2] - eye + 0.6f, gz)) cam.pos[2] = gz + eye;
         }
         uint32_t idx = 0;
         if (!swap) {   // minimised at start or since the last resize

@@ -26,6 +26,7 @@ prints counts only: documents read, roots, the elements each convention covered,
 documents that are not well-formed XML (tail-only or truncated carves), with the reason. ``--out DIR`` writes one JSON
 file per document: those files hold the game's data and stay on the local machine (CONTRIBUTING.md). Standard
 library only.
+Usage: `python -I tools/gamedata_reader.py --help` lists the options.
 """
 import argparse
 import io

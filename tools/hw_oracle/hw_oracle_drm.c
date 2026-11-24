@@ -22,7 +22,13 @@
  * differs is what belongs to the kernel: its entry point, COMPUTE_PGM_RSRC1 and COMPUTE_PGM_RSRC2 as its
  * descriptor has them, the kernarg pointer as its two user SGPRs, the group size, and CS_W32_EN in the dispatch
  * for 32-lane waves.
- * That sequence is the one for compute engine version 10 (GFX10: RDNA1 and RDNA2), so anything else is refused.
+ * That sequence is the one for compute engine version 10 (GFX10: RDNA1 and RDNA2). Engines 11 (GFX11, RDNA3)
+ * and 12 (GFX12, RDNA4) keep every register this stream writes at the same SH offsets — Mesa's register JSON
+ * and AMD's PAL headers (gfx9_plus_merged_offset.h, gfx12_merged_offset.h) agree on them — and take the preamble
+ * of the gfx11 path of the same libdrm test, so only the init and the cu-mask writes branch below. GFX12 takes
+ * that preamble unchanged: AMD's own driver stack still writes its registers with plain SET_SH_REG (PAL,
+ * gfx12CmdUtil.cpp, BuildSetSeqShRegs) and leaves COMPUTE_STATIC_THREAD_MGMT_SE* at their reset value
+ * 0xffffffff (gfx12_merged_default.h), so the indexed cu-mask writes stop at engine 11.
  * A raw stream bypasses the Vulkan driver: run it on a GPU that drives no display (runner.py checks).
  *
  * Every submission gets command buffer memory of its own, never rewritten. Measured on a Ryzen 9 7950X3D's
@@ -77,9 +83,10 @@ static int allocate(amdgpu_device_handle dev, struct buffer *b, unsigned size, u
     return amdgpu_bo_cpu_map(b->bo, &b->cpu);
 }
 
-/* The LLVM processor name of a GFX10 chip, from the kernel's family id and revision (the ranges are the ones
- * Mesa's ac_gpu_info.c uses). Every GFX10 chip takes the same encodings, so this only labels the result. */
-static const char *arch_name(const struct amdgpu_gpu_info *gpu) {
+/* The LLVM processor name of the chip, from the kernel's family id and revision. The ranges are the ones Mesa's
+ * ac_gpu_info.c and amdgpu_asic_addr.h use; GC 12 also needs the IP minor, as Mesa's NV4 case does. Every chip of
+ * one compute-engine generation takes the same encodings, so this only labels the result. */
+static const char *arch_name(const struct amdgpu_gpu_info *gpu, const struct drm_amdgpu_info_hw_ip *ip) {
     const unsigned rev = gpu->chip_external_rev;
     switch (gpu->family_id) {
     case 143: /* AMDGPU_FAMILY_NV */
@@ -94,7 +101,30 @@ static const char *arch_name(const struct amdgpu_gpu_info *gpu) {
     case 146: return "gfx1035"; /* AMDGPU_FAMILY_YC */
     case 149: return "gfx1036"; /* AMDGPU_FAMILY_GC_10_3_6 */
     case 151: return "gfx1037"; /* AMDGPU_FAMILY_GC_10_3_7 */
-    default: return "gfx10xx";
+    case 145: /* AMDGPU_FAMILY_GC_11_0_0: Navi31, Navi33, Navi32 */
+        if (rev < 0x10) return "gfx1100";
+        if (rev < 0x20) return "gfx1102";
+        return "gfx1101";
+    case 148: return "gfx1103"; /* AMDGPU_FAMILY_GC_11_0_1: Phoenix, Phoenix2, Hawk Point */
+    case 150: /* AMDGPU_FAMILY_GC_11_5_0. The ranges are Mesa's amdgpu_asic_addr.h (STRIX1 0x01..0x3f,
+     * KRACKAN1 0x40..0x4f, GFX1153 0x50..0xbf, STRIX_HALO 0xc0..0xcf, GFX1156 0xd0..0xfe), and Mesa's
+     * amd_family.c names GFX1156 gfx1153 too (ac_get_llvm_processor_name), hence the two gfx1153 returns. */
+        if (rev < 0x40) return "gfx1150"; /* STRIX1 */
+        if (rev < 0x50) return "gfx1152"; /* KRACKAN1 */
+        if (rev < 0xC0) return "gfx1153";
+        if (rev < 0xD0) return "gfx1151"; /* STRIX_HALO */
+        return "gfx1153";                 /* GFX1156, which assembles as gfx1153 */
+    case 154: /* AMDGPU_FAMILY_GC_11_5_4 */
+        if (rev < 0x40) return "gfx1170";
+        if (rev < 0x80) return "gfx1171";
+        return "gfx11xx";
+    case 152: /* AMDGPU_FAMILY_GC_12_0_0 */
+        if (ip->hw_ip_version_minor == 1) return "gfx1210";
+        if (rev < 0x40) return "gfx12xx";
+        if (rev < 0x50) return "gfx1200";
+        return "gfx1201";                 /* the RX 9000 series */
+    default:
+        return ip->hw_ip_version_major == 11 ? "gfx11xx" : ip->hw_ip_version_major == 12 ? "gfx12xx" : "gfx10xx";
     }
 }
 
@@ -120,14 +150,17 @@ int main(int argc, char **argv) {
         fprintf(stderr, "device queries failed\n");
         return 77;
     }
-    if (ip.hw_ip_version_major != 10 || !(ip.available_rings & 1)) {
-        fprintf(stderr, "compute engine %u.%u: only version 10 (GFX10, RDNA1 and RDNA2) is supported\n",
+    if ((ip.hw_ip_version_major != 10 && ip.hw_ip_version_major != 11 && ip.hw_ip_version_major != 12) ||
+        !(ip.available_rings & 1)) {
+        fprintf(stderr, "compute engine %u.%u: only versions 10 (GFX10, RDNA1 and RDNA2), 11 (GFX11, RDNA3) and "
+                        "12 (GFX12, RDNA4) are supported\n",
                 ip.hw_ip_version_major, ip.hw_ip_version_minor);
         return 77;
     }
+    const unsigned engine = ip.hw_ip_version_major;
     const char *name = amdgpu_get_marketing_name(dev);
-    printf("# device=%s (0x%04x) arch=%s engine=%u.%u\n", name ? name : "AMD GPU", gpu.asic_id, arch_name(&gpu),
-           ip.hw_ip_version_major, ip.hw_ip_version_minor);
+    printf("# device=%s (0x%04x) arch=%s engine=%u.%u\n", name ? name : "AMD GPU", gpu.asic_id,
+           arch_name(&gpu, &ip), ip.hw_ip_version_major, ip.hw_ip_version_minor);
     fflush(stdout);
 
     FILE *file = fopen(argv[1], "rb");
@@ -197,36 +230,71 @@ int main(int argc, char **argv) {
         uint32_t *p = (uint32_t *)((char *)cmd.cpu + ib_used);
         ib_used += IB_BYTES;
         int i = 0;
-        /* amdgpu_dispatch_init_gfx9 (no context control on the compute engine): COMPUTE_START_X..Z, TMPRING_SIZE. */
-        p[i++] = PACKET3_COMPUTE(PACKET3_SET_SH_REG, 3);
-        p[i++] = 0x204;
-        p[i++] = 0;
-        p[i++] = 0;
-        p[i++] = 0;
-        p[i++] = PACKET3_COMPUTE(PACKET3_SET_SH_REG, 1);
-        p[i++] = 0x218;
-        p[i++] = 0;
-        /* amdgpu_dispatch_init_gfx10: COMPUTE_SHADER_CHKSUM, COMPUTE_REQ_CTRL (6 registers), CP_COHER_START_DELAY. */
-        p[i++] = PACKET3_COMPUTE(PACKET3_SET_SH_REG, 1);
-        p[i++] = 0x22a;
-        p[i++] = 0;
-        p[i++] = PACKET3_COMPUTE(PACKET3_SET_SH_REG, 6);
-        p[i++] = 0x222;
-        for (int k = 0; k < 6; k++) p[i++] = 0;
-        p[i++] = PACKET3(PACKET3_SET_UCONFIG_REG, 1);
-        p[i++] = 0x7b;
-        p[i++] = 0x20;
-        /* amdgpu_dispatch_write_cumask (gfx10): COMPUTE_STATIC_THREAD_MGMT_SE0..3. */
-        p[i++] = PACKET3_COMPUTE(PACKET3_SET_SH_REG_INDEX, 2);
-        p[i++] = 0x30000216;
-        p[i++] = 0xffffffff;
-        p[i++] = 0xffffffff;
-        p[i++] = PACKET3_COMPUTE(PACKET3_SET_SH_REG_INDEX, 2);
-        p[i++] = 0x30000219;
-        p[i++] = 0xffffffff;
-        p[i++] = 0xffffffff;
-        /* amdgpu_dispatch_write2hw_gfx10: COMPUTE_PGM_LO/HI (the entry point, in 256-byte units), the shader's
-         * registers, COMPUTE_PGM_RSRC3. */
+        if (engine == 10) {
+            /* amdgpu_dispatch_init_gfx9 (no context control on the compute engine): COMPUTE_START_X..Z, TMPRING_SIZE. */
+            p[i++] = PACKET3_COMPUTE(PACKET3_SET_SH_REG, 3);
+            p[i++] = 0x204;
+            p[i++] = 0;
+            p[i++] = 0;
+            p[i++] = 0;
+            p[i++] = PACKET3_COMPUTE(PACKET3_SET_SH_REG, 1);
+            p[i++] = 0x218;
+            p[i++] = 0;
+            /* amdgpu_dispatch_init_gfx10: COMPUTE_SHADER_CHKSUM, COMPUTE_REQ_CTRL (6 registers), CP_COHER_START_DELAY. */
+            p[i++] = PACKET3_COMPUTE(PACKET3_SET_SH_REG, 1);
+            p[i++] = 0x22a;
+            p[i++] = 0;
+            p[i++] = PACKET3_COMPUTE(PACKET3_SET_SH_REG, 6);
+            p[i++] = 0x222;
+            for (int k = 0; k < 6; k++) p[i++] = 0;
+            p[i++] = PACKET3(PACKET3_SET_UCONFIG_REG, 1);
+            p[i++] = 0x7b;
+            p[i++] = 0x20;
+        } else {
+            /* amdgpu_dispatch_init_gfx11: COMPUTE_START_X..Z, TMPRING_SIZE, then REQ_CTRL on its own, the four
+             * COMPUTE_USER_ACCUM registers and the checksum. The checksum stays in the SH space, as AMD's PAL
+             * writes it on GFX11 (gfx9PipelineChunkCs.cpp, WriteSetOneShReg of mmCOMPUTE_SHADER_CHKSUM): the
+             * libdrm gfx11 path sends it as UCONFIG 0x22a, which does not reach this register. CP_COHER_START_DELAY
+             * is gone. GFX12 takes the same preamble: PAL writes these registers the same way (gfx12CmdUtil.cpp
+             * still builds plain SET_SH_REG). */
+            p[i++] = PACKET3_COMPUTE(PACKET3_SET_SH_REG, 3);
+            p[i++] = 0x204;
+            p[i++] = 0;
+            p[i++] = 0;
+            p[i++] = 0;
+            p[i++] = PACKET3_COMPUTE(PACKET3_SET_SH_REG, 1);
+            p[i++] = 0x218;
+            p[i++] = 0;
+            p[i++] = PACKET3_COMPUTE(PACKET3_SET_SH_REG, 1);
+            p[i++] = 0x222;
+            p[i++] = 0;
+            p[i++] = PACKET3_COMPUTE(PACKET3_SET_SH_REG, 4);
+            p[i++] = 0x224;
+            for (int k = 0; k < 4; k++) p[i++] = 0;
+            p[i++] = PACKET3_COMPUTE(PACKET3_SET_SH_REG, 1);
+            p[i++] = 0x22a;
+            p[i++] = 0;
+        }
+        if (engine <= 11) {
+            /* amdgpu_dispatch_write_cumask (gfx10 and gfx11): COMPUTE_STATIC_THREAD_MGMT_SE0..3. GFX11's SE4..SE7
+             * keep their reset value. */
+            p[i++] = PACKET3_COMPUTE(PACKET3_SET_SH_REG_INDEX, 2);
+            p[i++] = 0x30000216;
+            p[i++] = 0xffffffff;
+            p[i++] = 0xffffffff;
+            p[i++] = PACKET3_COMPUTE(PACKET3_SET_SH_REG_INDEX, 2);
+            p[i++] = 0x30000219;
+            p[i++] = 0xffffffff;
+            p[i++] = 0xffffffff;
+        }
+        /* GFX12 writes none of the COMPUTE_STATIC_THREAD_MGMT registers: every SE's mask resets to 0xffffffff
+         * (AMD's gfx12_merged_default.h), and neither PAL nor RADV touches them, so an indexed write would only
+         * repeat what the queue already has. */
+        /* amdgpu_dispatch_write2hw_gfx10/gfx11: COMPUTE_PGM_LO/HI (the entry point, in 256-byte units), the shader's
+         * registers, COMPUTE_PGM_RSRC3. RSRC3 stays 0 on every generation the launcher takes: its kernels carry
+         * none of its fields (drm.py refuses scratch memory and shared VGPRs), and RADV and PAL likewise program
+         * what the descriptor has. INST_PREF_SIZE (GFX11's 0x3f0 in the libdrm test) buys nothing here: the code
+         * buffer already has a page of zeros behind it against the prefetch. */
         p[i++] = PACKET3_COMPUTE(PACKET3_SET_SH_REG, 2);
         p[i++] = 0x20c;
         p[i++] = (uint32_t)(entry >> 8);

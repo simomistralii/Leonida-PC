@@ -33,6 +33,7 @@ Sides (each prints the f16 word per case and the rule its words follow):
 
 Exit code: 0 when every side that ran follows the same rule, 1 when they differ or a side follows neither rule (or
 its control is wrong), 2 on a harness error, 77 when a requested side is unavailable. Nothing here reads game files.
+Usage: `python -I tools/fma_mix_probe.py --help` lists the options.
 """
 import argparse
 import os

@@ -232,7 +232,9 @@ void test_classification() {
     check(cls("dstorage_xs.dll", "DStorageGetFactory") == ReturnClass::HResult,
           "the console dstorage name is hresult");
     check(cls("xg_xs.dll", "XGCreateTexture2DComputer") == ReturnClass::Other, "unmeasured xg_xs import is other");
-    check(cls("acphal.dll", "AcpHalCreate") == ReturnClass::Other, "unmeasured acphal import is other");
+    check(cls("acphal.dll", "AcpHalCreate") == ReturnClass::HResult, "AcpHalCreate is hresult");
+    check(cls("acphal.dll", "ApuFree") == ReturnClass::Other, "ApuFree returns void");
+    check(cls("acphal.dll", "ApuMapVirtualAddress") == ReturnClass::Other, "ApuMapVirtualAddress returns uint32_t");
     check(cls("xgameruntime.dll", "XGameRuntimeInitialize") == ReturnClass::HResult, "XGameRuntimeInitialize");
     check(cls("xgameruntime.dll", "XUserAddAsync") == ReturnClass::HResult, "XUser* is hresult");
     check(cls("xgameruntime.dll", "XTaskQueueCreate") == ReturnClass::HResult, "XTaskQueueCreate is hresult");

@@ -40,12 +40,18 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <system_error>
 #include <cstring>
+#include <fstream>
 #include <functional>
+#include <iomanip>
 #include <map>
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -109,9 +115,11 @@ public:
     VulkanPresenter(VulkanContext& context, PFN_vkGetInstanceProcAddr get_instance, VkInstance instance,
                     VkPhysicalDevice physical, VkQueue queue, std::uint32_t family, VkSurfaceKHR surface,
                     bool swapchain_maintenance1 = false,
-                    std::function<VkExtent2D()> extent_fn = nullptr)
+                    std::function<VkExtent2D()> extent_fn = nullptr,
+                    std::function<VkSurfaceKHR()> recreate_surface_fn = nullptr)
         : context_(context), instance_(instance), physical_(physical), queue_(queue), surface_(surface),
-          maintenance1_(swapchain_maintenance1), extent_fn_(std::move(extent_fn)) {
+          maintenance1_(swapchain_maintenance1), extent_fn_(std::move(extent_fn)),
+          recreate_surface_fn_(std::move(recreate_surface_fn)) {
 #define LEONIDA_INSTANCE_FN(name) name##_ = reinterpret_cast<PFN_##name>(get_instance(instance, #name));
         LEONIDA_INSTANCE_FN(vkGetPhysicalDeviceSurfaceSupportKHR)
         LEONIDA_INSTANCE_FN(vkGetPhysicalDeviceSurfaceCapabilitiesKHR)
@@ -162,7 +170,32 @@ public:
                 vk.vkCreateSemaphore(device, &semaphore, nullptr, &frame.acquired) != VK_SUCCESS)
                 return;
         }
+        // LEONIDA_CAPTURE=<dir>: besides presenting, copy the swapchain image to host memory and write it out as a
+        // binary PPM, every LEONIDA_CAPTURE_EVERY presented frames (default 30), at most LEONIDA_CAPTURE_LIMIT of
+        // them (default 24). Off unless the variable is set; a capture that cannot be made shows nothing and is
+        // reported here instead of failing the presenter.
+        if (const char* dir = std::getenv("LEONIDA_CAPTURE"); dir && *dir) {
+            capture_dir_ = dir;
+            // Create the folder: a capture run names its own output folder and should not have to make it first.
+            std::error_code created;
+            std::filesystem::create_directories(capture_dir_, created);
+            capture_to_disk_ = true;
+            capture_ = true;  // the swapchain needs TRANSFER_SRC, and every frame copies into a staging buffer
+            if (const char* every = std::getenv("LEONIDA_CAPTURE_EVERY")) capture_every_ = std::max(1, std::atoi(every));
+            if (const char* limit = std::getenv("LEONIDA_CAPTURE_LIMIT")) capture_limit_ = std::max(1, std::atoi(limit));
+            std::fprintf(stderr, "[rt] present: capture on: every %d presented frame(s), at most %d, into %s\n",
+                         capture_every_, capture_limit_, capture_dir_.c_str());
+        }
         ok_ = recreate(true, false);
+        if (!ok_ && capture_to_disk_) {
+            // The surface refused a TRANSFER_SRC swapchain, or the staging buffer could not be made: present
+            // without the capture rather than not at all.
+            std::fprintf(stderr, "[rt] present: capture is unavailable on this surface; presenting without it\n");
+            capture_to_disk_ = false;
+            capture_ = false;
+            capture_dir_.clear();
+            ok_ = recreate(true, false);
+        }
     }
 
     ~VulkanPresenter() {
@@ -177,6 +210,8 @@ public:
             release(swapchain_);
         }
         swapchain_ = VK_NULL_HANDLE;
+        // A capture still pending has its copy complete once the queue is idle: write it before the buffer goes.
+        finish_pending_capture();
         release_capture();
         composer_.reset();
         for (Frame& frame : frames_) {
@@ -421,6 +456,18 @@ private:
                         bool srgb, bool tear = false, const PresentPlanes* planes = nullptr) {
         last_tore_ = false;
         if (!ok_) return VK_ERROR_INITIALIZATION_FAILED;
+        if (surface_lost_) {  // the window's display went away under a presented swapchain
+            // Try to make a new surface for the same window (the hwnd is retained by the factory's callback).
+            // Until that succeeds, vkd3d's precedent keeps rendering to nothing: the frame is not shown, but
+            // the run continues instead of wedging on a sticky E_FAIL.
+            surface_ = recreate_surface_fn_ ? recreate_surface_fn_() : VK_NULL_HANDLE;
+            if (!surface_) {
+                captured_ = false;  // nothing was shown: read_back() must not hand out the frame
+                return VK_SUCCESS;
+            }
+            surface_lost_ = false;
+            stale_ = true;  // the old swapchain is gone: rebuild on the new surface below
+        }
         // The swapchain's HDR10 format is only for composed planes that ask for it; a blit of an SDR source or a blank
         // frame keeps whatever the swapchain has (black is black), except that a blit needs the SDR one.
         bool want_hdr = swapchain_hdr_req_;
@@ -447,6 +494,8 @@ private:
         Frame& frame = frames_[frame_index_ % frames_.size()];
         if (const VkResult waited = vkWaitForFences_(device, 1, &frame.done, VK_TRUE, UINT64_MAX); waited != VK_SUCCESS)
             return stop(waited);
+        // Every submit copies into the same mapped buffer, even if its frame is outside the disk capture stride.
+        if (const VkResult r = finish_pending_capture(); r != VK_SUCCESS) return stop(r);
 
         std::uint32_t image = 0;
         VkResult acquired = acquire(frame.acquired, &image);
@@ -457,6 +506,11 @@ private:
                 return VK_SUCCESS;
             }
             acquired = acquire(frame.acquired, &image);
+        }
+        if (acquired == VK_ERROR_SURFACE_LOST_KHR) {
+            captured_ = false;  // nothing was acquired, nothing was shown
+            mark_surface_lost();
+            return VK_SUCCESS;
         }
         if (acquired != VK_SUCCESS && acquired != VK_SUBOPTIMAL_KHR) return acquired;  // nothing was acquired
         if (acquired == VK_SUBOPTIMAL_KHR) stale_ = true;
@@ -570,11 +624,21 @@ private:
                 last_tore_ = true;
                 ++tear_presents_;
             }
+            if (capture_to_disk_ && capture_ && capture_ptr_ && capture_written_ < capture_limit_ &&
+                (presented_ - 1) % std::uint64_t(capture_every_) == 0)
+                pending_capture_ = frame.done;
         }
         if (capture_ && capture_ptr_) {
             captured_ = true;
             captured_extent_ = extent_;
             captured_format_ = format_;
+        }
+        if (result == VK_ERROR_SURFACE_LOST_KHR) {
+            // The surface was lost during the present (display disconnected, a driver reset of the window's
+            // plane): vkd3d keeps rendering to nothing, and the next present recreates surface and swapchain.
+            captured_ = false;
+            mark_surface_lost();
+            result = VK_SUCCESS;
         }
         if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
             stale_ = true;
@@ -633,6 +697,25 @@ private:
     VkResult stop(VkResult failure) {
         ok_ = false;
         return failure;
+    }
+
+    // The window's surface is dead (VK_ERROR_SURFACE_LOST_KHR): the swapchain that presented into it is retired
+    // and the surface destroyed. The next submit_now() first tries the factory's recreate-surface callback; until
+    // it succeeds the presenter keeps the vkd3d "render to nothing" behaviour, not a sticky failure.
+    void mark_surface_lost() {
+        auto& vk = context_.vk;
+        const VkDevice device = context_.device();
+        {
+            std::lock_guard lock(context_.submit_mutex());
+            vk.vkQueueWaitIdle(queue_);  // the old swapchain's images and semaphores may still be in use
+            release(swapchain_);
+        }
+        swapchain_ = VK_NULL_HANDLE;
+        if (surface_ && vkDestroySurfaceKHR_) vkDestroySurfaceKHR_(instance_, surface_, nullptr);
+        surface_ = VK_NULL_HANDLE;
+        surface_lost_ = true;
+        stale_ = true;
+        captured_ = false;
     }
 
     void record(VkCommandBuffer commands, const ResourceBinding& binding, ResourceId source, std::uint32_t image,
@@ -952,6 +1035,108 @@ private:
         captured_ = false;
     }
 
+    // The name VkFormat has in the index; the few formats a capture can be written from, else its number.
+    static const char* capture_format_name(VkFormat format) {
+        switch (format) {
+        case VK_FORMAT_B8G8R8A8_UNORM: return "VK_FORMAT_B8G8R8A8_UNORM";
+        case VK_FORMAT_B8G8R8A8_SRGB: return "VK_FORMAT_B8G8R8A8_SRGB";
+        case VK_FORMAT_R8G8B8A8_UNORM: return "VK_FORMAT_R8G8B8A8_UNORM";
+        case VK_FORMAT_R8G8B8A8_SRGB: return "VK_FORMAT_R8G8B8A8_SRGB";
+        case VK_FORMAT_A2B10G10R10_UNORM_PACK32: return "VK_FORMAT_A2B10G10R10_UNORM_PACK32";
+        case VK_FORMAT_A2R10G10B10_UNORM_PACK32: return "VK_FORMAT_A2R10G10B10_UNORM_PACK32";
+        default: return "unknown";
+        }
+    }
+
+    VkResult finish_pending_capture() {
+        if (!pending_capture_) return VK_SUCCESS;
+        const VkResult waited = vkWaitForFences_(context_.device(), 1, &pending_capture_, VK_TRUE, UINT64_MAX);
+        pending_capture_ = VK_NULL_HANDLE;
+        if (waited == VK_SUCCESS) write_capture();
+        return waited;
+    }
+
+    void write_capture() {
+        const VkExtent2D extent = captured_extent_;
+        const VkFormat format = captured_format_;
+        const std::uint64_t number = presented_;
+        const std::size_t texels = std::size_t(extent.width) * extent.height;
+        if (!capture_ptr_ || !texels || texels > capture_size_ / 4) return;
+        std::vector<std::uint8_t> rgb(texels * 3);
+        std::uint64_t sum[3] = {0, 0, 0};
+        const std::uint8_t* src = capture_ptr_;
+        switch (format) {
+        case VK_FORMAT_B8G8R8A8_UNORM:
+        case VK_FORMAT_B8G8R8A8_SRGB:
+            for (std::size_t i = 0; i < texels; ++i) {
+                const std::uint8_t b = src[i * 4 + 0], g = src[i * 4 + 1], r = src[i * 4 + 2];
+                rgb[i * 3 + 0] = r;
+                rgb[i * 3 + 1] = g;
+                rgb[i * 3 + 2] = b;
+                sum[0] += r;
+                sum[1] += g;
+                sum[2] += b;
+            }
+            break;
+        case VK_FORMAT_R8G8B8A8_UNORM:
+        case VK_FORMAT_R8G8B8A8_SRGB:
+            for (std::size_t i = 0; i < texels; ++i) {
+                const std::uint8_t r = src[i * 4 + 0], g = src[i * 4 + 1], b = src[i * 4 + 2];
+                rgb[i * 3 + 0] = r;
+                rgb[i * 3 + 1] = g;
+                rgb[i * 3 + 2] = b;
+                sum[0] += r;
+                sum[1] += g;
+                sum[2] += b;
+            }
+            break;
+        case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+        case VK_FORMAT_A2R10G10B10_UNORM_PACK32: {
+            const bool bgra = format == VK_FORMAT_A2R10G10B10_UNORM_PACK32;  // B in the low bits
+            for (std::size_t i = 0; i < texels; ++i) {
+                std::uint32_t word = 0;
+                std::memcpy(&word, src + i * 4, sizeof word);
+                const std::uint32_t low = word & 0x3ffu, mid = (word >> 10) & 0x3ffu, high = (word >> 20) & 0x3ffu;
+                const auto to8 = [](std::uint32_t v) { return std::uint8_t((v * 255u + 511u) / 1023u); };
+                const std::uint8_t r = to8(bgra ? high : low), g = to8(mid), b = to8(bgra ? low : high);
+                rgb[i * 3 + 0] = r;
+                rgb[i * 3 + 1] = g;
+                rgb[i * 3 + 2] = b;
+                sum[0] += r;
+                sum[1] += g;
+                sum[2] += b;
+            }
+            break;
+        }
+        default: return;  // not a format the capture can be written from (recreate() refused the others)
+        }
+        char name[64];
+        std::snprintf(name, sizeof name, "frame_%05llu.ppm", static_cast<unsigned long long>(number));
+        std::string path = capture_dir_;
+        if (path.back() != '/' && path.back() != '\\') path += '/';
+        path += name;
+        std::ofstream file(path, std::ios::binary | std::ios::trunc);
+        if (!file) {
+            std::fprintf(stderr, "[rt] present: cannot write %s\n", path.c_str());
+            return;
+        }
+        file << "P6\n" << extent.width << ' ' << extent.height << "\n255\n";
+        file.write(reinterpret_cast<const char*>(rgb.data()), std::streamsize(rgb.size()));
+        file.close();
+        const double scale = 1.0 / double(texels);
+        const double mean[3] = {sum[0] * scale, sum[1] * scale, sum[2] * scale};
+        path.resize(path.size() - std::strlen(name));
+        path += "index.txt";
+        std::ofstream index(path, std::ios::app);
+        if (index)
+            index << "frame " << number << " format " << int(format) << " (" << capture_format_name(format)
+                  << ") extent " << extent.width << 'x' << extent.height << " mean rgb " << std::fixed
+                  << std::setprecision(2) << mean[0] << ' ' << mean[1] << ' ' << mean[2] << '\n';
+        ++capture_written_;
+        std::fprintf(stderr, "[rt] present: capture %s (%ux%u, mean rgb %.2f %.2f %.2f)\n", name, extent.width,
+                     extent.height, mean[0], mean[1], mean[2]);
+    }
+
     // (Re)creates the swapchain for the surface's current size. A zero-sized surface (minimised) leaves no
     // swapchain and is retried on the next present. Keep the old swapchain until the surface queries succeed and
     // the replacement can be attempted. An incomplete replacement stays stale so the next present tries again.
@@ -962,6 +1147,7 @@ private:
             std::lock_guard lock(context_.submit_mutex());
             vk.vkQueueWaitIdle(queue_);  // the old swapchain's images and semaphores may still be in use
         }
+        if (finish_pending_capture() != VK_SUCCESS) return false;
         stale_ = true;  // until this succeeds
         tear_mode_ = VK_PRESENT_MODE_MAX_ENUM_KHR;
         VkSurfaceCapabilitiesKHR caps{};
@@ -1250,6 +1436,8 @@ private:
     std::unique_ptr<PresentComposer> composer_;
     std::function<bool()> abort_;
     std::function<VkExtent2D()> extent_fn_;
+    std::function<VkSurfaceKHR()> recreate_surface_fn_;  // makes a new Win32 surface for the same window
+    bool surface_lost_ = false;  // set by mark_surface_lost(); cleared once a new surface was created
     std::map<VkFormat, VkFormatFeatureFlags> features_;
     bool warned_srgb_ = false;
     bool capture_ = false;
@@ -1260,6 +1448,13 @@ private:
     bool captured_ = false;
     VkExtent2D captured_extent_{};
     VkFormat captured_format_ = VK_FORMAT_UNDEFINED;
+    // LEONIDA_CAPTURE: write the copies the staging buffer makes to <capture_dir_> (see finish_pending_capture()).
+    bool capture_to_disk_ = false;
+    std::string capture_dir_;
+    int capture_every_ = 30;  // presented frames between files
+    int capture_limit_ = 24;  // files at most
+    VkFence pending_capture_ = VK_NULL_HANDLE;  // owns the shared staging bytes until written
+    std::uint64_t capture_written_ = 0;
 
     PFN_vkGetPhysicalDeviceSurfaceSupportKHR vkGetPhysicalDeviceSurfaceSupportKHR_ = nullptr;
     PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR vkGetPhysicalDeviceSurfaceCapabilitiesKHR_ = nullptr;

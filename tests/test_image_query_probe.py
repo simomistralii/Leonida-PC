@@ -3,7 +3,9 @@ bits, the kernels, and the comparison and its exit codes (through a fake oracle 
 The last class runs on the hardware when the oracle tools are present and the GPU is GFX10, and is skipped otherwise.
 Standard library only."""
 import io
+import json
 import math
+import os
 import sys
 import tempfile
 import unittest
@@ -162,6 +164,67 @@ class Comparison(unittest.TestCase):
                 self.assertRegex(out.getvalue(), summary)
                 self.assertIn(str(report), error.getvalue())
                 self.assertIn("cannot write", error.getvalue())
+
+    def test_json_write_uses_lf_line_endings_and_cleans_temp(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(runner, "open_oracle", return_value=FakeOracle()):
+            report = Path(tmp) / "report.json"
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(pr.main(["--waves", "32", "--json", str(report)]), 0)
+            raw = report.read_bytes()
+            self.assertIn(b"\n", raw)
+            self.assertNotIn(b"\r", raw)
+            doc = json.loads(raw.decode("utf-8"))
+            self.assertEqual(len(doc["resinfo"]), len(pr.resinfo_cases()))
+            self.assertEqual(len(doc["lod"]), len(pr.lod_cases()))
+            self.assertEqual([p.name for p in Path(tmp).glob(".image_query_probe-*")], [])
+
+    def test_json_write_failure_preserves_previous_report_and_cleans_temp(self):
+        previous = '{"previous": true}'
+        real_named_temp = tempfile.NamedTemporaryFile
+
+        def failing_temp(*args, **kwargs):
+            handle = real_named_temp(*args, **kwargs)
+
+            def fail_write(data):
+                handle.file.write(data[:8])
+                raise OSError(28, "No space left on device")
+
+            handle.write = fail_write
+            return handle
+
+        for label, patch in (
+            ("write", mock.patch.object(pr.tempfile, "NamedTemporaryFile", side_effect=failing_temp)),
+            ("replace", mock.patch.object(pr, "replace_retry", side_effect=PermissionError(13, "Permission denied"))),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.object(runner, "open_oracle", return_value=FakeOracle()), patch:
+                report = Path(tmp) / "keep.json"
+                report.write_text(previous, encoding="utf-8", newline="\n")
+                out, error = io.StringIO(), io.StringIO()
+                with redirect_stdout(out), redirect_stderr(error):
+                    self.assertEqual(pr.main(["--waves", "32", "--json", str(report)]), 2)
+                self.assertRegex(out.getvalue(), r"follow the rules, 0 do not")
+                self.assertIn(str(report), error.getvalue())
+                self.assertIn("cannot write", error.getvalue())
+                self.assertEqual(report.read_text(encoding="utf-8"), previous)
+                self.assertEqual([p.name for p in Path(tmp).glob(".image_query_probe-*")], [])
+
+    def test_readonly_existing_report_is_preserved_without_temp_files(self):
+        if os.name != "nt" and os.geteuid() == 0:
+            self.skipTest("root bypasses read-only file mode")
+        previous = '{"readonly": true}'
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "readonly.json"
+            report.write_text(previous, encoding="utf-8", newline="\n")
+            os.chmod(report, 0o444)
+            try:
+                with self.assertRaises(OSError):
+                    pr.write_report(str(report), {"new": True})
+                self.assertEqual(report.read_text(encoding="utf-8"), previous)
+                self.assertEqual([p.name for p in Path(tmp).glob(".image_query_probe-*")], [])
+            finally:
+                os.chmod(report, 0o600)
 
 
 class Hardware(unittest.TestCase):

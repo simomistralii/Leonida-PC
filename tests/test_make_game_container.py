@@ -164,6 +164,20 @@ class FindTest(unittest.TestCase):
         self.assertEqual([p for p, _ in containers], [self.xvc])     # reached from two roots, listed once
         self.assertEqual(containers[0][1]["version"], "1.0.2.1")
 
+    def test_find_dumps_checks_packaged_files_at_the_last_discovery_level(self):
+        leaf = os.path.join(self.downloads, "deeper")
+        outside = os.path.join(leaf, "outside")
+        os.mkdir(outside)
+        leaf_container = os.path.join(leaf, "leaf.xvc")
+        for path in (leaf_container, os.path.join(outside, "outside.xvd")):
+            with open(path, "wb") as f:
+                f.write(xvd_bytes())
+
+        containers = []
+        with patch("make_game.discovery_roots", return_value=[self.tmp.name]):
+            self.assertEqual(make_game.find_dumps(containers), [])
+        self.assertCountEqual([path for path, _ in containers], [self.xvc, leaf_container])
+
     def test_find_dumps_without_a_list_returns_as_before(self):
         self.assertEqual(self.find(None), [])
 

@@ -3,7 +3,7 @@
 > [!NOTE]
 > La documentación en inglés ([`README.md`](../../../README.md), [`CONTRIBUTING.md`](../../../CONTRIBUTING.md) y
 > [`docs/README.md`](../../README.md)) es **la referencia oficial**. Esta guía solo recoge las instrucciones
-> estables de instalación y compilación (sincronizada con el commit `aa2988cc`). Para el estado del proyecto, que
+> estables de instalación y compilación (sincronizada con el commit `561b65a8`). Para el estado del proyecto, que
 > cambia a diario, consulte el [`README.md`](../../../README.md).
 
 ## Qué es Leonida
@@ -26,10 +26,8 @@ El proyecto está en una fase inicial: **el juego todavía no arranca**.
 
 - **Su propia copia** del paquete de Xbox Series, versión `1.0.2.1`: la carpeta que contiene `MicrosoftGame.Config`
   y los archivos `.rpf`, como ficheros legibles en el disco.
-- **Windows 10/11 x64**, con unos **350 GB libres** para una compilación completa. Los archivos de trabajo pueden
-  ir a otra unidad con `--work`; más abajo se explica cómo omitir la exportación de recursos y usar unos 30 GB.
 - **Windows 10/11 x64**, con unos **400 GB libres** para los archivos de trabajo. Pueden ir a otra unidad con
-  `--work`.
+  `--work`; más abajo se explica cómo omitir la exportación de recursos y usar unos 30 GB.
 - [Python 3.12+](https://www.python.org/downloads/) (marque «Add python.exe to PATH» durante la instalación).
 - [SDK de .NET 8](https://dotnet.microsoft.com/download/dotnet/8.0).
 - [SDK de Vulkan](https://vulkan.lunarg.com/) (`spirv-as`, `spirv-val` y `vulkaninfo`).
@@ -76,8 +74,8 @@ empezar comprueba los requisitos y el espacio libre, y enumera de una vez todo l
 
 ### Si dispone de poco espacio
 
-Los 350 GB corresponden a la compilación completa. Puede omitir la exportación de recursos con
-`--stages check,shaders,runtime`, que necesita unos **30 GB**. La etapa `assets` (unos 300 GB) sirve para las
+Los 400 GB corresponden a la compilación completa. Puede omitir la exportación de recursos con
+`--stages check,shaders,runtime`, que necesita unos **30 GB**. La etapa `assets` (unos 370 GB) sirve para las
 herramientas de recursos; `--wav` añade varias veces el tamaño de los archivos Ogg Opus. La comprobación previa
 ofrece la alternativa sin `assets` cuando esa etapa no cabe. Puede situar tanto `--work` como `--out` en otra
 unidad.
@@ -85,9 +83,8 @@ unidad.
 El runtime accede al paquete en su ubicación original. Si la unidad del paquete es de solo lectura, use
 `gta6rt --overlay <carpeta con permisos de escritura>`: `--overlay` es una opción de `gta6rt`.
 
-Conserve los archivos `.s` de `work/shaders/dxbc/disasm`: borrarlos junto con
-`work/shaders/spirv/index.json` puede hacer que la etapa de shaders parezca terminada con cero shaders. Si la
-etapa necesita vaciar `disasm`, rechazará esa carpeta cuando sea un enlace simbólico.
+Conserve los archivos `.s` de `work/shaders/dxbc/disasm`: la siguiente ejecución los compara con la lista de `disasm.done` y vuelve a desensamblar los que faltan (todos los de una carpeta cuyo `disasm.done` sea anterior a esa lista) y después traduce todos los shaders de nuevo. Borrarlos junto con `work/shaders/spirv/index.json` puede hacer que la etapa de shaders parezca terminada con cero shaders.
+Si la etapa necesita vaciar `disasm`, rechazará esa carpeta cuando sea un enlace simbólico.
 
 ### Desde un terminal (`make_game.py`)
 

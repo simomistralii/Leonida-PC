@@ -153,6 +153,11 @@ def folder_file_mode(directory: str) -> int:
 
 
 def write_file(path: str, data: bytes) -> None:
+    """Publish one buffer using the same staged writer as multipart WAV output."""
+    _write_file_parts(path, (data,))
+
+
+def _write_file_parts(path: str, parts: tuple[bytes | memoryview, ...]) -> None:
     """Write under a private temporary name and rename into place: a stopped run or a full disk never leaves a
     short file under the final name, where a later run would keep it. The staging file is created in the
     destination directory (the same volume), so concurrent writers each publish a complete file (last wins)
@@ -163,7 +168,8 @@ def write_file(path: str, data: bytes) -> None:
     try:
         with tempfile.NamedTemporaryFile(mode="wb", dir=parent, prefix=".awc-", suffix=".tmp", delete=False) as f:
             tmp_path = f.name
-            f.write(data)
+            for part in parts:
+                f.write(part)
         # NamedTemporaryFile creates 0600; give the staged file the mode of the file it replaces, or a new file's.
         os.chmod(tmp_path, published_mode(out_path) if os.path.exists(out_path) else folder_file_mode(parent))
         os.replace(tmp_path, out_path)
@@ -180,7 +186,10 @@ def write_file(path: str, data: bytes) -> None:
         raise
 
 
-def write_wav(path: str, pcm: bytes, rate: int, channels: int, float32: bool = False) -> None:
+def write_wav(path: str, pcm: bytes | memoryview, rate: int, channels: int, float32: bool = False) -> None:
+    # A typed or multidimensional view's len() counts elements, not bytes. Flatten the contiguous buffer
+    # without copying before sizing the RIFF/data chunks and the float sample count.
+    pcm = memoryview(pcm).cast("B")
     bits = 32 if float32 else 16
     block_align = channels * (bits // 8)
     fmt = struct.pack("<HHIIHH", 3 if float32 else 1, channels, rate, rate * block_align, block_align, bits)
@@ -189,7 +198,8 @@ def write_wav(path: str, pcm: bytes, rate: int, channels: int, float32: bool = F
         fmt += struct.pack("<H", 0)  # WAVEFORMATEX.cbSize
         fact = struct.pack("<4sII", b"fact", 4, len(pcm) // block_align)
     header = b"WAVEfmt " + struct.pack("<I", len(fmt)) + fmt + fact + b"data" + struct.pack("<I", len(pcm))
-    write_file(path, b"RIFF" + struct.pack("<I", len(header) + len(pcm)) + header + pcm)
+    header = b"RIFF" + struct.pack("<I", len(header) + len(pcm)) + header
+    _write_file_parts(path, (header, pcm))
 
 
 # ---- AWC ----
@@ -421,11 +431,11 @@ def export_bank(path: str, out_dir: str, pre_skip: int = OPUS_PRE_SKIP, cue_shee
                 continue
         if s["codec"] == 2 and s["channels"] in (1, 2) and size == s["samples"] * s["channels"] * 4:
             # codec 2: 32-bit float PCM (4 bytes per sample; values can exceed +-1, e.g. impulse responses)
-            write_wav(os.path.join(od, stem + ".wav"), d[at:at + size], s["rate"], s["channels"], True)
+            write_wav(os.path.join(od, stem + ".wav"), memoryview(d)[at:at + size], s["rate"], s["channels"], True)
             counts["pcm"] += 1
             continue
         if s["codec"] == 0 and s["channels"] in (1, 2) and size == s["samples"] * s["channels"] * 2:
-            write_wav(os.path.join(od, stem + ".wav"), d[at:at + size], s["rate"], s["channels"])
+            write_wav(os.path.join(od, stem + ".wav"), memoryview(d)[at:at + size], s["rate"], s["channels"])
             counts["pcm"] += 1
             continue
         counts["other"] += 1

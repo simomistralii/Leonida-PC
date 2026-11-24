@@ -7,7 +7,8 @@ Reads timecycle_modifier_data and timecycle_keyframe_data XML documents from an 
 archive (via gamedata_index.ArchiveSource), a carve directory (DirectorySource), or
 plain .xml files, and prints an aggregate JSON summary of the (a, b) number pairs in
 plain modifiers: counts, ranges, RGB triplet b-equality, out-of-[0,1] variables, and
-per-variable b constancy.
+per-variable b constancy. Modifier patterns compare the parsed values to 0 and 1
+without rounding; `distinct_round6` is a separate distribution statistic.
 
 Outputs aggregate counts, ranges, and schema variable names only — never modifier
 names, attribute values, or raw XML. Standard library only.
@@ -48,6 +49,8 @@ def _iter_source_docs(source) -> list[tuple[str, bytes]]:
                 if gi.stream_kind(nxt, rows[j]) in ("decl", "bink2", "rbf0", "psin", "other", "binary"):
                     break
                 blob += nxt
+                if not root:  # the opening name or its delimiter may span streams
+                    root = gi.xml_root(blob)
                 j += 1
             if root in TARGET_ROOTS:
                 docs.append((root, blob))
@@ -143,7 +146,7 @@ def summarize_documents(docs: list[tuple[str, bytes]]) -> dict:
                 bs_.append(b)
                 by_var[ch.tag].append((a, b))
                 mod_vars[ch.tag] = (a, b)
-                mod_bs.add(round(b, 6))
+                mod_bs.add(b)
                 if b == 0.0:
                     var_docs_b0[ch.tag].add(doc_idx)
                     local_var_bs[ch.tag].add(0.0)
@@ -282,6 +285,19 @@ def main(argv: list[str] | None = None) -> int:
                 ap.error(f"--out would overwrite carve index: {args.out}")
 
     try:
+        if args.out:
+            for p in args.paths:
+                if not os.path.isdir(p):
+                    continue
+                # Directory arguments also own the XML files or carved chunks
+                # read below. A report must not replace one of those sources.
+                carved = os.path.isfile(os.path.join(p, "index.json"))
+                extensions = (".bin", ".bk2") if carved else (".xml",)
+                with os.scandir(p) as entries:
+                    for entry in entries:
+                        if (entry.name.lower().endswith(extensions) and entry.is_file()
+                                and same_report_path(args.out, entry.path)):
+                            ap.error(f"--out would overwrite input: {args.out}")
         docs = load_documents(args.paths)
         summary = summarize_documents(docs)
         if args.out:

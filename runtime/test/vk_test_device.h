@@ -123,6 +123,8 @@ public:
     leonida::SubgroupSizeCaps subgroup;
     bool custom_border_color = false;  // VK_EXT_custom_border_color and customBorderColors enabled
     bool custom_border_color_without_format = false;
+    // VK_EXT_external_memory_host is enabled when non-zero: its minImportedHostPointerAlignment.
+    VkDeviceSize host_pointer_alignment = 0;
 
     Device() = default;
     Device(const Device&) = delete;
@@ -548,6 +550,16 @@ public:
             *v13_.next() = &custom_border;
         }
 
+        // VK_EXT_external_memory_host where the device has it (OpenExistingHeapFromAddress).
+        for (const auto& extension : extensions) {
+            if (std::strcmp(extension.extensionName, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME) != 0) continue;
+            VkPhysicalDeviceExternalMemoryHostPropertiesEXT host_memory{
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
+            VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &host_memory};
+            instance_fn<PFN_vkGetPhysicalDeviceProperties2>("vkGetPhysicalDeviceProperties2")(physical, &properties);
+            host_pointer_alignment = host_memory.minImportedHostPointerAlignment;
+        }
+
         VkDeviceCreateInfo device_info{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &enable12};
         device_info.queueCreateInfoCount = std::uint32_t(queue_infos.size());
         device_info.pQueueCreateInfos = queue_infos.data();
@@ -563,6 +575,7 @@ public:
         if (vertex_attribute_divisor) device_extensions.push_back(divisor_extension);
         if (conditional_rendering) device_extensions.push_back(conditional_extension);
         if (host_image_copy) device_extensions.push_back(host_image_copy_name);
+        if (host_pointer_alignment) device_extensions.push_back(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
         const char* swapchain = "VK_KHR_swapchain";
         if (presentation) device_extensions.push_back(swapchain);
 #if defined(VK_KHR_swapchain_maintenance1)

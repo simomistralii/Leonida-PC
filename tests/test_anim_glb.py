@@ -695,6 +695,50 @@ class ExportTest(unittest.TestCase):
         self.assertIn(report, r.stderr)
         self.assertEqual(r.stdout, "")
 
+    def test_failed_report_write_preserves_existing_report(self):
+        import contextlib
+        import io
+
+        out = os.path.join(self.tmp.name, "out.glb")
+        report = os.path.join(self.tmp.name, "kept_report.json")
+        old_text = '{"previous": true}\n'
+        with open(report, "w", encoding="utf-8", newline="\n") as f:
+            f.write(old_text)
+
+        real_named_temp = tempfile.NamedTemporaryFile
+        real_replace = os.replace
+
+        def failing_temp(*args, **kwargs):
+            handle = real_named_temp(*args, **kwargs)
+            if kwargs.get("prefix") == ".anim_glb-":
+                def fail_write(data):
+                    handle.file.write(data[:4])
+                    raise OSError(28, "No space left on device")
+
+                handle.write = fail_write
+            return handle
+
+        def failing_replace(src, dst, *args, **kwargs):
+            if dst == report:
+                raise PermissionError(13, "Permission denied")
+            return real_replace(src, dst, *args, **kwargs)
+
+        for label, patch_ctx in (
+            ("write", patch.object(anim_glb.tempfile, "NamedTemporaryFile", side_effect=failing_temp)),
+            ("replace", patch.object(anim_glb.os, "replace", side_effect=failing_replace)),
+        ):
+            with self.subTest(label=label), patch_ctx:
+                err, so = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stderr(err), contextlib.redirect_stdout(so):
+                    rc = anim_glb.main([self.packs, out, "--skeleton", hex(self.offsets[0]),
+                                        "--part", hex(self.offsets[1]), "--report", report])
+                self.assertEqual(rc, 2)
+                self.assertIn("cannot write report", err.getvalue())
+                self.assertEqual(so.getvalue(), "")
+                with open(report, encoding="utf-8") as f:
+                    self.assertEqual(f.read(), old_text)
+                self.assertFalse([n for n in os.listdir(self.tmp.name) if n.startswith(".anim_glb-")])
+
     def test_a_bad_offset_is_one_error_line(self):
         r = self.run_tool(self.packs, os.path.join(self.tmp.name, "x.glb"), "--skeleton", "0x20", "--part", "0x20")
         self.assertEqual(r.returncode, 2)

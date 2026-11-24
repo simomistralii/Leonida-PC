@@ -20,9 +20,12 @@ class FirstLookShimReportTest(unittest.TestCase):
             root = Path(tmp)
             # Every tool first_look.ps1 runs: a missing one fails its step, and the test's stand-in loader (an alias)
             # leaves that exit code in $LASTEXITCODE for the script's exit. (gdk_runtime_calls since round 43,
-            # find_hash_lookup for mods, exe_checklist for the notes to confirm.)
+            # find_hash_lookup for mods, exe_checklist for the notes to confirm.) gdk_runtime_calls, find_hash_lookup
+            # and exe_checklist import tools/report_paths.py for the shared output-overwrite guard, so the copy needs
+            # it too or each tool stops at import with ModuleNotFoundError.
             for name in ("scripts/first_look.ps1", "tools/pe_inspect.py", "tools/gdk_runtime_calls.py",
-                         "tools/gdk_runtime_classes.json", "tools/find_hash_lookup.py", "tools/exe_checklist.py"):
+                         "tools/gdk_runtime_classes.json", "tools/find_hash_lookup.py", "tools/exe_checklist.py",
+                         "tools/report_paths.py"):
                 (root / name).parent.mkdir(exist_ok=True)
                 shutil.copyfile(source / name, root / name)
             loader = root / "runtime/build/gta6rt.exe"

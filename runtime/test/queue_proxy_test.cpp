@@ -396,9 +396,18 @@ int check_slots(const Backend& b) {
             EXPECT(qhits(slot) == before + 1 && xs::queue_slot_first_call_seen(slot));
         }
         for (unsigned slot = fence_slots; slot < xs::fence_proxy_table_size(); ++slot) {
+            if (slot == 12) continue;   // served: the completed value's address, below
             before = fhits(slot);
             EXPECT(as_hr(call_slot(fence.p, slot)) == E_NOTIMPL);
             EXPECT(fhits(slot) == before + 1 && xs::fence_slot_first_call_seen(slot));
+        }
+        // 12, past the public chain: the address of a word that holds the completed value, the same every call.
+        {
+            before = fhits(12);
+            const auto* word = reinterpret_cast<const volatile UINT64*>(call_slot(fence.p, 12));
+            EXPECT(word && reinterpret_cast<std::uintptr_t>(word) % 8 == 0 && fhits(12) == before + 1);
+            EXPECT(reinterpret_cast<const volatile UINT64*>(call_slot(fence.p, 12)) == word);
+            EXPECT(*word == fence->GetCompletedValue());
         }
         // The objects still work after refused calls.
         EXPECT(SUCCEEDED(queue->Signal(fence.p, 10)));

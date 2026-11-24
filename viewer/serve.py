@@ -165,10 +165,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 def port_number(text: str) -> int:
     """--port: 0-65535. Anything else used to reach socketserver and end in OverflowError."""
-    try:
-        value = int(text, 10)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"invalid int value: {text!r}") from None
+    if not (text.isascii() and text.isdigit()):
+        raise argparse.ArgumentTypeError(f"invalid int value: {text!r}")
+    value = int(text, 10)
     if not 0 <= value <= 65535:
         raise argparse.ArgumentTypeError("must be 0-65535")
     return value

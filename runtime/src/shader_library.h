@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cerrno>
 #include <cstdint>
 #include <cstdlib>
@@ -23,6 +24,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -37,22 +39,56 @@ class BitReader {
 public:
     explicit BitReader(std::span<const std::uint8_t> in) : in_(in) {}
 
-    std::uint32_t bits(int need) {
-        std::uint64_t value = buffer_;
-        while (count_ < need) {
-            if (pos_ >= in_.size()) {
-                failed_ = true;
-                return 0;
+    // Refill up to 56..63 buffered bits without failing at EOF; bits >= count_ stay zero.
+    void fill() {
+        if constexpr (std::endian::native == std::endian::little) {
+            if (count_ < 56 && in_.size() - pos_ >= 8) {
+                std::uint64_t next;
+                std::memcpy(&next, in_.data() + pos_, 8);
+                const int take = (63 - count_) >> 3;
+                const int next_count = count_ | 56;
+                buffer_ = (buffer_ | (next << count_)) & ((std::uint64_t(1) << next_count) - 1);
+                pos_ += std::size_t(take);
+                count_ = next_count;
+                return;
             }
-            value |= std::uint64_t(in_[pos_++]) << count_;
+        }
+        while (count_ <= 55 && pos_ < in_.size()) {
+            buffer_ |= std::uint64_t(in_[pos_++]) << count_;
             count_ += 8;
         }
-        buffer_ = value >> need;
+    }
+
+    std::uint32_t bits(int need) {
+        if (count_ < need) {
+            fill();
+            if (count_ < need) {
+                failed_ = true;
+                buffer_ = 0;
+                count_ = 0;
+                return 0;
+            }
+        }
+        const std::uint32_t out = std::uint32_t(buffer_ & ((std::uint64_t(1) << need) - 1));
+        buffer_ >>= need;
         count_ -= need;
-        return std::uint32_t(value & ((std::uint64_t(1) << need) - 1));
+        return out;
+    }
+
+    std::uint64_t peek() const { return buffer_; }
+    int available() const { return count_; }
+    void drop(int n) {
+        buffer_ >>= n;
+        count_ -= n;
+    }
+    void fail() {
+        failed_ = true;
+        buffer_ = 0;
+        count_ = 0;
     }
 
     void align() {
+        pos_ -= std::size_t(count_ / 8);
         buffer_ = 0;
         count_ = 0;
     }
@@ -63,7 +99,7 @@ public:
         return true;
     }
 
-    std::size_t position() const { return pos_; }
+    std::size_t position() const { return pos_ - std::size_t(count_ / 8); }
     bool failed() const { return failed_; }
 
 private:
@@ -75,39 +111,106 @@ private:
 };
 
 struct Huffman {
+    static constexpr int kFastBits = 9;
+    static constexpr std::size_t kFastSize = std::size_t(1) << kFastBits;
+
     std::array<std::int16_t, 16> count{};
     std::array<std::int16_t, 288> symbol{};
+    int fast_bits = 0;
+    std::uint32_t fast_mask = 0;
+    // Direct lookup for canonical codes of length 1..fast_bits, indexed by LSB-first bits.
+    // Entry encoding: (symbol << 4) | length; 0 means length > fast_bits or an unassigned code.
+    std::array<std::uint16_t, kFastSize> fast{};
 };
 
 // Canonical Huffman table from code lengths. Returns false for an over-subscribed set.
 inline bool build_huffman(Huffman& h, const std::int16_t* lengths, int n) {
+    static constexpr std::uint8_t kRev4[16] = {0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15};
     h.count.fill(0);
-    for (int i = 0; i < n; ++i) ++h.count[lengths[i]];
-    if (h.count[0] == n) return true;  // no codes: valid only if never used
+    int max_len = 0;
+    for (int i = 0; i < n; ++i) {
+        const int len = lengths[i];
+        ++h.count[len];
+        if (len > max_len) max_len = len;
+    }
+    if (h.count[0] == n) {  // no codes: valid only if never used
+        h.fast_bits = 0;
+        h.fast_mask = 0;
+        h.fast[0] = 0;
+        return true;
+    }
     int left = 1;
     for (int len = 1; len < 16; ++len) {
         left <<= 1;
         left -= h.count[len];
-        if (left < 0) return false;
+        if (left < 0) {
+            h.fast_bits = 0;
+            h.fast_mask = 0;
+            h.fast[0] = 0;
+            return false;
+        }
     }
     std::array<std::int16_t, 16> offsets{};
     for (int len = 1; len < 15; ++len) offsets[len + 1] = std::int16_t(offsets[len] + h.count[len]);
     for (int i = 0; i < n; ++i)
         if (lengths[i]) h.symbol[offsets[lengths[i]]++] = std::int16_t(i);
+    const int fast_bits = max_len < Huffman::kFastBits ? max_len : Huffman::kFastBits;
+    const std::size_t fast_size = std::size_t(1) << fast_bits;
+    h.fast_bits = fast_bits;
+    h.fast_mask = std::uint32_t(fast_size - 1);
+    std::fill_n(h.fast.data(), fast_size, std::uint16_t(0));
+    int code = 0;
+    int idx = 0;
+    for (int len = 1; len <= fast_bits; ++len) {
+        const int c = h.count[len];
+        const std::size_t step = std::size_t(1) << len;
+        const int shift = Huffman::kFastBits - len;
+        for (int k = 0; k < c; ++k) {
+            const std::uint16_t sym = std::uint16_t(h.symbol[idx++]);
+            const std::uint16_t packed = std::uint16_t((sym << 4) | std::uint16_t(len));
+            const std::uint32_t v = std::uint32_t(code) << shift;
+            const std::uint32_t rev =
+                (std::uint32_t(kRev4[v & 15u]) << 5) | (std::uint32_t(kRev4[(v >> 4) & 15u]) << 1) | (v >> 8);
+            for (std::size_t slot = rev; slot < fast_size; slot += step) h.fast[slot] = packed;
+            ++code;
+        }
+        code <<= 1;
+    }
     return true;
 }
 
 inline int decode(BitReader& in, const Huffman& h) {
+    if (in.available() < h.fast_bits) in.fill();
+    const std::uint16_t entry = h.fast[in.peek() & h.fast_mask];
+    if (entry != 0) {
+        const int len = int(entry & 0x0fu);
+        if (len > in.available()) {
+            in.fail();
+            return -1;
+        }
+        in.drop(len);
+        return int(entry >> 4);
+    }
+    if (in.available() < 15) in.fill();
+    const int avail = in.available();
+    std::uint64_t bits = in.peek();
     int code = 0, first = 0, index = 0;
     for (int len = 1; len < 16; ++len) {
-        code |= int(in.bits(1));
+        if (len > avail) {
+            in.fail();
+            return -1;
+        }
+        code |= int(bits & 1u);
+        bits >>= 1;
         const int count = h.count[len];
-        if (code - count < first) return h.symbol[index + (code - first)];
+        if (code - count < first) {
+            in.drop(len);
+            return h.symbol[index + (code - first)];
+        }
         index += count;
         first += count;
         first <<= 1;
         code <<= 1;
-        if (in.failed()) return -1;
     }
     return -1;
 }
@@ -705,7 +808,7 @@ struct ShaderEntry {
     // "workgroup" for a shader translated with --wave64-emulate: it uses no subgroup operation and is exact on any
     // subgroup size. Empty for a native translation.
     std::string wave64_exchange;
-    bool emulated() const { return !wave64_exchange.empty(); }
+    bool emulated() const { return wave64_exchange == "workgroup"; }
     std::vector<SignatureElement> input_signature;  // vertex shaders: what the input layout must feed
     std::vector<std::uint32_t> inputs;              // pixel shaders: input locations declared
     std::vector<std::uint32_t> outputs;             // pixel/vertex shaders: output locations written
@@ -722,34 +825,52 @@ struct ShaderEntry {
 
 class ShaderLibrary {
 public:
-    // Reads <dir>/index.json, then <dir>/fspx/index.json when it is there (make_game.py translates the FidelityFX
-    // DLL's FSPX programs into that folder; their entries are named "fspx/<name>"). Entries with neither
-    // fssm_sha256 nor fspx_code_sha256 cannot be found by content and are skipped. The fspx folder is optional: a
-    // missing or unreadable index there leaves the main one loaded.
+    // Reads <dir>/index.json, then the indexes of the programs make_game.py translates from the package's DLLs, each
+    // when it is there:
+    //   - <dir>/fspx/index.json, the FidelityFX DLL's FSPX programs, entries named "fspx/<name>" (docs/fspx.md);
+    //   - <dir>/bvh/index.json, XboxBvhBuilder.dll's FSSM programs, entries named "bvh/<name>" and found by
+    //     fssm_sha256 like the game's own shaders (docs/embedded_shaders.md).
+    // Entries with neither fssm_sha256 nor fspx_code_sha256 cannot be found by content and are skipped. Both folders
+    // are optional: a missing or unreadable index there leaves the main one, and the other folder's, loaded.
     bool load(const std::filesystem::path& dir, std::string* error = nullptr) {
         const auto fail = [&](const std::string& why) {
             if (error) *error = why;
             return false;
         };
         // Nothing here may throw into the D3D12 shim (only allocation can, and that is caught too).
+        std::filesystem::path folder;
         try {
-            if (!load_index(dir, "", fail)) return false;
+            // The modules are read when a pipeline needs them, later than this. A relative folder would follow the
+            // current directory, which the title may change (SetCurrentDirectory), so it is fixed here once.
+            std::error_code ec;
+            folder = std::filesystem::absolute(dir, ec);
+            if (ec) folder = dir;
+            if (!load_index(folder, "", fail)) return false;
         } catch (...) {
             return fail("index.json could not be read");
         }
-        try {
-            const auto ignore = [](const std::string&) { return false; };
-            if (std::ifstream(dir / "fspx/index.json", std::ios::binary)) load_index(dir / "fspx", "fspx/", ignore);
-        } catch (...) {
+        for (const char* sub_folder : {"fspx", "bvh"}) {
+            try {
+                const auto ignore = [](const std::string&) { return false; };
+                const std::filesystem::path sub = folder / sub_folder;
+                if (std::ifstream(sub / "index.json", std::ios::binary))
+                    load_index(sub, std::string(sub_folder) + "/", ignore);
+            } catch (...) {
+            }
         }
         return true;
     }
 
     bool loaded() const { return !dir_.empty(); }
+    // The folder load() read, made absolute; empty before.
+    const std::filesystem::path& directory() const { return dir_; }
     std::size_t size() const { return count_; }
     // Entries loaded from <dir>/fspx/index.json. A corpus of RPF containers never reaches these: their programs
     // come from FidelityFX DLLs, so callers comparing reached entries with size() must leave them out.
     std::size_t fspx_size() const { return fspx_count_; }
+    // Entries loaded from <dir>/bvh/index.json. No RPF container reaches these either: XboxBvhBuilder.dll passes
+    // their containers itself.
+    std::size_t bvh_size() const { return bvh_count_; }
 
     // The first entry for this program. Two containers can hold the same FSSM program with different input
     // signatures; `candidates` returns all of them.
@@ -773,8 +894,7 @@ public:
     //   - FSPX with its kind-0 entry (a container or a bare payload): by fspx_code_sha256, then only the entries
     //     whose fspx_state_sha256 is the SHA-256 of that kind-0 entry;
     //   - a bare kind-6 program, which comes without kind 0: by fspx_code_sha256 when all those entries have the
-    //     same module; when their modules differ the program is ambiguous, the result is empty and `ambiguous` is
-    //     set, instead of picking one of them.
+    //     same module and runtime metadata; otherwise the program is ambiguous and the result is empty.
     std::vector<const ShaderEntry*> program_candidates(std::string_view stage, const ComputeProgram& program,
                                                        bool* ambiguous = nullptr) const {
         if (ambiguous) *ambiguous = false;
@@ -789,8 +909,13 @@ public:
         }
         if (all.size() > 1) {
             const auto first = spirv(*all.front());
+            const auto runtime_metadata = [](const ShaderEntry& e) {
+                return std::tie(e.binding_count, e.push_constant_bytes, e.local_size, e.lds_bytes, e.uses_code_base,
+                                e.wave64, e.subgroup_size, e.wave64_exchange, e.literal_samplers);
+            };
             for (std::size_t i = 1; i < all.size(); ++i) {
-                if (first.empty() || spirv(*all[i]) != first) {
+                if (first.empty() || runtime_metadata(*all[i]) != runtime_metadata(*all.front()) ||
+                    spirv(*all[i]) != first) {
                     if (ambiguous) *ambiguous = true;
                     return {};
                 }
@@ -852,6 +977,7 @@ private:
             fspx_entries_.clear();
             count_ = 0;
             fspx_count_ = 0;
+            bvh_count_ = 0;
         }
         for (const auto& [name, meta] : root.object) {
             const Json* hash = meta.find("fssm_sha256");
@@ -916,6 +1042,7 @@ private:
             if (by_fspx) fspx_entries_[{e.stage, e.fspx_code_sha256}].push_back(e);
             if (by_fssm) entries_[{e.stage, e.fssm_sha256}].push_back(std::move(e));
             if (by_fspx && prefix == "fspx/") ++fspx_count_;
+            if (prefix == "bvh/") ++bvh_count_;
             ++count_;
         }
         return true;
@@ -924,6 +1051,7 @@ private:
     std::filesystem::path dir_;
     std::size_t count_ = 0;
     std::size_t fspx_count_ = 0;
+    std::size_t bvh_count_ = 0;
     // Entries by (stage, fssm_sha256) and by (stage, fspx_code_sha256), in index order.
     Entries entries_;
     Entries fspx_entries_;

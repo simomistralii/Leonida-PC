@@ -5,8 +5,11 @@
 Every input is written here by hand (Markdown tables, JUnit XML, a CTest log, a fake work folder whose shader names
 are sentinels). No game files, no GPU, no network: the GitHub path is fed synthetic gh output.
 """
+import contextlib
+import io
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
 import tempfile
@@ -190,6 +193,20 @@ class Freshness(unittest.TestCase):
         got = self.collect(self.base(pd.file_digest("tests/test_progress_dashboard.py"), "0" * 16))
         self.assertEqual(got["test_progress_dashboard.py"], ("partial", "revalidation_required"))
 
+    def test_changed_shader_helper_needs_revalidation(self):
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(pd, "ROOT", root):
+            for directory in ("tools", "scripts", "runtime/test/shaders", "tests"):
+                Path(root, directory).mkdir(parents=True)
+            test = "tests/test_progress_dashboard.py"
+            Path(root, test).touch()
+            helper = Path(root, "runtime/test/shaders/compute_fixture.py")
+            helper.write_bytes(b"shift = 0\n")
+            cached = self.base(pd.file_digest(test), pd.code_digest())
+            self.assertEqual(self.collect(cached)["test_progress_dashboard.py"], ("verified", "current"))
+
+            helper.write_bytes(b"shift = 1\n")
+            self.assertEqual(self.collect(cached)["test_progress_dashboard.py"], ("partial", "revalidation_required"))
+
     def test_code_edited_during_the_run_is_never_current(self):
         got = self.collect(self.base(pd.file_digest("tests/test_progress_dashboard.py"), None))
         self.assertEqual(got["test_progress_dashboard.py"], ("verified", "unknown"))
@@ -230,6 +247,32 @@ class Freshness(unittest.TestCase):
         })
         metric = next(m for m in col.metrics if m["id"] == "runtime.current")
         self.assertEqual((metric["numerator"], metric["denominator"]), (2, 6))
+
+
+    def test_local_ctest_junit_replaces_log_and_keeps_independent_run(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(pd, "ROOT", tmp), \
+                mock.patch.object(pd, "last_commit_time", return_value=0):
+            log = Path(tmp, "runtime/build/Testing/Temporary/LastTest.log")
+            log.parent.mkdir(parents=True)
+            log.write_text("1/1 Test: probe\nTest Passed.\n", encoding="utf-8")
+            local = Path(tmp, "local.xml")
+            local.write_text('<testsuite disabled="0" hostname="host"><testcase name="probe">'
+                             '<skipped/></testcase></testsuite>', encoding="utf-8")
+            other = Path(tmp, "other.xml")
+            other.write_text('<testsuites><testsuite><testcase name="probe"/></testsuite></testsuites>', encoding="utf-8")
+            col = pd.Collector()
+            pd.collect_ctest(col, SimpleNamespace(ctest_junit=str(local), junit=[str(local), str(other)]))
+            self.assertEqual([(c["group"], c["status"]) for c in col.components],
+                             [("ctest", "unknown"), ("junit:other.xml", "verified")])
+            metric = next(m for m in col.metrics if m["id"] == "runtime.current")
+            self.assertEqual((metric["numerator"], metric["denominator"]), (1, 2))
+
+            for path, status in [(other, "invalid"), (Path(tmp, "absent.xml"), "missing")]:
+                with self.subTest(status=status):
+                    col = pd.Collector()
+                    pd.collect_ctest(col, SimpleNamespace(ctest_junit=str(path), junit=[]))
+                    self.assertEqual(col.components, [])
+                    self.assertEqual([(s["id"], s["status"]) for s in col.sources], [("ctest_junit", status)])
 
 
 class GpuLog(unittest.TestCase):
@@ -424,6 +467,28 @@ class Scrub(unittest.TestCase):
 
 
 class Outputs(unittest.TestCase):
+    def test_login_without_github_is_an_argument_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "out")
+            cmd = [sys.executable, "-I", TOOL, "--out", out, "--login", "fixture-reviewer"]
+            result = subprocess.run(cmd, capture_output=True, cwd=ROOT, timeout=120)
+            self.assertEqual(result.returncode, 2, result.stderr.decode("utf-8", "replace"))
+            self.assertIn(b"--login requires --github", result.stderr)
+            self.assertFalse(os.path.exists(out))
+
+    def test_nonpositive_test_options_are_argument_errors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "out")
+            for option in ("--jobs", "--test-timeout"):
+                for value in ("0", "-1"):
+                    with self.subTest(option=option, value=value):
+                        cmd = [sys.executable, "-I", TOOL, "--out", out, "--run-tests",
+                               "--tests", "test_progress_dashboard", option, value]
+                        result = subprocess.run(cmd, capture_output=True, cwd=ROOT, timeout=120)
+                        self.assertEqual(result.returncode, 2, result.stderr.decode("utf-8", "replace"))
+                        self.assertIn(f"{option} must be a positive integer".encode("ascii"), result.stderr)
+                        self.assertFalse(os.path.exists(out))
+
     def test_invalid_test_filter_is_an_argument_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = os.path.join(tmp, "out")
@@ -499,6 +564,17 @@ class Outputs(unittest.TestCase):
     def test_script_element_cannot_be_closed_by_data(self):
         snap = {"schema": pd.SCHEMA, "x": "</script><b>"}
         self.assertNotIn("</script><b>", pd.render_page(snap, []))
+
+    def test_out_as_existing_file_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            file_out = os.path.join(tmp, "not_a_dir")
+            with open(file_out, "wb") as f:
+                f.write(b"x")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = pd.main(["--out", file_out])
+            self.assertEqual(rc, 2)
+            self.assertIn("is not a directory", err.getvalue())
 
 
 if __name__ == "__main__":

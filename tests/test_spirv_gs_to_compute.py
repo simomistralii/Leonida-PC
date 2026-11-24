@@ -128,6 +128,21 @@ OpFunctionEnd
 """
 
 
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_rewrite_preserves_unicode_separators_in_quoted_names(newline):
+    entry_name = "main\u2028capture"
+    debug_name = "geometry\u0085capture"
+    geometry = PHI_GS.replace('"main"', f'"{entry_name}"', 1).replace(
+        "OpDecorate %in_pos", f'OpName %main "{debug_name}"\nOpDecorate %in_pos', 1,
+    )
+
+    lowered, _ = gsc.rewrite(geometry.replace("\n", newline))
+
+    assert f'OpEntryPoint GLCompute %main "{entry_name}"' in lowered
+    assert f'OpName %main "{debug_name}"' in lowered
+    assert "OpEntryPoint Geometry" not in lowered
+
+
 @pytest.mark.skipif(not HAVE_SPIRV, reason="needs spirv-as and spirv-val on PATH")
 def test_phi_from_entry_block_names_the_split_block(tmp_path):
     out, _ = gsc.rewrite(PHI_GS)
