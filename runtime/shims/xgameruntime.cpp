@@ -627,7 +627,21 @@ HRESULT WINAPI QueryApiImpl(const GUID* class_id, REFIID interface_id, void** ou
     if (out) *out = nullptr;
     if (class_id && out) {
         HRESULT hr = S_OK;
-        if (query_served(*class_id, interface_id, out, &hr)) return hr;
+        if (query_served(*class_id, interface_id, out, &hr)) {
+            // A served class asked for an interface id it does not list (a newer IX*Impl version, say) is refused
+            // here, and the title's thunks then fail without a word: log it, as for a class that is not served.
+            if (hr == E_NOINTERFACE) {
+                char cls[40], iid[40];
+                print_guid(cls, class_id);
+                print_guid(iid, &interface_id);
+                static std::atomic<int> s_refused{0};
+                if (s_refused.fetch_add(1) < 256)   // one line per request, bounded
+                    std::fprintf(stderr,
+                                 "[rt] xgameruntime: QueryApiImpl(class %s, interface %s): class served, "
+                                 "interface not provided yet\n", cls, iid);
+            }
+            return hr;
+        }
     }
     char cls[40], iid[40];
     print_guid(cls, class_id);
