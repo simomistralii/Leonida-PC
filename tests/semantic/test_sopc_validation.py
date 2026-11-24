@@ -86,7 +86,11 @@ def _translate_and_validate_cs(name: str, asm_lines: list[str], threads: int = 6
             gc.collect()
         spirv_as = shutil.which("spirv-as")
         spirv_val = shutil.which("spirv-val")
-        assert spirv_as and spirv_val, "spirv-as and spirv-val must be on PATH"
+        if not (spirv_as and spirv_val):
+            # CI sets LEONIDA_REQUIRE_SPIRV_TOOLS=1 where it installs SPIRV-Tools, and there they must be found.
+            # Elsewhere only the spirv-val step is left out: the interpreter checks that follow still run.
+            assert os.environ.get("LEONIDA_REQUIRE_SPIRV_TOOLS") != "1", "spirv-as and spirv-val must be on PATH"
+            return spv
         spvasm = os.path.join(tmp, f"{name}.spvasm")
         spvbin = os.path.join(tmp, f"{name}.spv")
         with open(spvasm, "w", encoding="utf-8", newline="\n") as f:
