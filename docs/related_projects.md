@@ -60,6 +60,51 @@ code, tables or comments may be copied.**
 **What we use it for:** its measured facts only. Verify each one with Leonida's own census, a synthetic test or a
 public specification before relying on it. This repository never contains game data, so a fact XCL measured on a retail package is checked here with synthetic inputs or a contributor's own copy.
 
+## brcly/TuxBox
+
+<https://github.com/brcly/TuxBox>
+
+App-local console DLLs in Rust and C++ for an Xbox Series title under stock Proton or on Windows: `d3d12_xs.dll` with
+its own slot tables for the device, queues, command lists, descriptor heaps, fences and resources, and XMem, XG,
+DirectStorage (`xcrdapi.dll`), `xapu.dll`, `chad.dll`, AcpHal, GameInput and the GDK runtime. Each behaviour is
+checked by small guest programs that write JSON receipts. Its run records for this title (read at `0b80c58`): a first
+run that opened the title's own window, presented at 3840x2160 and stopped on device slot 25 for a depth descriptor
+with console format 118; a later run that reached the player-selection prompt and ended at a title breakpoint.
+
+**Licence:** **Apache-2.0**, which GPL-3.0 code may include with its notices kept. Only facts are taken here.
+
+**Not to bring over:** its `evidence/` folder holds screenshots of another retail title and receipts that carry
+hashes and offsets of game files.
+
+## californiaAlmonds/OpenScarlett
+
+<https://github.com/californiaAlmonds/OpenScarlett>
+
+C++20 shims for 33 console DLLs, D3D12.X proxies over a Vulkan backend, an RDNA2 shader lifter, DirectStorage, audio
+and GameInput (read at `87cdba6`). Its README's retail results (an unnamed title its own code comments identify as
+this one) come with no logs, list of stops or tests of that path in the tree, so they are leads, not measurements;
+one of them, that retail titles never open a window, is contradicted by TuxBox's record and by this repository's own
+boot stop 26 ([retail_boot_intel_host.md](retail_boot_intel_host.md)).
+
+**Licence:** **MIT**, compatible. Its slot tables include interface ids; as with any table, the facts are rebuilt
+here, not the table copied.
+
+## Kajcsi/G6Recomp
+
+<https://github.com/Kajcsi/G6Recomp>
+
+A native PE loader with an import policy, TLS index 0 for the executable and crash reports, the GDK runtime services
+(task queues, async, errors, threads, saves, users), read-only mounts with a DirectStorage factory and a stand-in
+GameInput; no D3D12 layer (read at `0b9e3c5`). Its own runs of this title stop on `XMemAllocatePhysicalPages`, this
+repository's boot stop 6. Its notes record facts it checked on the title's own files (the input block of
+`D3D12ConfigureVirtualMemoryX`, the DirectStorage factory calls before the first assert, the executable's single
+export `__XMemAllocationHooks__`) and, marked as reported, facts from xcl.
+
+**Licence:** **GPL-3.0**, compatible. Only facts are taken here.
+
+**What the three are used for:** [related_projects_gaps.md](related_projects_gaps.md), *Past boot stop 13*, lists
+what they record against this runtime, each fact with its project and file.
+
 ## rpatty-dev/PercyStar
 
 <https://github.com/rpatty-dev/PercyStar>
