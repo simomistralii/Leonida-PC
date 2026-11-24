@@ -1516,10 +1516,13 @@ int check_console_queue_layout() {
 
     // 35 ExecuteCommandListsX(count, lists, frame token, flags): ExecuteCommandLists (10) with every proxy in the
     // array replaced by its real object; flags past bits 0-1 submit nothing.
-    const std::uint64_t lists[2] = {word(fence), 0x1234};   // any proxy is unwrapped; a plain pointer goes as it is
+    // Any proxy in the array is unwrapped and any other object goes as it is. Every entry is read to tell which, as
+    // for slot 10, so the second one is a real address that is no proxy (a list the title made elsewhere).
+    std::uint64_t not_a_proxy = 0;
+    const std::uint64_t lists[2] = {word(fence), word(&not_a_proxy)};
     EXPECT(raw(queue, 35, 2, word(lists), 0x1111, 0) == 0 && q->calls[10] == 1 &&
            static_cast<std::uint32_t>(q->args[10][0]) == 2 && q->array[10][0] == real_fence &&
-           q->array[10][1] == 0x1234);
+           q->array[10][1] == word(&not_a_proxy));
     EXPECT(raw(queue, 35, 2, word(lists), 0x1112, 3) == 0 && q->calls[10] == 2);
     EXPECT(raw(queue, 35, 2, word(lists), 0x1113, 4) == 0 && q->calls[10] == 2);
     // 10 itself is the PC's ExecuteCommandLists, as in the PC layout.
