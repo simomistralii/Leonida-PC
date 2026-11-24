@@ -539,6 +539,9 @@ if(BUILD_TESTING)
     target_link_options(loader_test PRIVATE /OPT:NOREF ${GTA6RT_HOST_BASE})
     add_dependencies(loader_test gta6rt_tls_host)
     add_test(NAME loader COMMAND loader_test)
+    # Seconds on a desktop; a hang (an error dialog nobody answers, a lock) fails here with the PASS lines so far,
+    # rather than when the CI job reaches its time limit with no output.
+    set_tests_properties(loader PROPERTIES TIMEOUT 300)
     # PE loader tests use two locally built fixtures: a DLL with exports, imports and relocations, and an EXE that
     # imports it so Loader::load exercises recursive module loading. They contain no game data.
     set(TINY_FIXTURE_DIR "${CMAKE_CURRENT_BINARY_DIR}/fixtures/$<CONFIG>")

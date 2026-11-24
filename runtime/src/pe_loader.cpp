@@ -1720,11 +1720,18 @@ bool Loader::resolve_compat(const std::string& key, const std::string& dll, cons
         std::error_code ec;
         if (!std::filesystem::is_regular_file(candidate, ec)) return false;
         // The full path, with the compat folder on the DLL's own search path for its dependencies; never the game
-        // folder. Windows maps it, so its CRT, TLS and SEH work as for any host DLL.
+        // folder. Windows maps it, so its CRT, TLS and SEH work as for any host DLL. A file Windows cannot map
+        // ("Bad Image", 0xC000012F for one without an MZ header) would also raise the loader's error dialog, which
+        // waits for a click: a run nobody watches stops there. This thread's error mode turns the dialog off for the
+        // load (LoadLibraryExW's documentation); the exception below reports the failure instead.
+        DWORD error_mode = 0;
+        const bool quiet = SetThreadErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX, &error_mode) != 0;
         h = LoadLibraryExW(candidate.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+        const DWORD load_error = h ? ERROR_SUCCESS : GetLastError();
+        if (quiet) SetThreadErrorMode(error_mode, nullptr);
         if (!h)
             throw std::runtime_error("LEONIDA_COMPAT_DIR: " + path_utf8(candidate) + " exists but Windows could not " +
-                                     "load it (error " + std::to_string(GetLastError()) + ")");
+                                     "load it (error " + std::to_string(load_error) + ")");
         compat_modules_.emplace(key, h);
         std::fprintf(stderr, "[rt] compat: %s -> %s\n", dll.c_str(), path_utf8(candidate).c_str());
     }

@@ -1408,25 +1408,37 @@ void test_compat_modules() {
             std::filesystem::path bad = g_dir / "compat_bad";
             std::filesystem::create_directories(bad);
             write_image_as(std::vector<uint8_t>(64, 0x5A), "compat_bad/testcompat.dll");
+            DWORD thread_mode = 0;
+            SetThreadErrorMode(0, &thread_mode);   // the loader quiets the load itself, then puts this back
             try {
                 bind_with_compat(bad, "testcompat.dll", "Answer", bound);
                 failed(what, "the load succeeded");
             } catch (const std::exception& e) {
                 if (std::string(e.what()).find("LEONIDA_COMPAT_DIR") == std::string::npos) failed(what, e.what());
+                else if (GetThreadErrorMode() != 0) failed(what, "the thread's error mode was not restored");
                 else pass(what);
             }
+            SetThreadErrorMode(thread_mode, nullptr);
         }
     } catch (const std::exception& e) {
         failed("LEONIDA_COMPAT_DIR", e.what());
     }
-    // Loaders keep compat DLLs for the process lifetime; drop the references so the work folder can be removed.
+    // Loaders keep compat DLLs for the process lifetime; drop the references so the work folder can be removed. Each
+    // was loaded once per binding above, so a few releases are enough; a module Windows keeps loaded anyway (pinned)
+    // must not turn this into an endless loop.
     for (const auto& p : {dll_path, compat / "testshim.dll"})
-        while (HMODULE h = GetModuleHandleW(p.c_str())) FreeLibrary(h);
+        for (int release = 0; release < 8; ++release) {
+            HMODULE h = GetModuleHandleW(p.c_str());
+            if (!h || !FreeLibrary(h)) break;
+        }
 }
 
 }  // namespace
 
 int main() {
+    // No error dialog to wait on: a test image Windows refuses (test_compat_modules loads one on purpose) would
+    // otherwise stop an unattended run at a "Bad Image" box, as the other runtime tests also guard against.
+    SetErrorMode(GetErrorMode() | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
     g_dir = work_dir();
     std::error_code ec;
     std::filesystem::remove_all(g_dir, ec);
