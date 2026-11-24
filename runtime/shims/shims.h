@@ -20,7 +20,7 @@ struct Table {
 void* find(const std::string& dll_lower, const std::string& name);
 
 // Whether the shims own a whole module: the registry serves names from it and it is not a host system DLL (kernel32,
-// kernelbase, the CRTs, api-ms-* sets, vulkan-1) of which only a few functions are replaced. A title's
+// kernelbase, advapi32, the CRTs, api-ms-* sets, vulkan-1) of which only a few functions are replaced. A title's
 // LoadLibrary/GetModuleHandle of an owned module gets a pseudo-handle that GetProcAddress resolves through find()
 // (library_loader.cpp). `dll_lower` is a lower-case file name with ".dll".
 bool owns_dll(const std::string& dll_lower);

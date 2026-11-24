@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cctype>
+#include <cwchar>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -36,6 +37,8 @@
 
 #include "file_system.h"
 #include "shims.h"
+
+#pragma comment(lib, "advapi32.lib")   // the host registry, for every key but the console mode
 
 namespace rt::shims {
 bool xgameruntime_user_query(const GUID& class_id, REFIID interface_id, void** out, HRESULT* hr);
@@ -697,6 +700,107 @@ uint32_t __stdcall XSystemGetDeviceType() {
     }
     return static_cast<uint32_t>(XSystemDeviceType::XboxScarlettAnaconda);
 }
+
+// ---- The console mode in the registry ----
+//
+// The title does not call XSystemGetDeviceType: the GDK code linked into it reads the REG_DWORD `ConsoleMode` under
+// HKLM\Software\Microsoft\Windows NT\CurrentVersion\OEM with RegOpenKeyW or RegOpenKeyExW and RegQueryValueExW, and
+// takes a missing key for a PC (VIctory's xsystem.rs). xcl records the same read, in the thunk of the game's
+// XCurl.dll, and the values: 0x64 Series X, 0x60 Series S, 0x68 a Series devkit, 0x40, 0x50 and 0x58 Xbox One S, X
+// and devkit (facts only; docs/related_projects_gaps.md). Left to the host the read finds no such value on a PC, so
+// the title would take itself for a PC build. These functions answer that one key from the device type above,
+// LEONIDA_DEVICE_TYPE included, and hand every other key to the host's registry unchanged.
+namespace console_registry {
+
+constexpr wchar_t kOemKey[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\OEM";
+constexpr wchar_t kConsoleMode[] = L"ConsoleMode";
+
+// ConsoleMode for an XSystemDeviceType; 0 where the key is missing: a PC, and the two types no value is known for
+// (Unknown, the original Xbox One), which therefore read as a PC too.
+uint32_t console_mode_for(uint32_t device_type) {
+    switch (static_cast<XSystemDeviceType>(device_type)) {
+    case XSystemDeviceType::XboxOneS: return 0x40;
+    case XSystemDeviceType::XboxOneX: return 0x50;
+    case XSystemDeviceType::XboxOneXDevkit: return 0x58;
+    case XSystemDeviceType::XboxScarlettLockhart: return 0x60;
+    case XSystemDeviceType::XboxScarlettAnaconda: return 0x64;
+    case XSystemDeviceType::XboxScarlettDevkit: return 0x68;
+    default: return 0;
+    }
+}
+
+// The handle of the answered key: the address of this byte. The host registry never hands out such a value (its
+// handles are small kernel handle values, its predefined keys 0x80000000 and up, sign-extended).
+const char g_oem_key = 0;
+HKEY oem_key() { return reinterpret_cast<HKEY>(const_cast<char*>(&g_oem_key)); }
+
+// HKLM plus the OEM path, in any case, with or without a leading backslash.
+bool names_oem_key(HKEY root, const wchar_t* sub) {
+    if (root != HKEY_LOCAL_MACHINE || !sub) return false;
+    while (*sub == L'\\') ++sub;
+    return _wcsicmp(sub, kOemKey) == 0;
+}
+
+// An open of the OEM key or of a path under the answered key. `handled` false: not ours, the host answers.
+LSTATUS open_ours(HKEY root, const wchar_t* sub, HKEY* out, bool& handled) {
+    handled = true;
+    if (root == oem_key()) {   // the key has no subkeys; an empty path opens the key itself again
+        if (sub && *sub) return ERROR_FILE_NOT_FOUND;
+        if (!out) return ERROR_INVALID_PARAMETER;
+        *out = oem_key();
+        return ERROR_SUCCESS;
+    }
+    if (names_oem_key(root, sub)) {
+        if (!out) return ERROR_INVALID_PARAMETER;
+        if (console_mode_for(XSystemGetDeviceType()) == 0) return ERROR_FILE_NOT_FOUND;
+        *out = oem_key();
+        return ERROR_SUCCESS;
+    }
+    handled = false;
+    return ERROR_SUCCESS;
+}
+
+// LSTATUS RegOpenKeyW(HKEY key, LPCWSTR subKey, PHKEY result)
+LSTATUS APIENTRY open_key_w(HKEY root, LPCWSTR sub, PHKEY out) {
+    bool handled = false;
+    const LSTATUS status = open_ours(root, sub, out, handled);
+    return handled ? status : RegOpenKeyW(root, sub, out);
+}
+
+// LSTATUS RegOpenKeyExW(HKEY key, LPCWSTR subKey, DWORD options, REGSAM desired, PHKEY result)
+LSTATUS APIENTRY open_key_ex_w(HKEY root, LPCWSTR sub, DWORD options, REGSAM desired, PHKEY out) {
+    bool handled = false;
+    const LSTATUS status = open_ours(root, sub, out, handled);
+    return handled ? status : RegOpenKeyExW(root, sub, options, desired, out);
+}
+
+// LSTATUS RegQueryValueExW(HKEY key, LPCWSTR valueName, LPDWORD reserved, LPDWORD type, LPBYTE data, LPDWORD size),
+// with the documented answers: the size alone without a buffer, ERROR_MORE_DATA and the size for a short buffer,
+// ERROR_INVALID_PARAMETER for a buffer without a size or a reserved word that is not null.
+LSTATUS APIENTRY query_value_ex_w(HKEY key, LPCWSTR name, LPDWORD reserved, LPDWORD type, LPBYTE data,
+                                  LPDWORD size) {
+    if (key != oem_key()) return RegQueryValueExW(key, name, reserved, type, data, size);
+    if (reserved || (data && !size)) return ERROR_INVALID_PARAMETER;
+    const uint32_t mode = console_mode_for(XSystemGetDeviceType());
+    if (!name || _wcsicmp(name, kConsoleMode) != 0 || mode == 0) return ERROR_FILE_NOT_FOUND;
+    if (type) *type = REG_DWORD;
+    if (!size) return ERROR_SUCCESS;
+    const DWORD room = *size;
+    *size = sizeof(DWORD);
+    if (!data) return ERROR_SUCCESS;
+    if (room < sizeof(DWORD)) return ERROR_MORE_DATA;
+    std::memcpy(data, &mode, sizeof(mode));
+    static std::atomic<bool> s_logged{false};
+    if (!s_logged.exchange(true))
+        std::fprintf(stderr, "[rt] registry: HKLM\\%ls value %ls read as 0x%02x\n", kOemKey, kConsoleMode,
+                     static_cast<unsigned>(mode));
+    return ERROR_SUCCESS;
+}
+
+// LSTATUS RegCloseKey(HKEY key)
+LSTATUS APIENTRY close_key(HKEY key) { return key == oem_key() ? ERROR_SUCCESS : RegCloseKey(key); }
+
+}  // namespace console_registry
 
 // HRESULT XSystemGetConsoleId(size_t consoleIdSize, char* consoleId, size_t* consoleIdUsed).
 // XSystemConsoleIdBytes is 39 (including the terminator). An offline PC has no console id, so this returns a
@@ -1427,4 +1531,25 @@ SHIM_TABLE(xgameruntime,
     XGR(XAsyncSchedule),
     XGR(XAsyncComplete),
     XGR(XAsyncGetResult),
+);
+
+// The registry functions the console-mode read can come through. VIctory serves RegOpenKeyW, RegOpenKeyExW,
+// RegQueryValueExW and RegCloseKey under advapi32.dll and the registry api sets; kernel32 and kernelbase export the
+// same Ex functions for code linked against them. The api-set names are the ones Windows defines for each function
+// (RegOpenKeyW is in the l2 sets); a name no module imports is never looked up.
+#define CONSOLE_REGISTRY_EX(dll)                                                                         \
+    {dll, "RegOpenKeyExW", reinterpret_cast<void*>(&console_registry::open_key_ex_w)},                   \
+    {dll, "RegQueryValueExW", reinterpret_cast<void*>(&console_registry::query_value_ex_w)},             \
+    {dll, "RegCloseKey", reinterpret_cast<void*>(&console_registry::close_key)}
+#define CONSOLE_REGISTRY_OPEN(dll) {dll, "RegOpenKeyW", reinterpret_cast<void*>(&console_registry::open_key_w)}
+
+SHIM_TABLE(console_registry,
+    CONSOLE_REGISTRY_OPEN("advapi32.dll"),
+    CONSOLE_REGISTRY_EX("advapi32.dll"),
+    CONSOLE_REGISTRY_EX("kernel32.dll"),
+    CONSOLE_REGISTRY_EX("kernelbase.dll"),
+    CONSOLE_REGISTRY_EX("api-ms-win-core-registry-l1-1-0.dll"),
+    CONSOLE_REGISTRY_EX("api-ms-win-core-registry-l1-1-1.dll"),
+    CONSOLE_REGISTRY_OPEN("api-ms-win-core-registry-l2-1-0.dll"),
+    CONSOLE_REGISTRY_OPEN("api-ms-win-core-registry-l2-2-0.dll"),
 );

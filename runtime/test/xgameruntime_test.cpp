@@ -43,6 +43,10 @@ Fn get(const char* name) {
 using InitFn = HRESULT(__stdcall*)();
 using UninitFn = void(__stdcall*)();
 using DeviceTypeFn = uint32_t(__stdcall*)();
+using RegOpenFn = LSTATUS(APIENTRY*)(HKEY, LPCWSTR, PHKEY);
+using RegOpenExFn = LSTATUS(APIENTRY*)(HKEY, LPCWSTR, DWORD, REGSAM, PHKEY);
+using RegQueryFn = LSTATUS(APIENTRY*)(HKEY, LPCWSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD);
+using RegCloseFn = LSTATUS(APIENTRY*)(HKEY);
 using ConsoleIdFn = HRESULT(__stdcall*)(size_t, char*, size_t*);
 using QueueCreateFn = HRESULT(__stdcall*)(XTaskQueueDispatchMode, XTaskQueueDispatchMode, XTaskQueueHandle*);
 using QueueCloseFn = void(__stdcall*)(XTaskQueueHandle);
@@ -955,6 +959,107 @@ int main() {
     check(init() == S_OK, "a second XGameRuntimeInitialize also returns S_OK (reference counted)");
 
     check(get<DeviceTypeFn>("XSystemGetDeviceType")() == 7, "XSystemGetDeviceType reports XboxScarlettAnaconda (7)");
+
+    // The device type as the title reads it: ConsoleMode under HKLM\...\OEM (xgameruntime.cpp, console_registry).
+    {
+        const wchar_t* const oem = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\OEM";
+        auto open = reinterpret_cast<RegOpenFn>(rt::shims::find("advapi32.dll", "RegOpenKeyW"));
+        auto open_ex = reinterpret_cast<RegOpenExFn>(rt::shims::find("advapi32.dll", "RegOpenKeyExW"));
+        auto query = reinterpret_cast<RegQueryFn>(rt::shims::find("advapi32.dll", "RegQueryValueExW"));
+        auto close = reinterpret_cast<RegCloseFn>(rt::shims::find("advapi32.dll", "RegCloseKey"));
+        check(open && open_ex && query && close &&
+                  rt::shims::find("api-ms-win-core-registry-l1-1-0.dll", "RegQueryValueExW") ==
+                      reinterpret_cast<void*>(query) &&
+                  rt::shims::find("api-ms-win-core-registry-l2-1-0.dll", "RegOpenKeyW") == reinterpret_cast<void*>(open) &&
+                  rt::shims::find("kernelbase.dll", "RegCloseKey") == reinterpret_cast<void*>(close),
+              "the registry reads are served under advapi32.dll, the registry api sets and kernelbase.dll");
+        check(!rt::shims::owns_dll("advapi32.dll"), "advapi32.dll stays a host module (only four names are replaced)");
+        if (open && open_ex && query && close) {
+            HKEY key = nullptr;
+            DWORD type = 0, mode = 0, size = sizeof(mode);
+            check(open(HKEY_LOCAL_MACHINE, oem, &key) == ERROR_SUCCESS && key != nullptr &&
+                      query(key, L"ConsoleMode", nullptr, &type, reinterpret_cast<BYTE*>(&mode), &size) ==
+                          ERROR_SUCCESS &&
+                      type == REG_DWORD && size == 4 && mode == 0x64,
+                  "RegOpenKeyW(HKLM\\...\\OEM) and RegQueryValueExW(ConsoleMode) read 0x64, Series X");
+            size = 0;
+            type = 0;
+            check(query(key, L"consolemode", nullptr, &type, nullptr, &size) == ERROR_SUCCESS && size == 4 &&
+                      type == REG_DWORD,
+                  "the value name is matched in any case, and a size query without a buffer answers 4");
+            BYTE one = 0xAB;
+            size = 1;
+            check(query(key, L"ConsoleMode", nullptr, nullptr, &one, &size) == ERROR_MORE_DATA && size == 4 &&
+                      one == 0xAB,
+                  "a 1-byte buffer gets ERROR_MORE_DATA and the size it needs");
+            DWORD reserved = 0;
+            size = sizeof(mode);
+            check(query(key, L"ConsoleMode", nullptr, nullptr, reinterpret_cast<BYTE*>(&mode), nullptr) ==
+                          ERROR_INVALID_PARAMETER &&
+                      query(key, L"ConsoleMode", &reserved, nullptr, reinterpret_cast<BYTE*>(&mode), &size) ==
+                          ERROR_INVALID_PARAMETER,
+                  "a buffer without a size, or a reserved word that is not null, is ERROR_INVALID_PARAMETER");
+            check(query(key, L"OEMID", nullptr, nullptr, nullptr, &size) == ERROR_FILE_NOT_FOUND &&
+                      query(key, nullptr, nullptr, nullptr, nullptr, &size) == ERROR_FILE_NOT_FOUND,
+                  "the key has no other value and no default value");
+            HKEY sub = nullptr, again = nullptr;
+            check(open_ex(key, L"Sub", 0, KEY_READ, &sub) == ERROR_FILE_NOT_FOUND &&
+                      open_ex(key, L"", 0, KEY_READ, &again) == ERROR_SUCCESS && again == key,
+                  "the key has no subkeys; an empty path opens it again");
+            check(close(key) == ERROR_SUCCESS, "RegCloseKey closes the answered key");
+            HKEY ex = nullptr;
+            mode = 0;
+            size = sizeof(mode);
+            check(open_ex(HKEY_LOCAL_MACHINE, L"\\SOFTWARE\\MICROSOFT\\WINDOWS NT\\CURRENTVERSION\\OEM", 0,
+                          KEY_READ | KEY_WOW64_64KEY, &ex) == ERROR_SUCCESS &&
+                      query(ex, L"ConsoleMode", nullptr, nullptr, reinterpret_cast<BYTE*>(&mode), &size) ==
+                          ERROR_SUCCESS &&
+                      mode == 0x64 && close(ex) == ERROR_SUCCESS,
+                  "RegOpenKeyExW finds the same key in upper case and with a leading backslash");
+            check(open(HKEY_LOCAL_MACHINE, oem, nullptr) == ERROR_INVALID_PARAMETER,
+                  "opening the key without a result pointer is ERROR_INVALID_PARAMETER");
+
+            // LEONIDA_DEVICE_TYPE moves the answer with XSystemGetDeviceType
+            const struct {
+                const char* type;
+                DWORD mode;   // 0: the key is missing
+            } kModes[] = {{"6", 0x60}, {"8", 0x68}, {"3", 0x40}, {"4", 0x50}, {"5", 0x58}, {"1", 0}, {"0", 0}, {"2", 0}};
+            bool all = true;
+            for (const auto& m : kModes) {
+                SetEnvironmentVariableA("LEONIDA_DEVICE_TYPE", m.type);
+                HKEY k = nullptr;
+                const LSTATUS opened = open(HKEY_LOCAL_MACHINE, oem, &k);
+                DWORD v = 0, n = sizeof(v);
+                const bool ok = m.mode == 0
+                                    ? opened == ERROR_FILE_NOT_FOUND
+                                    : opened == ERROR_SUCCESS &&
+                                          query(k, L"ConsoleMode", nullptr, nullptr, reinterpret_cast<BYTE*>(&v), &n) ==
+                                              ERROR_SUCCESS &&
+                                          v == m.mode && close(k) == ERROR_SUCCESS;
+                if (!ok) {
+                    std::printf("  LEONIDA_DEVICE_TYPE=%s: open %ld, ConsoleMode 0x%lx (expected 0x%lx)\n", m.type,
+                                static_cast<long>(opened), static_cast<unsigned long>(v),
+                                static_cast<unsigned long>(m.mode));
+                    all = false;
+                }
+            }
+            SetEnvironmentVariableA("LEONIDA_DEVICE_TYPE", nullptr);
+            check(all, "LEONIDA_DEVICE_TYPE 6/8/3/4/5 read 0x60/0x68/0x40/0x50/0x58; Pc, Unknown and XboxOne find no "
+                       "key");
+
+            // every other key is the host's
+            HKEY host = nullptr;
+            wchar_t build[32] = {};
+            DWORD build_size = sizeof(build), build_type = 0;
+            check(open_ex(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows NT\\CurrentVersion", 0, KEY_READ,
+                          &host) == ERROR_SUCCESS &&
+                      host != key &&
+                      query(host, L"CurrentBuildNumber", nullptr, &build_type, reinterpret_cast<BYTE*>(build),
+                            &build_size) == ERROR_SUCCESS &&
+                      build_type == REG_SZ && build[0] != L'\0' && close(host) == ERROR_SUCCESS,
+                  "another key goes to the host registry (CurrentVersion\\CurrentBuildNumber)");
+        }
+    }
 
     auto console_id = get<ConsoleIdFn>("XSystemGetConsoleId");
     char id[64] = {};
