@@ -39,11 +39,18 @@ def h2f(h):
     return struct.unpack("<e", struct.pack("<H", h & 0xFFFF))[0]
 
 
+def spirv_tools_required():
+    """CI sets LEONIDA_REQUIRE_SPIRV_TOOLS=1 where it installs SPIRV-Tools; there a missing tool is a failure."""
+    return os.environ.get("LEONIDA_REQUIRE_SPIRV_TOOLS") == "1"
+
+
 def validate_spirv(spv_text):
     spirv_as = shutil.which("spirv-as")
     spirv_val = shutil.which("spirv-val")
     if not spirv_as or not spirv_val:
-        raise AssertionError("spirv-as / spirv-val not found on PATH")
+        if spirv_tools_required():
+            raise AssertionError("spirv-as / spirv-val not found on PATH")
+        raise unittest.SkipTest("SPIRV-Tools (spirv-as, spirv-val) not installed")
     with tempfile.TemporaryDirectory() as d:
         asm_p = os.path.join(d, "s.spvasm")
         bin_p = os.path.join(d, "s.spv")
@@ -66,8 +73,11 @@ def validate_spirv(spv_text):
 
 
 def run_ps(lines, name="ps_unary_f16_val"):
+    """The words the shader writes to mrt0, run on the Python SPIR-V interpreter; the module is also validated
+    where SPIRV-Tools are installed, so the op_sel values are still checked where they are not."""
     spv = translate_lines(name, lines)
-    validate_spirv(spv)
+    if spirv_tools_required() or (shutil.which("spirv-as") and shutil.which("spirv-val")):
+        validate_spirv(spv)
     return mrt0_words(spv)
 
 

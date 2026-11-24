@@ -28,6 +28,14 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, "scripts", "check_no_game_data.py")
 
 
+def shown(path):
+    """The name the script prints for `path`: relative to the working directory, or `path` itself when it is on
+    another drive (on Windows the temporary folder can be on C: and the checkout on D:)."""
+    try:
+        return os.path.relpath(path)
+    except ValueError:
+        return path
+
 def pe_header(e_lfanew=0x80):
     head = bytearray(e_lfanew + 4)
     head[0:2] = b"MZ"
@@ -288,7 +296,7 @@ class CheckNoGameData(unittest.TestCase):
         # the other files are still scanned; a real match wins over the unreadable one
         rc, out, err = self.run_with_unreadable(locked, [locked, sibling, clean])
         self.assertEqual(rc, 1, out + err)
-        self.assertEqual(out.splitlines(), [f"{os.path.relpath(sibling)}: DDS texture"], out)
+        self.assertEqual(out.splitlines(), [f"{shown(sibling)}: DDS texture"], out)
         self.assertIn("cannot read", err)
         self.assertIn("1 file(s) start like game data", err)
         self.assertNotIn("Traceback", err)

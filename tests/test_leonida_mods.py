@@ -152,7 +152,9 @@ class ManagerTests(unittest.TestCase):
             game = Path(tmp, "game")
             port.mkdir()
             game.mkdir()
-            port.joinpath("gta6rt.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+            # the launcher runtime_executable() looks for: only gta6rt.exe on Windows, the script elsewhere
+            launcher = "gta6rt.exe" if os.name == "nt" else "gta6rt.sh"
+            port.joinpath(launcher).write_text("#!/bin/sh\n", encoding="utf-8")
             port.joinpath("game_path.txt").write_text(str(game) + "\n", encoding="utf-8")
             image = game / leonida_mods.EXPECTED_EXE
             image.write_bytes(b"MZ")
