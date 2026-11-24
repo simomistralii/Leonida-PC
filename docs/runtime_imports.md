@@ -540,7 +540,8 @@ therefore needs no module name beyond the `xgameruntime.dll` it already has, whi
 "Served" is the tool's answer for the runtime sources at that commit. The three that are not: `XAccessibilityImpl`
 (the speech-synthesizer slots 8-13, 15, 16 and 21 are referenced; slot 14 is not), `XAppCaptureImpl` (slot 5,
 `XAppCaptureTakeScreenshot`) and `XLauncherImpl` (slots 3-5: `XLaunchUri` and the two display timeout-deferral calls).
-Open pull requests serve them: #4235, #4307 and #4248. The slots of `XUserImpl`, `XStoreImpl` and `XGameSaveImpl` the
+Open pull requests serve them: #4235, #4307 and #4248. Since then `XAccessibilityImpl` and `XLauncherImpl` are served
+(`runtime/shims/xgameruntime_offline.cpp`, 2026-11-24); only `XAppCaptureImpl` is still not. The slots of `XUserImpl`, `XStoreImpl` and `XGameSaveImpl` the
 executable calls, and the argument counts the tool estimates from the registers, are in the report the tool writes.
 `XErrorImpl`, which `XCurl.dll` and `libHttpClient.GDK.dll` call, is not among the executable's classes.
 
