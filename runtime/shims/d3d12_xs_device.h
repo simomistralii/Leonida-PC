@@ -108,6 +108,15 @@ void set_placed_at_va_handler(PlacedAtVaHandler handler);
 using PlacedAtVaPagesHook = bool (*)(const void* va, std::size_t bytes);
 void set_placed_at_va_pages_hook(PlacedAtVaPagesHook hook);
 
+// Called by slot 14 for the console-extended CreateDescriptorHeap: the PC description followed by the title's address
+// and size at +0x10/+0x18 (issue #313). The Vulkan device registers rt::d3d12::create_console_descriptor_heap, which
+// reports that address as the heap start. A handler, not a direct call, because this file is also built into gta6rt
+// and test programs without the Vulkan device; with none registered (a PC device, the proxy mock tests) the heap is
+// created by the real device's CreateDescriptorHeap, as before slot 14 read the extension.
+using ConsoleDescriptorHeapHandler = HRESULT (*)(ID3D12Device* real, const D3D12_DESCRIPTOR_HEAP_DESC* desc,
+                                                 std::uint64_t address, std::uint64_t size, REFIID riid, void** out);
+void set_console_descriptor_heap_handler(ConsoleDescriptorHeapHandler handler);
+
 // True for slots the proxy handles itself rather than forwarding verbatim: IUnknown (0-2), 8 and 75 (queue
 // proxies), 9 (allocator proxies), 14, 31/34/35/45/46/50 (proxies unwrapped), 32 and 36 (fence proxies), 48/73 and
 // 78/79/80 (the Xbox slots above, at their configured indices), 62, 67 and 76. Slot 10 is intentionally false: the

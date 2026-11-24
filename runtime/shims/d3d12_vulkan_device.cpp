@@ -4987,6 +4987,14 @@ private:
     bool registered_ = false;            // added to the context, so removed from it on destruction
 };
 
+// rt::d3d12_xs::ConsoleDescriptorHeapHandler for create_console_descriptor_heap (Xbox device slot 14), which every
+// Vulkan device registers (Device's constructor) as it does create_buffer_at_host_address for slot 133.
+HRESULT console_descriptor_heap_handler(ID3D12Device* device, const D3D12_DESCRIPTOR_HEAP_DESC* desc,
+                                        std::uint64_t address, std::uint64_t size, REFIID riid, void** out) {
+    return create_console_descriptor_heap(device, desc, static_cast<D3D12_GPU_VIRTUAL_ADDRESS>(address), size, riid,
+                                          out);
+}
+
 // The Vulkan objects create_vulkan_device_standalone made, destroyed with the device.
 struct OwnedRuntime {
     PFN_vkDestroyDevice destroy_device = nullptr;
@@ -5008,6 +5016,8 @@ public:
         // standalone device gta6rt --run uses both come through here (found in review: registering only in
         // create_vulkan_device left the retail path without it).
         rt::d3d12_xs::set_placed_at_va_handler(&create_buffer_at_host_address);
+        // And slot 14's console-extended CreateDescriptorHeap (issue #313), the same way.
+        rt::d3d12_xs::set_console_descriptor_heap_handler(&console_descriptor_heap_handler);
         state_.info = info;
         queue_users_.resize(info.command_queues.size(), 0);
         compute_users_.resize(info.compute_queues.size(), 0);
@@ -5499,6 +5509,25 @@ public:
     leonida::VulkanContext& context() { return *state_.context; }
     const leonida::BindlessSet* bindless() const { return state_.bindless.get(); }
     const DeviceState& state() const { return state_; }
+
+    // The console-extended CreateDescriptorHeap (Xbox device slot 14, issue #313): the same checks and heap as
+    // CreateDescriptorHeap, with the title's address as the heap start. A member, because the heap needs this
+    // device's writable state and its identity (both private here).
+    HRESULT create_console_heap(const D3D12_DESCRIPTOR_HEAP_DESC& desc, std::uint64_t address, std::uint64_t size,
+                                REFIID riid, void** out) {
+        if ((desc.Flags & ~D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) || desc.NodeMask > 1 ||
+            ((desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) &&
+             (desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV || desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_DSV))) {
+            return E_INVALIDARG;
+        }
+        auto* heap = new DescriptorHeap(state_, desc, address, size);
+        heap->attach_device(identity());
+        if (!heap->ok()) {
+            heap->Release();
+            return E_OUTOFMEMORY;
+        }
+        return hand_out(heap, riid, out);
+    }
     IUnknown* holder() { return identity(); }
     bool bind_sampler(const leonida::gfx10::SamplerWords& words) { return state_.bind_sampler(words); }
     void own(const OwnedRuntime& owned) { owned_ = owned; }
@@ -9989,22 +10018,10 @@ HRESULT create_console_descriptor_heap(ID3D12Device* device, const D3D12_DESCRIP
     if (!device || !desc) return E_INVALIDARG;
     // No output: a capability check, as CreateDescriptorHeap does.
     if (!out) return S_FALSE;
-    if ((desc->Flags & ~D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) || desc->NodeMask > 1 ||
-        ((desc->Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) &&
-         (desc->Type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV || desc->Type == D3D12_DESCRIPTOR_HEAP_TYPE_DSV))) {
-        return E_INVALIDARG;
-    }
     ID3D12Device* real = rt::d3d12_xs::device_proxy_real_device(device);
     auto* d = Device::from<Device>(real ? real : device);
     if (!d) return E_INVALIDARG;
-
-    auto* heap = new DescriptorHeap(d->state(), *desc, console_address, console_size);
-    heap->attach_device(d->identity());
-    if (!heap->ok()) {
-        heap->Release();
-        return E_OUTOFMEMORY;
-    }
-    return hand_out(heap, riid, out);
+    return d->create_console_heap(*desc, console_address, console_size, riid, out);
 }
 
 std::filesystem::path configured_shader_directory(std::string* error, const std::filesystem::path& config) {
